@@ -5,7 +5,7 @@
 
 // IMPORTANTE: bumpear CACHE_NAME cada vez que cambia app.js o app.css —
 // el activate borra los caches viejos y fuerza re-descarga del bundle.
-const CACHE_NAME = 'neon-ni-v397';
+const CACHE_NAME = 'neon-ni-v398';
 // Rutas RELATIVAS (se resuelven contra la ubicación del SW) para que la app
 // funcione IGUAL en la subruta vieja (/ni-ventas/) y en la raíz del dominio nuevo
 // (neoninfinitosoftware.com) sin tocar nada. Sin esto, atar a /ni-ventas/ rompía
@@ -63,8 +63,8 @@ self.addEventListener('fetch', (event) => {
   // Solo caer al cache si la red falla (modo offline). Así un bugfix se
   // ve al primer refresh, no al segundo.
   // La landing pública de pedidos de corte (/corte/) también: si la abre alguien del equipo con la app instalada, que vea
-  // siempre la última versión.
-  if (url.origin === location.origin && (NETWORK_FIRST_ASSETS.some(p => url.pathname.endsWith(p)) || url.pathname.includes('/corte/'))) {
+  // siempre la última versión. Lo mismo el nesting de placas (/nesting/: página, motor y worker).
+  if (url.origin === location.origin && (NETWORK_FIRST_ASSETS.some(p => url.pathname.endsWith(p)) || url.pathname.includes('/corte/') || url.pathname.includes('/nesting/'))) {
     event.respondWith(
       // cache: 'reload' fuerza ir a la red ignorando el HTTP cache del navegador.
       // Sin esto, GitHub Pages servía la versión vieja de app.js hasta ~10 min

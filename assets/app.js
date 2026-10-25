@@ -9429,6 +9429,7 @@ function corteHerramientasHtml() {
       <input type="date" id="corte-cargar-fecha" value="${escapeHtml(STATE.corteCargarFecha || corteLunesReciente())}" style="${inpSt}">
       <button class="btn" data-corte-cargar-tanda style="font-size:12px;padding:5px 11px"${STATE._corteCargandoTanda ? ' disabled' : ''}>⬇ Cargar tanda</button>
       <button class="btn ghost" data-corte-sync-entrega style="font-size:12px;padding:5px 11px" title="Trae retira/envío de 'Servicio de cortes pedidos 2' (también corre solo cada hora)">↻ Entrega desde planilla</button>
+      <a class="btn ghost" href="nesting/" target="_blank" rel="noopener" style="font-size:12px;padding:5px 11px;text-decoration:none" title="Acomoda los archivos de Emma en placas de 244 × 122 y baja un DXF por placa (corte, calado y agujeros)">🧩 Nesting de placas</a>
     </div>`;
   if (!st.length) return tools;
   return tools + `<div style="border:1px solid #ef4444;background:color-mix(in srgb,#ef4444 8%,transparent);border-radius:12px;padding:12px 14px;margin:0 0 16px">

@@ -1,0 +1,804 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Nesting de placas · Neon Infinito</title>
+<link rel="icon" href="../assets/icon-192.png">
+<style>
+  :root {
+    --bg: #0e1014; --panel: #161920; --panel2: #1d212a; --borde: #2a303c; --fg: #e9ecf2; --mute: #a3abbb; --sutil: #707a8e;
+    --corte: #ff4d4d; --calado: #f2f2f2; --agujero: #4d8dff; --suelto: #ff9f1a; --ignorado: #4a5263;
+    --acento: #8b5cf6; --ok: #34d399; --aviso: #fbbf24; --error: #f87171;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--fg); }
+  body { font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-text-size-adjust: 100%; }
+  main { max-width: 1180px; margin: 0 auto; padding: 22px 16px 70px; }
+  h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -.01em; }
+  .sub { color: var(--mute); margin: 0 0 18px; max-width: 760px; }
+  section.card { background: var(--panel); border: 1px solid var(--borde); border-radius: 14px; padding: 16px; margin: 0 0 14px; }
+  .titulo { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin: 0 0 12px; }
+  .titulo h2 { font-size: 15px; margin: 0; }
+  .paso { font-size: 11px; font-weight: 800; color: var(--acento); letter-spacing: .07em; text-transform: uppercase; }
+  .mute { color: var(--mute); }
+  .sutil { color: var(--sutil); font-size: 12.5px; }
+  [hidden] { display: none !important; }
+  .drop { border: 2px dashed var(--borde); border-radius: 12px; padding: 24px 16px; text-align: center; cursor: pointer; transition: border-color .15s, background .15s; }
+  .drop:hover, .drop.sobre { border-color: var(--acento); background: color-mix(in srgb, var(--acento) 8%, transparent); }
+  .drop b { display: block; font-size: 15px; margin-bottom: 2px; }
+  button { font: inherit; border-radius: 9px; border: 1px solid var(--borde); background: var(--panel2); color: var(--fg); padding: 7px 14px; cursor: pointer; }
+  button:hover:not(:disabled) { border-color: var(--sutil); }
+  button.primario { background: var(--acento); border-color: var(--acento); color: #fff; font-weight: 700; }
+  button.primario:hover:not(:disabled) { filter: brightness(1.08); border-color: var(--acento); }
+  button.chico { padding: 3px 10px; font-size: 12.5px; }
+  button:disabled { opacity: .45; cursor: default; }
+  details.ayuda { margin: 12px 0 0; border: 1px solid var(--borde); border-radius: 10px; padding: 9px 12px; background: var(--panel2); }
+  details.ayuda summary { cursor: pointer; font-weight: 700; }
+  details.ayuda ol { margin: 8px 0 2px; padding-left: 20px; }
+  details.ayuda li { margin: 3px 0; }
+  .chip { display: inline-block; padding: 0 7px; border-radius: 6px; font-weight: 700; font-size: 12.5px; }
+  .c-corte { background: color-mix(in srgb, var(--corte) 22%, transparent); color: #ff8a8a; }
+  .c-calado { background: #3a3f4b; color: #fff; }
+  .c-agujero { background: color-mix(in srgb, var(--agujero) 25%, transparent); color: #9cbcff; }
+  .archivos { margin: 12px 0 0; display: grid; gap: 8px; }
+  .archivo { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; border: 1px solid var(--borde); border-radius: 10px; padding: 8px 12px; background: var(--panel2); }
+  .archivo .nom { font-weight: 700; word-break: break-all; }
+  .archivo .det { color: var(--mute); font-size: 13px; flex: 1; min-width: 200px; }
+  .archivo .err { color: var(--error); font-size: 13px; flex-basis: 100%; }
+  .archivo button { margin-left: auto; }
+  table.colores { border-collapse: collapse; width: 100%; font-size: 13px; }
+  table.colores td, table.colores th { padding: 6px 8px; border-top: 1px solid var(--borde); text-align: left; }
+  table.colores th { color: var(--sutil); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; border-top: 0; font-weight: 700; }
+  .muestra { width: 22px; height: 22px; border-radius: 6px; border: 1px solid #ffffff40; display: inline-block; vertical-align: middle; }
+  select, input[type=number] { font: inherit; background: var(--bg); color: var(--fg); border: 1px solid var(--borde); border-radius: 8px; padding: 5px 8px; }
+  input[type=number] { width: 92px; }
+  .avisos { margin: 10px 0 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+  .avisos li { border-left: 3px solid var(--aviso); background: color-mix(in srgb, var(--aviso) 8%, transparent); padding: 6px 10px; border-radius: 0 8px 8px 0; font-size: 13px; }
+  .avisos li.grave { border-color: var(--error); background: color-mix(in srgb, var(--error) 9%, transparent); }
+  .resumen { display: flex; flex-wrap: wrap; gap: 8px 22px; margin: 2px 0 6px; }
+  .dato b { font-size: 20px; font-variant-numeric: tabular-nums; display: block; line-height: 1.2; }
+  .dato span { color: var(--sutil); font-size: 12px; }
+  .vistas { display: grid; gap: 12px; margin: 12px 0 0; }
+  .vista { border: 1px solid var(--borde); border-radius: 10px; overflow: hidden; background: #0b0d11; }
+  .vista .cap { display: flex; gap: 10px; flex-wrap: wrap; align-items: baseline; padding: 7px 12px; font-size: 13px; border-bottom: 1px solid var(--borde); background: var(--panel2); }
+  .vista canvas { display: block; width: 100%; }
+  .leyenda { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12.5px; color: var(--mute); margin: 8px 0 0; }
+  .leyenda i { display: inline-block; width: 18px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 5px; }
+  .config { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px 16px; }
+  .config label { display: grid; gap: 4px; font-size: 12.5px; color: var(--mute); }
+  .config .fila { display: flex; align-items: center; gap: 6px; color: var(--fg); }
+  .check { display: flex !important; align-items: center; gap: 8px; color: var(--fg) !important; font-size: 13px !important; }
+  .acciones { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin: 14px 0 0; }
+  .barra { height: 6px; background: var(--panel2); border-radius: 4px; overflow: hidden; margin: 10px 0 0; }
+  .barra div { height: 100%; width: 0; background: var(--acento); transition: width .25s linear; }
+  .estado { font-size: 14px; margin: 0; }
+  .placas { display: grid; gap: 14px; margin: 14px 0 0; }
+  .placa .cap b { font-size: 14px; }
+  .placa .cap button { margin-left: auto; }
+  .nota { font-size: 12.5px; color: var(--sutil); margin: 8px 0 0; }
+  @media (max-width: 560px) { main { padding: 16px 12px 60px; } h1 { font-size: 19px; } .archivo button { margin-left: 0; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Nesting de placas</h1>
+  <p class="sub">Acomoda las piezas de los archivos de Emma en placas y baja un DXF por placa con tres capas: <span class="chip c-corte">CORTE</span> <span class="chip c-calado">CALADO</span> <span class="chip c-agujero">AGUJEROS</span>. Los archivos no se suben a ningún lado: todo se procesa en esta compu.</p>
+
+  <section class="card" id="sec-archivos">
+    <div class="titulo"><span class="paso">Paso 1</span><h2>Archivos</h2><span class="sutil">.ai o .pdf, todos del mismo material</span></div>
+    <div class="drop" id="drop" tabindex="0" role="button" aria-label="Elegir archivos">
+      <b>Arrastrá acá los archivos de Emma</b>
+      <span class="mute">o tocá para elegirlos</span>
+    </div>
+    <input type="file" id="inp" accept=".ai,.pdf,application/pdf,application/illustrator,application/postscript" multiple hidden>
+    <div class="archivos" id="lista-archivos"></div>
+    <details class="ayuda">
+      <summary>Cómo tiene que pasar los archivos Emma</summary>
+      <ol>
+        <li>Colores: <span class="chip c-corte">corte en rojo</span> (contorno de cada pieza y cortes de adentro), <span class="chip c-calado">calado en blanco</span> (el surco del neón) y <span class="chip c-agujero">agujeros en azul</span>. Puede ser trazo o relleno; el tono exacto no importa.</li>
+        <li>Todo adentro de la mesa de trabajo: <b>Objeto › Mesas de trabajo › Ajustar a los límites de la ilustración</b>. Si el dibujo pasa de 5,7 m, que use varias mesas de trabajo: se leen todas.</li>
+        <li>Guardar como <b>PDF</b>, o el <b>.ai</b> de siempre con "Crear archivo compatible con PDF" tildado (viene así).</li>
+        <li>Escala 1:1 en milímetros. Si hay textos, pasados a contornos (Texto › Crear contornos).</li>
+        <li>Un archivo por material (por ejemplo, "transparentes 47").</li>
+      </ol>
+    </details>
+  </section>
+
+  <section class="card" id="sec-colores" hidden>
+    <div class="titulo"><span class="paso">Paso 2</span><h2>Colores</h2><span class="sutil">qué es cada color que vino en los archivos</span></div>
+    <table class="colores"><thead><tr><th></th><th>Color</th><th>Aparece en</th><th>Es</th></tr></thead><tbody id="tabla-colores"></tbody></table>
+  </section>
+
+  <section class="card" id="sec-piezas" hidden>
+    <div class="titulo"><span class="paso">Paso 3</span><h2>Piezas</h2><span class="sutil">revisá que cada calado y agujero esté adentro de su pieza</span></div>
+    <div class="resumen" id="resumen-piezas"></div>
+    <ul class="avisos" id="avisos"></ul>
+    <div class="leyenda">
+      <span><i style="background:var(--corte)"></i>corte</span><span><i style="background:var(--calado)"></i>calado</span><span><i style="background:var(--agujero)"></i>agujeros</span><span><i style="background:var(--suelto)"></i>suelto (fuera de toda pieza, no se corta)</span><span><i style="background:var(--ignorado)"></i>ignorado</span>
+    </div>
+    <div class="vistas" id="vistas"></div>
+  </section>
+
+  <section class="card" id="sec-placa" hidden>
+    <div class="titulo"><span class="paso">Paso 4</span><h2>Placas</h2></div>
+    <div class="config">
+      <label>Largo de la placa (mm)<span class="fila"><input type="number" id="c-largo" min="100" step="1"></span></label>
+      <label>Ancho de la placa (mm)<span class="fila"><input type="number" id="c-ancho" min="100" step="1"></span></label>
+      <label>Separación entre piezas (mm)<span class="fila"><input type="number" id="c-sep" min="6.5" step="0.5"><span class="sutil">mín. 6,5 (fresa de 6)</span></span></label>
+      <label>Margen al borde (mm)<span class="fila"><input type="number" id="c-margen" min="5" max="8" step="0.5"><span class="sutil">entre 5 y 8</span></span></label>
+      <label>Girar las piezas cada<span class="fila"><select id="c-paso"><option value="5">5°</option><option value="10">10°</option><option value="15">15°</option><option value="45">45°</option><option value="90">90°</option></select></span></label>
+      <label>Tiempo de búsqueda<span class="fila"><select id="c-seg"><option value="10">10 s</option><option value="20">20 s</option><option value="40">40 s</option><option value="60">1 min</option></select></span></label>
+      <label class="check"><input type="checkbox" id="c-borde"> Borde de la placa en el DXF (capa PLACA)</label>
+    </div>
+    <div class="acciones">
+      <button class="primario" id="b-acomodar">Acomodar en placas</button>
+      <span class="sutil" id="cfg-nota"></span>
+    </div>
+  </section>
+
+  <section class="card" id="sec-resultado" hidden>
+    <div class="titulo"><span class="paso">Paso 5</span><h2>Resultado</h2></div>
+    <p class="estado" id="estado"></p>
+    <div class="barra" id="barra"><div></div></div>
+    <div class="acciones">
+      <button class="primario" id="b-zip" disabled>Descargar los DXF (ZIP)</button>
+      <button id="b-seguir" disabled>Seguir optimizando</button>
+      <button id="b-detener" disabled>Detener</button>
+    </div>
+    <p class="nota">Cada DXF tiene la placa en milímetros, con el origen abajo a la izquierda (largo en X, ancho en Y). Los agujeros redondos salen como círculos; lo demás, como polilíneas.</p>
+    <div class="placas" id="placas"></div>
+  </section>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" integrity="sha384-/1qUCSGwTur9vjf/z9lmu/eCUYbpOTgSjmpbMQZ1/CtX2v/WcAIKqRv+U1DUCG6e" crossorigin="anonymous"></script>
+<script src="nest-core.js"></script>
+<script>
+'use strict';
+// Nesting de placas para el corte (Gaspar 25-oct-2026). Lee los .ai/.pdf de Emma con pdf.js, separa por color (corte rojo,
+// calado blanco, agujeros azules), arma cada pieza con su contorno y lo que tiene adentro, la acomoda en placas con
+// nest-core.js (en Workers, varias corridas en paralelo) y baja un DXF R12 por placa con las capas PLACA, CORTE, CALADO y
+// AGUJEROS. Todo corre en el navegador.
+const PT = 25.4 / 72;        // 1 punto de PDF en mm
+const TOL_CURVA = 0.05;      // mm: error máximo al pasar las curvas a tramos rectos
+const TOL_NEST = 0.05;       // mm: simplificación del contorno para acomodar (el motor la suma a la separación)
+const COL = { corte: '#ff4d4d', calado: '#f2f2f2', agujero: '#4d8dff', suelto: '#ff9f1a', ignorado: '#4a5263', fondo: '#0b0d11', placa: '#161a22' };
+const CLASES = [['corte', 'Corte'], ['calado', 'Calado'], ['agujero', 'Agujeros'], ['ignorar', 'Ignorar']];
+const CFG_DEF = { largo: 2440, ancho: 1220, sep: 6.5, margen: 5, paso: 5, seg: 20, borde: true };
+const S = { archivos: [], sec: 0, mapa: {}, piezas: [], grandes: [], cfg: cargarCfg(), mejor: null, firmaMejor: '', workers: [], firmaWorkers: '', vivos: 0, corridas: 0, t0: 0, ronda: 0, corriendo: false, timer: null, nest: null, cfgNest: null, pintarPend: false };
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const fmt = (n, d = 0) => Number(n).toLocaleString('es-AR', { minimumFractionDigits: d, maximumFractionDigits: d });
+
+if (window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+// ───────────── configuración ─────────────
+function cargarCfg() {
+  let c = {};
+  try { c = JSON.parse(localStorage.getItem('nesting_cfg') || '{}') || {}; } catch (_) {}
+  return { ...CFG_DEF, ...c };
+}
+function guardarCfg() { try { localStorage.setItem('nesting_cfg', JSON.stringify(S.cfg)); } catch (_) {} }
+function cfgAlForm() {
+  $('c-largo').value = S.cfg.largo; $('c-ancho').value = S.cfg.ancho; $('c-sep').value = S.cfg.sep; $('c-margen').value = S.cfg.margen;
+  $('c-paso').value = String(S.cfg.paso); $('c-seg').value = String(S.cfg.seg); $('c-borde').checked = !!S.cfg.borde;
+}
+function cfgDelForm() {
+  const num = (id, def, lo, hi) => { const v = parseFloat(String($(id).value).replace(',', '.')); return isFinite(v) ? Math.min(hi, Math.max(lo, v)) : def; };
+  S.cfg = {
+    largo: num('c-largo', CFG_DEF.largo, 100, 10000), ancho: num('c-ancho', CFG_DEF.ancho, 100, 10000),
+    sep: num('c-sep', CFG_DEF.sep, 6.5, 50), margen: num('c-margen', CFG_DEF.margen, 5, 8),
+    paso: parseInt($('c-paso').value, 10) || 5, seg: parseInt($('c-seg').value, 10) || 20, borde: $('c-borde').checked,
+  };
+  guardarCfg();
+}
+
+// ───────────── lectura del PDF ─────────────
+const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+function mult(a, m) { // a aplicada primero, después m (convención del operador cm de PDF)
+  return [a[0] * m[0] + a[1] * m[2], a[0] * m[1] + a[1] * m[3], a[2] * m[0] + a[3] * m[2], a[2] * m[1] + a[3] * m[3], a[4] * m[0] + a[5] * m[2] + m[4], a[4] * m[1] + a[5] * m[3] + m[5]];
+}
+function colorDe(a) {
+  if (a && typeof a[0] === 'string') { const h = a[0].replace('#', ''); return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)]; }
+  return a && a.length >= 3 ? [a[0], a[1], a[2]] : [0, 0, 0];
+}
+// Bézier a tramos rectos (subdivisión adaptativa: la suma de las distancias de los puntos de control a la cuerda <= TOL_CURVA).
+function bezier(out, x0, y0, x1, y1, x2, y2, x3, y3, prof) {
+  const dx = x3 - x0, dy = y3 - y0, L2 = dx * dx + dy * dy;
+  let plano;
+  if (L2 < 1e-12) plano = Math.hypot(x1 - x0, y1 - y0) + Math.hypot(x2 - x0, y2 - y0) <= TOL_CURVA;
+  else { const d1 = Math.abs((x1 - x3) * dy - (y1 - y3) * dx), d2 = Math.abs((x2 - x3) * dy - (y2 - y3) * dx); plano = (d1 + d2) * (d1 + d2) <= TOL_CURVA * TOL_CURVA * L2; }
+  if (plano || prof >= 16) { out.push([x3, y3]); return; }
+  const x01 = (x0 + x1) / 2, y01 = (y0 + y1) / 2, x12 = (x1 + x2) / 2, y12 = (y1 + y2) / 2, x23 = (x2 + x3) / 2, y23 = (y2 + y3) / 2;
+  const xa = (x01 + x12) / 2, ya = (y01 + y12) / 2, xb = (x12 + x23) / 2, yb = (y12 + y23) / 2, xm = (xa + xb) / 2, ym = (ya + yb) / 2;
+  bezier(out, x0, y0, x01, y01, xa, ya, xm, ym, prof + 1);
+  bezier(out, xm, ym, xb, yb, x23, y23, x3, y3, prof + 1);
+}
+// Un constructPath de pdf.js 3.x: [ops, coords]. Los subpaths quedan en mm, ya transformados.
+function construir(lista, a, T) {
+  const O = pdfjsLib.OPS, ops = a[0], c = a[1];
+  let j = 0, x = lista.px || 0, y = lista.py || 0, sx = lista.sx || 0, sy = lista.sy || 0;
+  let cur = lista.length ? lista[lista.length - 1] : null;
+  const nuevo = () => { cur = { pts: [T(x, y)], cerrado: false }; lista.push(cur); };
+  const seguir = () => { if (!cur || cur.cerrado) nuevo(); };
+  const curva = (p1, p2, nx, ny) => { const p0 = T(x, y), p3 = T(nx, ny); bezier(cur.pts, p0[0], p0[1], p1[0], p1[1], p2[0], p2[1], p3[0], p3[1], 0); x = nx; y = ny; };
+  for (const op of ops) {
+    if (op === O.moveTo) { x = sx = c[j++]; y = sy = c[j++]; nuevo(); }
+    else if (op === O.lineTo) { seguir(); x = c[j++]; y = c[j++]; cur.pts.push(T(x, y)); }
+    else if (op === O.curveTo) { seguir(); const p1 = T(c[j], c[j + 1]), p2 = T(c[j + 2], c[j + 3]); curva(p1, p2, c[j + 4], c[j + 5]); j += 6; }
+    else if (op === O.curveTo2) { seguir(); const p1 = T(x, y), p2 = T(c[j], c[j + 1]); curva(p1, p2, c[j + 2], c[j + 3]); j += 4; }
+    else if (op === O.curveTo3) { seguir(); const p1 = T(c[j], c[j + 1]), p2 = T(c[j + 2], c[j + 3]); curva(p1, p2, c[j + 2], c[j + 3]); j += 4; }
+    else if (op === O.closePath) { if (cur) cur.cerrado = true; x = sx; y = sy; }
+    else if (op === O.rectangle) { const rx = c[j++], ry = c[j++], w = c[j++], h = c[j++]; cur = { pts: [T(rx, ry), T(rx + w, ry), T(rx + w, ry + h), T(rx, ry + h)], cerrado: true }; lista.push(cur); x = sx = rx; y = sy = ry; }
+  }
+  lista.px = x; lista.py = y; lista.sx = sx; lista.sy = sy;
+}
+function sinRepetidos(pts) {
+  const out = [];
+  for (const p of pts) { const u = out[out.length - 1]; if (!u || Math.abs(u[0] - p[0]) > 1e-4 || Math.abs(u[1] - p[1]) > 1e-4) out.push(p); }
+  return out;
+}
+// Recorre la lista de operaciones de una página y devuelve los dibujos visibles: { subs: [{pts, cerrado, lw}], trazo, relleno, sc, fc }.
+function interpretar(ol, oc, k) {
+  const O = pdfjsLib.OPS, fn = ol.fnArray, args = ol.argsArray;
+  const IMG = new Set(['paintImageXObject', 'paintInlineImageXObject', 'paintImageMaskXObject', 'paintImageXObjectRepeat', 'paintImageMaskXObjectRepeat', 'paintImageMaskXObjectGroup', 'paintInlineImageXObjectGroup', 'paintSolidColorImageMask'].map((n) => O[n]).filter((v) => v != null));
+  const TXT = new Set(['showText', 'showSpacedText', 'nextLineShowText', 'nextLineSetSpacingShowText'].map((n) => O[n]).filter((v) => v != null));
+  let st = { m: [1, 0, 0, 1, 0, 0], sc: [0, 0, 0], fc: [0, 0, 0], lw: 1 };
+  const pila = [], mc = [], els = [];
+  let lista = null, textos = 0, imagenes = 0;
+  const visible = () => { for (const v of mc) if (!v) return false; return true; };
+  const T = (x, y) => { const m = st.m; return [(m[0] * x + m[2] * y + m[4]) * k, (m[1] * x + m[3] * y + m[5]) * k]; };
+  const pintar = (trazo, relleno, cerrarUlt) => {
+    const l = lista; lista = null;
+    if (!l || !l.length || !visible()) return;
+    if (cerrarUlt) l[l.length - 1].cerrado = true;
+    const escala = Math.sqrt(Math.abs(st.m[0] * st.m[3] - st.m[1] * st.m[2])) * k;
+    const subs = [];
+    for (const q of l) {
+      const pts = sinRepetidos(q.pts);
+      if (pts.length < 2) continue;
+      let cerrado = q.cerrado || relleno;
+      if (pts.length > 2 && dist(pts[0], pts[pts.length - 1]) < 0.5) { pts.pop(); cerrado = true; }
+      if (pts.length < 3) cerrado = false;
+      subs.push({ pts, cerrado, lw: trazo ? st.lw * escala : 0 });
+    }
+    if (subs.length) els.push({ subs, trazo, relleno, sc: st.sc, fc: st.fc });
+  };
+  for (let i = 0; i < fn.length; i++) {
+    const f = fn[i], a = args[i];
+    switch (f) {
+      case O.save: pila.push(st); st = { ...st }; break;
+      case O.restore: if (pila.length) st = pila.pop(); break;
+      case O.transform: st = { ...st, m: mult(a, st.m) }; break;
+      case O.paintFormXObjectBegin: pila.push(st); st = { ...st }; if (a && a[0] && a[0].length === 6) st.m = mult(a[0], st.m); break;
+      case O.paintFormXObjectEnd: if (pila.length) st = pila.pop(); break;
+      case O.setStrokeRGBColor: st.sc = colorDe(a); break;
+      case O.setFillRGBColor: st.fc = colorDe(a); break;
+      case O.setLineWidth: st.lw = a[0]; break;
+      case O.setGState: if (a && Array.isArray(a[0])) for (const kv of a[0]) if (kv && kv[0] === 'LW') st.lw = kv[1]; break;
+      case O.constructPath: lista = lista || []; construir(lista, a, T); break;
+      case O.stroke: pintar(true, false, false); break;
+      case O.closeStroke: pintar(true, false, true); break;
+      case O.fill: case O.eoFill: pintar(false, true, false); break;
+      case O.fillStroke: case O.eoFillStroke: pintar(true, true, false); break;
+      case O.closeFillStroke: case O.closeEOFillStroke: pintar(true, true, true); break;
+      case O.endPath: lista = null; break;
+      case O.beginMarkedContent: mc.push(true); break;
+      case O.beginMarkedContentProps: { let v = true; if (a && a[0] === 'OC' && oc) { try { v = oc.isVisible(a[1]) !== false; } catch (_) {} } mc.push(v); break; }
+      case O.endMarkedContent: mc.pop(); break;
+      default:
+        if (TXT.has(f)) { if (visible()) textos++; }
+        else if (IMG.has(f)) { if (visible()) imagenes++; }
+    }
+  }
+  return { els, textos, imagenes };
+}
+async function leerArchivo(file, a) {
+  if (!window.pdfjsLib) throw new Error('No se pudo cargar el lector de PDF. Revisá la conexión y recargá la página.');
+  const buf = new Uint8Array(await file.arrayBuffer());
+  const cab = new TextDecoder('latin1').decode(buf.subarray(0, 1024));
+  if (!cab.includes('%PDF')) throw new Error('No es un PDF ni un .ai compatible con PDF. Que Emma lo guarde como PDF, o como .ai con "Crear archivo compatible con PDF" tildado.');
+  const doc = await pdfjsLib.getDocument({ data: buf, isEvalSupported: false, disableFontFace: true, verbosity: 0 }).promise;
+  try {
+    let oc = null; try { oc = await doc.getOptionalContentConfig(); } catch (_) {}
+    for (let n = 1; n <= doc.numPages; n++) {
+      const page = await doc.getPage(n);
+      const ol = await page.getOperatorList({ annotationMode: pdfjsLib.AnnotationMode.DISABLE });
+      const r = interpretar(ol, oc, PT * (page.userUnit || 1));
+      a.textos += r.textos; a.imagenes += r.imagenes;
+      a.paginas.push({ n, els: r.els });
+    }
+    if (!a.paginas.some((p) => p.els.length)) {
+      let txt = '';
+      try { const t = await (await doc.getPage(1)).getTextContent(); txt = t.items.map((i) => i.str).join(' '); } catch (_) {}
+      if (/without PDF Content|sin contenido PDF|compatible con PDF/i.test(txt)) throw new Error('El .ai se guardó sin "Crear archivo compatible con PDF". Que Emma lo guarde de nuevo con esa opción tildada, o como PDF.');
+      throw new Error('No hay nada dibujado adentro de la mesa de trabajo. En Illustrator: Objeto › Mesas de trabajo › Ajustar a los límites de la ilustración, y guardar de nuevo.');
+    }
+  } finally { doc.destroy(); }
+}
+
+// ───────────── colores ─────────────
+const hex = (c) => '#' + c.map((v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join('');
+function claseDefecto(c) {
+  const r = c[0] / 255, g = c[1] / 255, b = c[2] / 255, mx = Math.max(r, g, b), mn = Math.min(r, g, b), sat = mx ? (mx - mn) / mx : 0;
+  let h = 0;
+  if (mx !== mn) { h = mx === r ? ((g - b) / (mx - mn)) % 6 : mx === g ? (b - r) / (mx - mn) + 2 : (r - g) / (mx - mn) + 4; h *= 60; if (h < 0) h += 360; }
+  if (mx > 0.85 && sat < 0.15) return 'calado';
+  if (sat > 0.35 && mx > 0.35 && (h >= 330 || h <= 25)) return 'corte';
+  if (sat > 0.3 && mx > 0.25 && h >= 180 && h <= 260) return 'agujero';
+  return 'ignorar';
+}
+const claseColor = (c) => S.mapa[hex(c)] || claseDefecto(c);
+function claseDe(el) {
+  if (el.trazo) { const k = claseColor(el.sc); if (k !== 'ignorar') return { cl: k, porTrazo: true }; }
+  if (el.relleno) { const k = claseColor(el.fc); if (k !== 'ignorar') return { cl: k, porTrazo: false }; }
+  return { cl: 'ignorar', porTrazo: false };
+}
+function inventarioColores() {
+  const m = new Map();
+  for (const a of S.archivos) if (a.estado === 'ok') for (const pg of a.paginas) for (const el of pg.els) {
+    const sumar = (c, tipo) => { const k = hex(c); const e = m.get(k) || { hex: k, rgb: c, trazo: 0, relleno: 0 }; e[tipo] += el.subs.length; m.set(k, e); };
+    if (el.trazo) sumar(el.sc, 'trazo');
+    if (el.relleno) sumar(el.fc, 'relleno');
+  }
+  return [...m.values()].sort((u, v) => (v.trazo + v.relleno) - (u.trazo + u.relleno));
+}
+
+// ───────────── piezas ─────────────
+function areaPts(p) { let s = 0; for (let i = 0, j = p.length - 1; i < p.length; j = i++) s += (p[j][0] + p[i][0]) * (p[j][1] - p[i][1]); return Math.abs(s / 2); }
+function caja(p) { let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity; for (const [x, y] of p) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; } return { x0, y0, x1, y1 }; }
+function dentro(pt, poly) {
+  let c = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i][0], yi = poly[i][1], xj = poly[j][0], yj = poly[j][1];
+    if ((yi > pt[1]) !== (yj > pt[1]) && pt[0] < (xj - xi) * (pt[1] - yi) / (yj - yi) + xi) c = !c;
+  }
+  return c;
+}
+function muestras(pts, n) { const out = []; const k = Math.min(n, pts.length); for (let i = 0; i < k; i++) out.push(pts[Math.floor(i * pts.length / k)]); return out; }
+const seTocan = (a, b) => !(a.x1 < b.x0 || b.x1 < a.x0 || a.y1 < b.y0 || b.y1 < a.y0);
+const cajaParecida = (a, b, t) => Math.abs(a.x0 - b.x0) < t && Math.abs(a.y0 - b.y0) < t && Math.abs(a.x1 - b.x1) < t && Math.abs(a.y1 - b.y1) < t;
+function contiene(A, B) {
+  if (B.bb.x0 < A.bb.x0 - 0.01 || B.bb.x1 > A.bb.x1 + 0.01 || B.bb.y0 < A.bb.y0 - 0.01 || B.bb.y1 > A.bb.y1 + 0.01) return false;
+  const mu = muestras(B.pts, 7); let d = 0;
+  for (const p of mu) if (dentro(p, A.pts)) d++;
+  return d * 2 > mu.length;
+}
+// Arma las piezas de cada página: los contornos rojos forman un árbol (cada uno adentro del más chico que lo contiene); los de
+// profundidad par son piezas y los impares, cortes de adentro de su pieza. Calados, agujeros y líneas rojas abiertas van a la
+// pieza más chica que los contiene.
+function armar() {
+  const piezas = [];
+  for (const a of S.archivos) {
+    if (a.estado !== 'ok') continue;
+    const r = a.res = { piezas: 0, calados: 0, agujeros: 0, sueltos: 0, abiertosSueltos: 0, cerrados: 0, repetidos: 0, chicos: 0, fondos: 0, ignorados: 0 };
+    for (const pg of a.paginas) {
+      const cortes = [], abiertos = [], detalles = [], ignorados = [];
+      for (const el of pg.els) {
+        const { cl, porTrazo } = claseDe(el);
+        for (const s of el.subs) {
+          if (cl === 'ignorar') { ignorados.push(s); continue; }
+          if (cl === 'corte') {
+            if (s.cerrado) cortes.push(s.pts);
+            else if (s.pts.length >= 3 && dist(s.pts[0], s.pts[s.pts.length - 1]) <= 2) { cortes.push(s.pts); r.cerrados++; }
+            else abiertos.push(s);
+          } else detalles.push({ cl, s, porTrazo });
+        }
+      }
+      r.ignorados += ignorados.length;
+      const cs = [];
+      for (const pts of cortes) { const ar = areaPts(pts); if (ar < 1) { r.chicos++; continue; } cs.push({ pts, area: ar, bb: caja(pts) }); }
+      cs.sort((u, v) => v.area - u.area);
+      const unicos = [];
+      for (const c of cs) {
+        if (unicos.some((u) => Math.abs(u.area - c.area) <= 0.01 * u.area + 1 && cajaParecida(u.bb, c.bb, 0.5))) { r.repetidos++; continue; }
+        unicos.push(c);
+      }
+      for (let i = 0; i < unicos.length; i++) {
+        const c = unicos[i]; c.padre = -1;
+        for (let j = i - 1; j >= 0; j--) if (contiene(unicos[j], c)) { c.padre = j; break; }
+        c.prof = c.padre < 0 ? 0 : unicos[c.padre].prof + 1;
+      }
+      const pzs = [];
+      for (const c of unicos) {
+        if (c.prof % 2 === 0) { c.pieza = { id: piezas.length + pzs.length, archivo: a.nombre, pagina: pg.n, poly: c.pts, area: c.area, bb: c.bb, huecos: [], abiertos: [], calados: [], agujeros: [] }; pzs.push(c.pieza); }
+        else unicos[c.padre].pieza.huecos.push(c.pts);
+      }
+      const duenio = (pts) => {
+        const bb = caja(pts), mu = muestras(pts, 9);
+        let mejor = null;
+        for (const pz of pzs) {
+          if (!seTocan(bb, pz.bb) || (mejor && pz.area >= mejor.area)) continue;
+          let d = 0; for (const p of mu) if (dentro(p, pz.poly)) d++;
+          if (d * 2 > mu.length) mejor = pz;
+        }
+        return mejor;
+      };
+      const sueltos = [];
+      for (const d of detalles) {
+        const pz = duenio(d.s.pts);
+        if (pz) { if (d.cl === 'calado') { pz.calados.push(d.s); r.calados++; } else { pz.agujeros.push(d.s); r.agujeros++; } }
+        else if (d.cl === 'calado' && !d.porTrazo) r.fondos++; // relleno blanco por fuera de las piezas: un fondo, no se corta
+        else { sueltos.push(d.s); r.sueltos++; }
+      }
+      for (const s of abiertos) { const pz = duenio(s.pts); if (pz) pz.abiertos.push(s.pts); else { sueltos.push(s); r.abiertosSueltos++; } }
+      pg.dib = { piezas: pzs, sueltos, ignorados };
+      r.piezas += pzs.length;
+      piezas.push(...pzs);
+    }
+  }
+  S.piezas = piezas;
+}
+
+// ───────────── dibujo ─────────────
+function trazar(ctx, pts, X, Y, cerrar) {
+  ctx.moveTo(X(pts[0][0]), Y(pts[0][1]));
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(X(pts[i][0]), Y(pts[i][1]));
+  if (cerrar) ctx.closePath();
+}
+function dibujarPieza(ctx, g, X, Y, e) {
+  ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  ctx.beginPath(); trazar(ctx, g.poly, X, Y, true); for (const h of g.huecos) trazar(ctx, h, X, Y, true);
+  ctx.fillStyle = 'rgba(255,77,77,.15)'; ctx.fill('evenodd');
+  ctx.lineWidth = 1; ctx.strokeStyle = COL.corte; ctx.stroke();
+  if (g.abiertos.length) { ctx.beginPath(); for (const p of g.abiertos) trazar(ctx, p, X, Y, false); ctx.stroke(); }
+  ctx.strokeStyle = COL.calado;
+  for (const s of g.calados) { ctx.lineWidth = Math.max(1, (s.lw || 0) * e); ctx.beginPath(); trazar(ctx, s.pts, X, Y, s.cerrado); ctx.stroke(); }
+  ctx.strokeStyle = COL.agujero; ctx.lineWidth = 1.3;
+  for (const s of g.agujeros) { ctx.beginPath(); trazar(ctx, s.pts, X, Y, s.cerrado); ctx.stroke(); }
+}
+function prepararCanvas(cv, w, h) {
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); cv.style.height = h + 'px';
+  const ctx = cv.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return ctx;
+}
+function dibujarPagina(cv, pg) {
+  let b = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
+  for (const el of pg.els) for (const s of el.subs) for (const [x, y] of s.pts) { if (x < b.x0) b.x0 = x; if (x > b.x1) b.x1 = x; if (y < b.y0) b.y0 = y; if (y > b.y1) b.y1 = y; }
+  if (!isFinite(b.x0)) return;
+  const W = cv.parentElement.clientWidth || 600, bw = Math.max(1, b.x1 - b.x0), bh = Math.max(1, b.y1 - b.y0);
+  const H = Math.round(Math.max(140, Math.min(460, (W - 20) * bh / bw + 20)));
+  const ctx = prepararCanvas(cv, W, H);
+  const e = Math.min((W - 20) / bw, (H - 20) / bh), ox = (W - bw * e) / 2, oy = (H - bh * e) / 2;
+  const X = (x) => ox + (x - b.x0) * e, Y = (y) => oy + (b.y1 - y) * e;
+  ctx.fillStyle = COL.fondo; ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = COL.ignorado; ctx.lineWidth = 1;
+  ctx.beginPath(); for (const s of pg.dib.ignorados) trazar(ctx, s.pts, X, Y, s.cerrado); ctx.stroke();
+  for (const pz of pg.dib.piezas) dibujarPieza(ctx, pz, X, Y, e);
+  ctx.strokeStyle = COL.suelto; ctx.lineWidth = 2.5;
+  ctx.beginPath(); for (const s of pg.dib.sueltos) trazar(ctx, s.pts, X, Y, s.cerrado); ctx.stroke();
+}
+function colocada(pz, c) {
+  const t = c.grados * Math.PI / 180, cs = Math.cos(t), sn = Math.sin(t);
+  const f = (pts) => pts.map(([x, y]) => [x * cs - y * sn + c.dx, x * sn + y * cs + c.dy]);
+  return { poly: f(pz.poly), huecos: pz.huecos.map(f), abiertos: pz.abiertos.map(f), calados: pz.calados.map((s) => ({ pts: f(s.pts), cerrado: s.cerrado, lw: s.lw })), agujeros: pz.agujeros.map((s) => ({ pts: f(s.pts), cerrado: s.cerrado })) };
+}
+function dibujarPlaca(cv, h) {
+  const cfg = S.cfgNest, W = cv.parentElement.clientWidth || 800, H = Math.round(W * cfg.ancho / cfg.largo);
+  const ctx = prepararCanvas(cv, W, H);
+  const e = W / cfg.largo, X = (x) => x * e, Y = (y) => H - y * e;
+  ctx.fillStyle = COL.placa; ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = '#3b4252'; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
+  const m = cfg.margen * e; ctx.strokeRect(m, m, W - 2 * m, H - 2 * m); ctx.setLineDash([]);
+  for (const c of S.mejor.coloc) if (c.hoja === h) dibujarPieza(ctx, colocada(S.piezas[c.id], c), X, Y, e);
+}
+
+// ───────────── pantalla ─────────────
+function pintarArchivos() {
+  $('lista-archivos').innerHTML = S.archivos.map((a) => {
+    const r = a.res || {};
+    const det = a.estado === 'leyendo' ? 'leyendo…' : a.estado === 'error' ? '' : `${r.piezas || 0} pieza${r.piezas === 1 ? '' : 's'} · ${r.calados || 0} calado${r.calados === 1 ? '' : 's'} · ${r.agujeros || 0} agujero${r.agujeros === 1 ? '' : 's'}${a.paginas.length > 1 ? ' · ' + a.paginas.length + ' mesas de trabajo' : ''}`;
+    return `<div class="archivo"><span class="nom">${esc(a.nombre)}</span><span class="det">${det}</span><button class="chico" data-quitar="${a.id}">Quitar</button>${a.error ? `<div class="err">${esc(a.error)}</div>` : ''}</div>`;
+  }).join('');
+}
+function pintarColores() {
+  const cols = inventarioColores();
+  $('sec-colores').hidden = !cols.length;
+  $('tabla-colores').innerHTML = cols.map((c) => {
+    const k = claseColor(c.rgb), donde = [c.trazo ? c.trazo + ' en trazo' : '', c.relleno ? c.relleno + ' en relleno' : ''].filter(Boolean).join(' · ');
+    return `<tr><td><span class="muestra" style="background:${c.hex}"></span></td><td>${c.hex}</td><td class="mute">${donde}</td><td><select data-color="${c.hex}">${CLASES.map(([v, t]) => `<option value="${v}"${v === k ? ' selected' : ''}>${t}</option>`).join('')}</select></td></tr>`;
+  }).join('');
+}
+function avisosArchivos() {
+  const out = [];
+  for (const a of S.archivos) {
+    if (a.estado !== 'ok') continue;
+    const r = a.res, n = esc(a.nombre), p = (k, s, pl) => k + ' ' + (k === 1 ? s : pl);
+    if (!r.piezas) out.push({ grave: true, t: `${n}: no hay ningún contorno rojo cerrado, así que no salió ninguna pieza. Revisá los colores del paso 2.` });
+    if (r.sueltos) out.push({ grave: true, t: `${n}: ${p(r.sueltos, 'calado o agujero quedó', 'calados o agujeros quedaron')} fuera de toda pieza (en naranja). No se van a cortar.` });
+    if (r.abiertosSueltos) out.push({ grave: true, t: `${n}: ${p(r.abiertosSueltos, 'línea roja no cierra', 'líneas rojas no cierran')} y no está adentro de ninguna pieza (en naranja). No se acomoda.` });
+    if (r.cerrados) out.push({ t: `${n}: ${p(r.cerrados, 'contorno rojo no cerraba', 'contornos rojos no cerraban')} por menos de 2 mm; se ${r.cerrados === 1 ? 'cerró' : 'cerraron'}.` });
+    if (r.repetidos) out.push({ t: `${n}: ${p(r.repetidos, 'contorno estaba repetido', 'contornos estaban repetidos')} uno encima del otro; se ${r.repetidos === 1 ? 'tomó' : 'tomaron'} una sola vez.` });
+    if (a.textos) out.push({ grave: true, t: `${n}: tiene textos sin pasar a contornos; no se cortan. En Illustrator: Texto › Crear contornos.` });
+    if (a.imagenes) out.push({ t: `${n}: tiene ${p(a.imagenes, 'imagen', 'imágenes')}; se ${a.imagenes === 1 ? 'ignora' : 'ignoran'}.` });
+    if (r.ignorados) out.push({ t: `${n}: ${p(r.ignorados, 'trazo', 'trazos')} de otros colores se ${r.ignorados === 1 ? 'ignora' : 'ignoran'} (en gris). Si alguno se tenía que cortar, cambiá su color en el paso 2.` });
+  }
+  return out;
+}
+function pintarPiezas() {
+  const ok = S.archivos.filter((a) => a.estado === 'ok');
+  $('sec-piezas').hidden = !ok.length;
+  $('sec-placa').hidden = !S.piezas.length;
+  const total = S.piezas.reduce((s, p) => s + p.area, 0) / 1e6, placa = S.cfg.largo * S.cfg.ancho / 1e6;
+  const mayor = S.piezas.reduce((m, p) => Math.max(m, p.bb.x1 - p.bb.x0, p.bb.y1 - p.bb.y0), 0);
+  $('resumen-piezas').innerHTML = `
+    <div class="dato"><b>${S.piezas.length}</b><span>piezas</span></div>
+    <div class="dato"><b>${fmt(total, 2)} m²</b><span>de material en piezas</span></div>
+    <div class="dato"><b>${S.piezas.length ? Math.ceil(total / placa) : 0}</b><span>placas como mínimo teórico</span></div>
+    <div class="dato"><b>${fmt(mayor / 10, 1)} cm</b><span>lado de la pieza más grande</span></div>`;
+  $('avisos').innerHTML = avisosArchivos().map((v) => `<li${v.grave ? ' class="grave"' : ''}>${v.t}</li>`).join('');
+  const cont = $('vistas');
+  cont.innerHTML = '';
+  for (const a of ok) for (const pg of a.paginas) {
+    if (!pg.dib) continue;
+    const d = document.createElement('div'); d.className = 'vista';
+    d.innerHTML = `<div class="cap"><b>${esc(a.nombre)}</b>${a.paginas.length > 1 ? `<span class="sutil">mesa ${pg.n}</span>` : ''}<span class="sutil">${pg.dib.piezas.length} pieza${pg.dib.piezas.length === 1 ? '' : 's'}</span></div><canvas></canvas>`;
+    cont.appendChild(d);
+    dibujarPagina(d.querySelector('canvas'), pg);
+  }
+}
+function pintarTodo() { armar(); pintarArchivos(); pintarColores(); pintarPiezas(); }
+function invalidarResultado(msg) {
+  detenerWorkers();
+  S.mejor = null; S.firmaMejor = '';
+  $('sec-resultado').hidden = true;
+  $('cfg-nota').textContent = msg || '';
+}
+async function agregarArchivos(lista) {
+  const nuevos = [];
+  for (const f of lista) {
+    if (S.archivos.some((a) => a.nombre === f.name && a.tam === f.size)) continue;
+    const a = { id: ++S.sec, nombre: f.name, tam: f.size, estado: 'leyendo', paginas: [], error: null, textos: 0, imagenes: 0 };
+    S.archivos.push(a); nuevos.push([f, a]);
+  }
+  if (!nuevos.length) return;
+  pintarArchivos();
+  for (const [f, a] of nuevos) {
+    try { await leerArchivo(f, a); a.estado = 'ok'; }
+    catch (e) { a.estado = 'error'; a.error = (e && e.message) || String(e); a.paginas = []; }
+  }
+  invalidarResultado();
+  pintarTodo();
+}
+
+// ───────────── acomodar ─────────────
+function prepararNest() {
+  cfgDelForm();
+  const cfg = S.cfg, angs = [];
+  for (let g = 0; g < 180; g += cfg.paso) angs.push(g * Math.PI / 180);
+  const L = cfg.largo - 2 * cfg.margen - 3, A = cfg.ancho - 2 * cfg.margen - 3;
+  const nest = [], grandes = [];
+  for (const pz of S.piezas) {
+    if (!pz.simple) pz.simple = NestCore.simplificar(pz.poly, TOL_NEST);
+    const entra = angs.some((t) => { const b = NestCore.bbox(NestCore.rotar(pz.simple, t)); return b.x1 - b.x0 <= L && b.y1 - b.y0 <= A; });
+    if (entra) nest.push({ id: pz.id, poly: pz.simple, simple: pz.simple, area: pz.area });
+    else grandes.push(pz);
+  }
+  return { cfg: { ...cfg }, nest, grandes };
+}
+function detenerWorkers() {
+  for (const w of S.workers) w.terminate();
+  S.workers = []; S.firmaWorkers = ''; S.vivos = 0;
+  if (S.timer) { clearInterval(S.timer); S.timer = null; }
+  S.corriendo = false;
+}
+function crearWorkers(nest, cfgW) {
+  detenerWorkers();
+  const n = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 1));
+  for (let i = 0; i < n; i++) {
+    const w = new Worker('nest-worker.js');
+    w.onmessage = (e) => alMensaje(e.data);
+    w.onerror = (e) => { e.preventDefault(); S.errorWorker = (e && e.message) || 'error en el cálculo'; S.vivos--; if (S.vivos <= 0) finRonda(); };
+    w.postMessage({ tipo: 'datos', piezas: nest, cfg: cfgW });
+    S.workers.push(w);
+  }
+}
+function iniciar(seguir) {
+  const { cfg, nest, grandes } = prepararNest();
+  S.grandes = grandes;
+  $('sec-resultado').hidden = false;
+  if (!nest.length) { S.mejor = null; pintarResultado(); return; }
+  const firma = JSON.stringify([nest.map((p) => p.id + ':' + Math.round(p.area)), cfg.largo, cfg.ancho, cfg.sep, cfg.margen, cfg.paso]);
+  if (firma !== S.firmaMejor || !seguir) { S.mejor = null; S.firmaMejor = firma; }
+  const cfgW = { largo: cfg.largo, ancho: cfg.ancho, sep: cfg.sep, margen: cfg.margen, paso: cfg.paso, res: 1, tol: TOL_NEST };
+  if (firma !== S.firmaWorkers || !S.workers.length) { crearWorkers(nest, cfgW); S.firmaWorkers = firma; }
+  S.nest = nest; S.cfgNest = cfg; S.errorWorker = null;
+  S.ronda++; S.vivos = S.workers.length; S.corridas = 0; S.t0 = Date.now(); S.seg = cfg.seg; S.corriendo = true;
+  const base = seguir && S.mejor ? S.mejor.orden : undefined;
+  S.workers.forEach((w, i) => w.postMessage({ tipo: 'correr', semilla: S.ronda * 100 + i + 1, segundos: cfg.seg, base, nuevo: !seguir }));
+  if (S.timer) clearInterval(S.timer);
+  S.timer = setInterval(pintarEstado, 250);
+  $('cfg-nota').textContent = '';
+  pintarResultado();
+}
+function alMensaje(m) {
+  if (m.tipo === 'mejor') { if (!S.mejor || m.r.puntaje < S.mejor.puntaje) { S.mejor = m.r; programarPintado(); } }
+  else if (m.tipo === 'corrida') { S.corridas++; }
+  else if (m.tipo === 'fin') { S.vivos--; if (S.vivos <= 0) finRonda(); }
+}
+function finRonda() {
+  S.corriendo = false;
+  if (S.timer) { clearInterval(S.timer); S.timer = null; }
+  pintarResultado();
+}
+function detener() {
+  detenerWorkers();
+  pintarResultado();
+}
+function programarPintado() {
+  if (S.pintarPend) return;
+  S.pintarPend = true;
+  setTimeout(() => { S.pintarPend = false; pintarResultado(); }, 350);
+}
+function textoEstado() {
+  const r = S.mejor, cfg = S.cfgNest;
+  if (!r) return S.corriendo ? 'Acomodando… (la primera vuelta tarda unos segundos)' : (S.errorWorker ? 'No se pudo calcular: ' + esc(S.errorWorker) : 'No hay piezas para acomodar.');
+  const ult = r.ultimoLargo, area = S.nest.filter((p) => !r.sinLugar.includes(p.id)).reduce((s, p) => s + p.area, 0);
+  const usado = (r.hojas - 1) * cfg.largo * cfg.ancho + ult * cfg.ancho, apr = usado > 0 ? 100 * area / usado : 0;
+  const base = `<b>${r.hojas} placa${r.hojas === 1 ? '' : 's'}</b>, la última usa ${fmt(ult / 10, 0)} cm de los ${fmt(cfg.largo / 10, 0)} · aprovechamiento ${fmt(apr, 1)} %`;
+  return S.corriendo ? `Buscando… ${S.corridas} vuelta${S.corridas === 1 ? '' : 's'} probada${S.corridas === 1 ? '' : 's'} · por ahora: ${base}` : `Listo: ${base}`;
+}
+function pintarEstado() {
+  $('estado').innerHTML = textoEstado();
+  const p = S.corriendo ? Math.min(100, 100 * (Date.now() - S.t0) / (S.seg * 1000)) : (S.mejor ? 100 : 0);
+  $('barra').firstElementChild.style.width = p + '%';
+  $('b-detener').disabled = !S.corriendo;
+  $('b-seguir').disabled = S.corriendo || !S.mejor;
+  $('b-zip').disabled = !S.mejor || !S.mejor.hojas;
+  $('b-acomodar').disabled = S.corriendo;
+}
+function pintarResultado() {
+  pintarEstado();
+  const cont = $('placas');
+  cont.innerHTML = '';
+  const avisos = [];
+  for (const pz of S.grandes) avisos.push(`No entra en la placa: pieza de ${fmt((pz.bb.x1 - pz.bb.x0) / 10, 1)} × ${fmt((pz.bb.y1 - pz.bb.y0) / 10, 1)} cm de ${esc(pz.archivo)}.`);
+  if (S.mejor && S.mejor.sinLugar.length) avisos.push(`${S.mejor.sinLugar.length} pieza${S.mejor.sinLugar.length === 1 ? '' : 's'} no se pudo acomodar.`);
+  if (avisos.length) { const ul = document.createElement('ul'); ul.className = 'avisos'; ul.innerHTML = avisos.map((t) => `<li class="grave">${t}</li>`).join(''); cont.appendChild(ul); }
+  const r = S.mejor; if (!r) return;
+  const cfg = S.cfgNest, placa = cfg.largo * cfg.ancho;
+  for (let h = 0; h < r.hojas; h++) {
+    const cs = r.coloc.filter((c) => c.hoja === h);
+    const area = cs.reduce((s, c) => s + S.piezas[c.id].area, 0);
+    const d = document.createElement('div'); d.className = 'vista placa';
+    d.innerHTML = `<div class="cap"><b>Placa ${h + 1}</b><span class="sutil">${cs.length} pieza${cs.length === 1 ? '' : 's'} · ${fmt(100 * area / placa, 0)} % de la placa con piezas</span><button class="chico" data-dxf="${h}"${S.corriendo ? ' disabled' : ''}>DXF</button></div><canvas></canvas>`;
+    cont.appendChild(d);
+    dibujarPlaca(d.querySelector('canvas'), h);
+  }
+}
+
+// ───────────── DXF y ZIP ─────────────
+function circulo(pts) {
+  if (pts.length < 8) return null;
+  const b = caja(pts), cx = (b.x0 + b.x1) / 2, cy = (b.y0 + b.y1) / 2;
+  let rmin = Infinity, rmax = 0;
+  for (const [x, y] of pts) { const r = Math.hypot(x - cx, y - cy); if (r < rmin) rmin = r; if (r > rmax) rmax = r; }
+  const r = (rmin + rmax) / 2;
+  return r > 0.2 && rmax - rmin <= Math.max(0.03, 0.01 * r) ? { cx, cy, r } : null;
+}
+function dxfPlaca(h) {
+  const cfg = S.cfgNest, L = [];
+  const g = (c, v) => { L.push(String(c).padStart(3, ' '), String(v)); };
+  const n = (v) => (Math.round(v * 1000) / 1000 || 0).toFixed(3);
+  g(0, 'SECTION'); g(2, 'HEADER');
+  g(9, '$ACADVER'); g(1, 'AC1009');
+  g(9, '$INSBASE'); g(10, '0.000'); g(20, '0.000'); g(30, '0.000');
+  g(9, '$EXTMIN'); g(10, '0.000'); g(20, '0.000'); g(30, '0.000');
+  g(9, '$EXTMAX'); g(10, n(cfg.largo)); g(20, n(cfg.ancho)); g(30, '0.000');
+  g(9, '$INSUNITS'); g(70, 4);
+  g(9, '$MEASUREMENT'); g(70, 1);
+  g(0, 'ENDSEC');
+  g(0, 'SECTION'); g(2, 'TABLES');
+  g(0, 'TABLE'); g(2, 'LTYPE'); g(70, 1);
+  g(0, 'LTYPE'); g(2, 'CONTINUOUS'); g(70, 0); g(3, 'Solid line'); g(72, 65); g(73, 0); g(40, '0.000');
+  g(0, 'ENDTAB');
+  const capas = [['PLACA', 8], ['CORTE', 1], ['CALADO', 7], ['AGUJEROS', 5]];
+  g(0, 'TABLE'); g(2, 'LAYER'); g(70, capas.length);
+  for (const [nom, col] of capas) { g(0, 'LAYER'); g(2, nom); g(70, 0); g(62, col); g(6, 'CONTINUOUS'); }
+  g(0, 'ENDTAB');
+  g(0, 'ENDSEC');
+  g(0, 'SECTION'); g(2, 'ENTITIES');
+  const poli = (capa, pts, cerrada) => {
+    if (pts.length < 2) return;
+    g(0, 'POLYLINE'); g(8, capa); g(66, 1); g(10, '0.000'); g(20, '0.000'); g(30, '0.000'); g(70, cerrada ? 1 : 0);
+    for (const [x, y] of pts) { g(0, 'VERTEX'); g(8, capa); g(10, n(x)); g(20, n(y)); g(30, '0.000'); }
+    g(0, 'SEQEND'); g(8, capa);
+  };
+  if (cfg.borde) poli('PLACA', [[0, 0], [cfg.largo, 0], [cfg.largo, cfg.ancho], [0, cfg.ancho]], true);
+  const geos = S.mejor.coloc.filter((c) => c.hoja === h).map((c) => colocada(S.piezas[c.id], c));
+  // Orden de mecanizado: calados, agujeros, cortes de adentro y al final los contornos (la pieza se suelta última).
+  for (const q of geos) for (const s of q.calados) poli('CALADO', s.pts, s.cerrado);
+  for (const q of geos) for (const s of q.agujeros) {
+    const ci = s.cerrado && circulo(s.pts);
+    if (ci) { g(0, 'CIRCLE'); g(8, 'AGUJEROS'); g(10, n(ci.cx)); g(20, n(ci.cy)); g(30, '0.000'); g(40, n(ci.r)); }
+    else poli('AGUJEROS', s.pts, s.cerrado);
+  }
+  for (const q of geos) { for (const p of q.huecos) poli('CORTE', p, true); for (const p of q.abiertos) poli('CORTE', p, false); }
+  for (const q of geos) poli('CORTE', q.poly, true);
+  g(0, 'ENDSEC'); g(0, 'EOF');
+  return L.join('\r\n') + '\r\n';
+}
+const CRC = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+function crc32(u) { let c = 0xFFFFFFFF; for (let i = 0; i < u.length; i++) c = CRC[(c ^ u[i]) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
+function zip(archivos) { // ZIP sin comprimir (método store), nombres en UTF-8
+  const enc = new TextEncoder(), partes = [], central = [], d = new Date();
+  const hora = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1), dia = ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
+  let off = 0;
+  for (const f of archivos) {
+    const nom = enc.encode(f.nombre), dat = typeof f.datos === 'string' ? enc.encode(f.datos) : f.datos, crc = crc32(dat);
+    const h = new DataView(new ArrayBuffer(30));
+    h.setUint32(0, 0x04034b50, true); h.setUint16(4, 20, true); h.setUint16(6, 0x0800, true); h.setUint16(8, 0, true); h.setUint16(10, hora, true); h.setUint16(12, dia, true);
+    h.setUint32(14, crc, true); h.setUint32(18, dat.length, true); h.setUint32(22, dat.length, true); h.setUint16(26, nom.length, true); h.setUint16(28, 0, true);
+    partes.push(new Uint8Array(h.buffer), nom, dat);
+    const c = new DataView(new ArrayBuffer(46));
+    c.setUint32(0, 0x02014b50, true); c.setUint16(4, 20, true); c.setUint16(6, 20, true); c.setUint16(8, 0x0800, true); c.setUint16(10, 0, true); c.setUint16(12, hora, true); c.setUint16(14, dia, true);
+    c.setUint32(16, crc, true); c.setUint32(20, dat.length, true); c.setUint32(24, dat.length, true); c.setUint16(28, nom.length, true); c.setUint32(42, off, true);
+    central.push(new Uint8Array(c.buffer), nom);
+    off += 30 + nom.length + dat.length;
+  }
+  const tam = central.reduce((s, x) => s + x.length, 0), e = new DataView(new ArrayBuffer(22));
+  e.setUint32(0, 0x06054b50, true); e.setUint16(8, archivos.length, true); e.setUint16(10, archivos.length, true); e.setUint32(12, tam, true); e.setUint32(16, off, true);
+  return new Blob([...partes, ...central, new Uint8Array(e.buffer)], { type: 'application/zip' });
+}
+function bajar(blob, nombre) {
+  const url = URL.createObjectURL(blob), a = document.createElement('a');
+  a.href = url; a.download = nombre; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+function nombreBase() {
+  const ok = S.archivos.filter((a) => a.estado === 'ok').map((a) => a.nombre.replace(/\.(ai|pdf)$/i, ''));
+  const base = ok.length === 1 ? ok[0] : ok.length ? ok[0] + ' y ' + (ok.length - 1) + ' más' : 'nesting';
+  return base.replace(/[\\/:*?"<>|]+/g, ' ').trim().slice(0, 60) || 'nesting';
+}
+function bajarDxf(h) { bajar(new Blob([dxfPlaca(h)], { type: 'application/dxf' }), `${nombreBase()} - placa ${h + 1}.dxf`); }
+function bajarZip() {
+  const r = S.mejor; if (!r) return;
+  const arch = []; for (let h = 0; h < r.hojas; h++) arch.push({ nombre: `${nombreBase()} - placa ${h + 1}.dxf`, datos: dxfPlaca(h) });
+  bajar(zip(arch), `${nombreBase()} - ${r.hojas} placa${r.hojas === 1 ? '' : 's'}.zip`);
+}
+
+// ───────────── eventos ─────────────
+cfgAlForm();
+const drop = $('drop'), inp = $('inp');
+drop.addEventListener('click', () => inp.click());
+drop.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); inp.click(); } });
+inp.addEventListener('change', () => { const f = [...inp.files]; inp.value = ''; agregarArchivos(f); });
+['dragenter', 'dragover'].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.add('sobre'); }));
+['dragleave', 'drop'].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.remove('sobre'); }));
+drop.addEventListener('drop', (e) => { const f = [...(e.dataTransfer && e.dataTransfer.files || [])]; if (f.length) agregarArchivos(f); });
+window.addEventListener('dragover', (e) => e.preventDefault());
+window.addEventListener('drop', (e) => e.preventDefault());
+$('lista-archivos').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-quitar]'); if (!b) return;
+  S.archivos = S.archivos.filter((a) => String(a.id) !== b.getAttribute('data-quitar'));
+  invalidarResultado(); pintarTodo();
+});
+$('tabla-colores').addEventListener('change', (e) => {
+  const s = e.target.closest('select[data-color]'); if (!s) return;
+  S.mapa[s.getAttribute('data-color')] = s.value;
+  invalidarResultado(S.mejor ? 'Cambiaron las piezas: volvé a acomodar.' : '');
+  pintarTodo();
+});
+document.querySelector('.config').addEventListener('change', () => {
+  cfgDelForm(); cfgAlForm();
+  if (S.mejor || S.corriendo) invalidarResultado('Cambió la configuración: volvé a acomodar.');
+  pintarPiezas();
+});
+$('b-acomodar').addEventListener('click', () => iniciar(false));
+$('b-seguir').addEventListener('click', () => iniciar(true));
+$('b-detener').addEventListener('click', detener);
+$('b-zip').addEventListener('click', bajarZip);
+$('placas').addEventListener('click', (e) => { const b = e.target.closest('[data-dxf]'); if (b) bajarDxf(parseInt(b.getAttribute('data-dxf'), 10)); });
+let anchoPrevio = window.innerWidth;
+window.addEventListener('resize', () => {
+  if (Math.abs(window.innerWidth - anchoPrevio) < 40) return;
+  anchoPrevio = window.innerWidth;
+  clearTimeout(S.tResize); S.tResize = setTimeout(() => { if (S.piezas.length) pintarPiezas(); if (S.mejor) pintarResultado(); }, 250);
+});
+if (!window.pdfjsLib) { $('lista-archivos').innerHTML = '<div class="archivo"><div class="err">No se pudo cargar el lector de PDF. Revisá la conexión y recargá la página.</div></div>'; }
+</script>
+</body>
+</html>
