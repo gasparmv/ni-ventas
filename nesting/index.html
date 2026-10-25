@@ -154,7 +154,7 @@
 </main>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" integrity="sha384-/1qUCSGwTur9vjf/z9lmu/eCUYbpOTgSjmpbMQZ1/CtX2v/WcAIKqRv+U1DUCG6e" crossorigin="anonymous"></script>
-<script src="nest-core.js"></script>
+<script src="nest-core.js?v=2"></script>
 <script>
 'use strict';
 // Nesting de placas para el corte (Gaspar 25-oct-2026). Lee los .ai/.pdf de Emma con pdf.js, separa por color (corte rojo,
@@ -167,6 +167,7 @@ const TOL_NEST = 0.05;       // mm: simplificación del contorno para acomodar (
 const COL = { corte: '#ff4d4d', calado: '#f2f2f2', agujero: '#4d8dff', suelto: '#ff9f1a', ignorado: '#4a5263', fondo: '#0b0d11', placa: '#161a22' };
 const CLASES = [['corte', 'Corte'], ['calado', 'Calado'], ['agujero', 'Agujeros'], ['ignorar', 'Ignorar']];
 const CFG_DEF = { largo: 2440, ancho: 1220, sep: 6.5, margen: 5, paso: 5, seg: 20, borde: true };
+const VERSION_MOTOR = '2'; // subirla (y la de nest-core.js?v= arriba) cada vez que cambian nest-core.js o nest-worker.js: GitHub Pages los cachea 10 min
 const S = { archivos: [], sec: 0, mapa: {}, piezas: [], grandes: [], cfg: cargarCfg(), mejor: null, firmaMejor: '', workers: [], firmaWorkers: '', vivos: 0, corridas: 0, t0: 0, ronda: 0, corriendo: false, timer: null, nest: null, cfgNest: null, pintarPend: false };
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -589,7 +590,7 @@ function crearWorkers(nest, cfgW) {
   detenerWorkers();
   const n = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 1));
   for (let i = 0; i < n; i++) {
-    const w = new Worker('nest-worker.js');
+    const w = new Worker('nest-worker.js?v=' + VERSION_MOTOR);
     w.onmessage = (e) => alMensaje(e.data);
     w.onerror = (e) => { e.preventDefault(); S.errorWorker = (e && e.message) || 'error en el cálculo'; S.vivos--; if (S.vivos <= 0) finRonda(); };
     w.postMessage({ tipo: 'datos', piezas: nest, cfg: cfgW });

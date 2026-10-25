@@ -1,6 +1,6 @@
 // Worker del nesting: recibe las piezas y la configuración, y prueba órdenes distintos hasta que se le acaba el tiempo. Cada vez que
 // mejora, manda el resultado. Las máscaras quedan guardadas mientras el worker viva (seguir optimizando no las recalcula).
-importScripts('nest-core.js');
+importScripts('nest-core.js' + self.location.search); // misma versión que el worker (?v=), para no usar un motor viejo cacheado
 let piezas = null, cfg = null, cache = new Map(), mejorPropio = null;
 onmessage = (e) => {
   const m = e.data;
