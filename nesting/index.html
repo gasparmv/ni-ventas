@@ -77,8 +77,23 @@
   .estado { font-size: 14px; margin: 0; }
   .placas { display: grid; gap: 14px; margin: 14px 0 0; }
   .placa .cap b { font-size: 14px; }
-  .placa .cap button { margin-left: auto; }
+  .placa .cap button:first-of-type { margin-left: auto; }
   .nota { font-size: 12.5px; color: var(--sutil); margin: 8px 0 0; }
+  .recortes { margin: 16px 0 0; border-top: 1px solid var(--borde); padding-top: 14px; }
+  .recortes h3 { font-size: 14px; margin: 0 0 2px; }
+  .rec { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; border: 1px solid var(--borde); border-radius: 10px; padding: 6px 10px; background: var(--panel2); margin: 8px 0 0; }
+  .rec canvas { width: 96px; height: 54px; border-radius: 6px; flex: none; }
+  .rec .nom { font-weight: 700; }
+  .rec .det { color: var(--mute); font-size: 12.5px; flex: 1; min-width: 150px; }
+  .rec label { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+  .form-rec { border: 1px solid var(--borde); border-radius: 10px; padding: 12px; margin: 10px 0 0; background: var(--panel2); display: grid; gap: 10px; }
+  .form-rec .filas { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px 14px; }
+  .form-rec label { display: grid; gap: 4px; font-size: 12.5px; color: var(--mute); }
+  .esq { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; color: var(--fg); }
+  .esq input[type=number] { width: 74px; }
+  .form-rec canvas { width: 100%; border-radius: 8px; }
+  .err { color: var(--error); font-size: 13px; }
+  input[type=text] { font: inherit; background: var(--bg); color: var(--fg); border: 1px solid var(--borde); border-radius: 8px; padding: 5px 8px; }
   @media (max-width: 560px) { main { padding: 16px 12px 60px; } h1 { font-size: 19px; } .archivo button { margin-left: 0; } }
 </style>
 </head>
@@ -123,7 +138,7 @@
   </section>
 
   <section class="card" id="sec-placa" hidden>
-    <div class="titulo"><span class="paso">Paso 4</span><h2>Placas</h2></div>
+    <div class="titulo"><span class="paso">Paso 4</span><h2>Placas y recortes</h2></div>
     <div class="config">
       <label>Largo de la placa (mm)<span class="fila"><input type="number" id="c-largo" min="100" step="1"></span></label>
       <label>Ancho de la placa (mm)<span class="fila"><input type="number" id="c-ancho" min="100" step="1"></span></label>
@@ -132,6 +147,28 @@
       <label>Girar las piezas cada<span class="fila"><select id="c-paso"><option value="5">5°</option><option value="10">10°</option><option value="15">15°</option><option value="45">45°</option><option value="90">90°</option></select></span></label>
       <label>Tiempo de búsqueda<span class="fila"><select id="c-seg"><option value="10">10 s</option><option value="20">20 s</option><option value="40">40 s</option><option value="60">1 min</option></select></span></label>
       <label class="check"><input type="checkbox" id="c-borde"> Borde de la placa en el DXF (capa PLACA)</label>
+    </div>
+    <div class="recortes">
+      <h3>Recortes del taller</h3>
+      <p class="sutil" style="margin:0">Se llenan primero los recortes tildados, del más grande al más chico. Quedan guardados en esta compu.</p>
+      <div id="lista-recortes"></div>
+      <div class="acciones" style="margin-top:10px">
+        <button id="b-rec-medidas">+ Recorte por medidas</button>
+        <button id="b-rec-archivo">+ Recorte dibujado (PDF o .ai)</button>
+        <input type="file" id="inp-rec" accept=".ai,.pdf,application/pdf,application/illustrator" hidden>
+      </div>
+      <div class="form-rec" id="form-rec" hidden>
+        <div class="filas">
+          <label>Nombre<input type="text" id="r-nombre" placeholder="por ejemplo: acrílico 3 mm, estante de arriba"></label>
+          <label>Largo (mm)<input type="number" id="r-largo" min="50" step="1" value="1200"></label>
+          <label>Ancho (mm)<input type="number" id="r-ancho" min="50" step="1" value="600"></label>
+        </div>
+        <div class="filas" id="r-esquinas"></div>
+        <canvas id="r-vista"></canvas>
+        <div class="acciones" style="margin:0"><button class="primario" id="r-guardar">Guardar recorte</button><button id="r-cancelar">Cancelar</button><span class="err" id="r-error"></span></div>
+      </div>
+      <p class="sutil" id="rec-nota" style="margin:8px 0 0"></p>
+      <label class="check" style="margin-top:8px"><input type="checkbox" id="c-enteras"> Lo que no entra en los recortes va a placas enteras de largo × ancho</label>
     </div>
     <div class="acciones">
       <button class="primario" id="b-acomodar">Acomodar en placas</button>
@@ -154,7 +191,7 @@
 </main>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" integrity="sha384-/1qUCSGwTur9vjf/z9lmu/eCUYbpOTgSjmpbMQZ1/CtX2v/WcAIKqRv+U1DUCG6e" crossorigin="anonymous"></script>
-<script src="nest-core.js?v=2"></script>
+<script src="nest-core.js?v=3"></script>
 <script>
 'use strict';
 // Nesting de placas para el corte (Gaspar 25-oct-2026). Lee los .ai/.pdf de Emma con pdf.js, separa por color (corte rojo,
@@ -166,9 +203,9 @@ const TOL_CURVA = 0.05;      // mm: error máximo al pasar las curvas a tramos r
 const TOL_NEST = 0.05;       // mm: simplificación del contorno para acomodar (el motor la suma a la separación)
 const COL = { corte: '#ff4d4d', calado: '#f2f2f2', agujero: '#4d8dff', suelto: '#ff9f1a', ignorado: '#4a5263', fondo: '#0b0d11', placa: '#161a22' };
 const CLASES = [['corte', 'Corte'], ['calado', 'Calado'], ['agujero', 'Agujeros'], ['ignorar', 'Ignorar']];
-const CFG_DEF = { largo: 2440, ancho: 1220, sep: 6.5, margen: 5, paso: 5, seg: 20, borde: true };
-const VERSION_MOTOR = '2'; // subirla (y la de nest-core.js?v= arriba) cada vez que cambian nest-core.js o nest-worker.js: GitHub Pages los cachea 10 min
-const S = { archivos: [], sec: 0, mapa: {}, piezas: [], grandes: [], cfg: cargarCfg(), mejor: null, firmaMejor: '', workers: [], firmaWorkers: '', vivos: 0, corridas: 0, t0: 0, ronda: 0, corriendo: false, timer: null, nest: null, cfgNest: null, pintarPend: false };
+const CFG_DEF = { largo: 2440, ancho: 1220, sep: 6.5, margen: 5, paso: 5, seg: 20, borde: true, enteras: true };
+const VERSION_MOTOR = '3'; // subirla (y la de nest-core.js?v= arriba) cada vez que cambian nest-core.js o nest-worker.js: GitHub Pages los cachea 10 min
+const S = { archivos: [], sec: 0, mapa: {}, piezas: [], grandes: [], cfg: cargarCfg(), recortes: cargarRecortes(), recNest: [], mejor: null, firmaMejor: '', workers: [], firmaWorkers: '', vivos: 0, corridas: 0, t0: 0, ronda: 0, corriendo: false, timer: null, nest: null, cfgNest: null, pintarPend: false };
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const fmt = (n, d = 0) => Number(n).toLocaleString('es-AR', { minimumFractionDigits: d, maximumFractionDigits: d });
@@ -185,6 +222,7 @@ function guardarCfg() { try { localStorage.setItem('nesting_cfg', JSON.stringify
 function cfgAlForm() {
   $('c-largo').value = S.cfg.largo; $('c-ancho').value = S.cfg.ancho; $('c-sep').value = S.cfg.sep; $('c-margen').value = S.cfg.margen;
   $('c-paso').value = String(S.cfg.paso); $('c-seg').value = String(S.cfg.seg); $('c-borde').checked = !!S.cfg.borde;
+  $('c-enteras').checked = S.cfg.enteras !== false;
 }
 function cfgDelForm() {
   const num = (id, def, lo, hi) => { const v = parseFloat(String($(id).value).replace(',', '.')); return isFinite(v) ? Math.min(hi, Math.max(lo, v)) : def; };
@@ -192,6 +230,7 @@ function cfgDelForm() {
     largo: num('c-largo', CFG_DEF.largo, 100, 10000), ancho: num('c-ancho', CFG_DEF.ancho, 100, 10000),
     sep: num('c-sep', CFG_DEF.sep, 6.5, 50), margen: num('c-margen', CFG_DEF.margen, 5, 8),
     paso: parseInt($('c-paso').value, 10) || 5, seg: parseInt($('c-seg').value, 10) || 20, borde: $('c-borde').checked,
+    enteras: $('c-enteras').checked,
   };
   guardarCfg();
 }
@@ -477,14 +516,32 @@ function colocada(pz, c) {
   const f = (pts) => pts.map(([x, y]) => [x * cs - y * sn + c.dx, x * sn + y * cs + c.dy]);
   return { poly: f(pz.poly), huecos: pz.huecos.map(f), abiertos: pz.abiertos.map(f), calados: pz.calados.map((s) => ({ pts: f(s.pts), cerrado: s.cerrado, lw: s.lw })), agujeros: pz.agujeros.map((s) => ({ pts: f(s.pts), cerrado: s.cerrado })) };
 }
-function dibujarPlaca(cv, h) {
-  const cfg = S.cfgNest, W = cv.parentElement.clientWidth || 800, H = Math.round(W * cfg.ancho / cfg.largo);
+// Lámina s del resultado: los recortes van primero (índices 0..nRec-1) y después las placas enteras.
+function laminaInfo(s) {
+  const r = S.mejor, cfg = S.cfgNest, nRec = r.nRec || 0;
+  if (s < nRec) { const rc = S.recNest[s]; return { tipo: 'recorte', titulo: 'Recorte: ' + rc.nombre, archivo: /^recorte/i.test(rc.nombre) ? rc.nombre : 'recorte ' + rc.nombre, largo: rc.largo, ancho: rc.ancho, rings: rc.rings, area: rc.area }; }
+  const n = s - nRec + 1;
+  return { tipo: 'placa', titulo: 'Placa ' + n, archivo: 'placa ' + n, largo: cfg.largo, ancho: cfg.ancho, rings: [[[0, 0], [cfg.largo, 0], [cfg.largo, cfg.ancho], [0, cfg.ancho]]], area: cfg.largo * cfg.ancho };
+}
+function dibujarLamina(cv, s) {
+  const lam = laminaInfo(s), W = cv.parentElement.clientWidth || 800;
+  let e = W / lam.largo, H = Math.round(lam.ancho * e);
+  if (H > 640) { H = 640; e = H / lam.ancho; }
+  const ctx = prepararCanvas(cv, W, H), ox = (W - lam.largo * e) / 2;
+  const X = (x) => ox + x * e, Y = (y) => H - y * e;
+  ctx.fillStyle = COL.fondo; ctx.fillRect(0, 0, W, H);
+  ctx.beginPath(); for (const rg of lam.rings) trazar(ctx, rg, X, Y, true);
+  ctx.fillStyle = COL.placa; ctx.fill('evenodd'); ctx.strokeStyle = '#4a5263'; ctx.lineWidth = 1; ctx.stroke();
+  if (lam.tipo === 'placa') { ctx.strokeStyle = '#3b4252'; ctx.setLineDash([4, 4]); const m = S.cfgNest.margen * e; ctx.strokeRect(X(0) + m, m, lam.largo * e - 2 * m, H - 2 * m); ctx.setLineDash([]); }
+  for (const c of S.mejor.coloc) if (c.hoja === s) dibujarPieza(ctx, colocada(S.piezas[c.id], c), X, Y, e);
+}
+function dibujarRings(cv, rings, largo, ancho, W, H) {
   const ctx = prepararCanvas(cv, W, H);
-  const e = W / cfg.largo, X = (x) => x * e, Y = (y) => H - y * e;
-  ctx.fillStyle = COL.placa; ctx.fillRect(0, 0, W, H);
-  ctx.strokeStyle = '#3b4252'; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
-  const m = cfg.margen * e; ctx.strokeRect(m, m, W - 2 * m, H - 2 * m); ctx.setLineDash([]);
-  for (const c of S.mejor.coloc) if (c.hoja === h) dibujarPieza(ctx, colocada(S.piezas[c.id], c), X, Y, e);
+  ctx.fillStyle = COL.fondo; ctx.fillRect(0, 0, W, H);
+  const e = Math.min((W - 12) / Math.max(1, largo), (H - 12) / Math.max(1, ancho)), ox = (W - largo * e) / 2, oy = (H - ancho * e) / 2;
+  const X = (x) => ox + x * e, Y = (y) => H - oy - y * e;
+  ctx.beginPath(); for (const r of rings) if (r.length > 2) trazar(ctx, r, X, Y, true);
+  ctx.fillStyle = '#2a3140'; ctx.fill('evenodd'); ctx.strokeStyle = '#9aa4b8'; ctx.lineWidth = 1; ctx.stroke();
 }
 
 // ───────────── pantalla ─────────────
@@ -570,15 +627,18 @@ function prepararNest() {
   cfgDelForm();
   const cfg = S.cfg, angs = [];
   for (let g = 0; g < 180; g += cfg.paso) angs.push(g * Math.PI / 180);
-  const L = cfg.largo - 2 * cfg.margen - 3, A = cfg.ancho - 2 * cfg.margen - 3;
+  // Recortes tildados, del más grande al más chico; las placas enteras entran si está tildado o si no hay recortes.
+  const recs = S.recortes.filter((r) => r.usar).sort((a, b) => b.area - a.area);
+  const cajas = recs.map((r) => [r.largo, r.ancho]);
+  if (cfg.enteras !== false || !recs.length) cajas.push([cfg.largo, cfg.ancho]);
   const nest = [], grandes = [];
   for (const pz of S.piezas) {
     if (!pz.simple) pz.simple = NestCore.simplificar(pz.poly, TOL_NEST);
-    const entra = angs.some((t) => { const b = NestCore.bbox(NestCore.rotar(pz.simple, t)); return b.x1 - b.x0 <= L && b.y1 - b.y0 <= A; });
+    const entra = angs.some((t) => { const b = NestCore.bbox(NestCore.rotar(pz.simple, t)), w = b.x1 - b.x0, h = b.y1 - b.y0; return cajas.some(([L, A]) => w <= L - 2 * cfg.margen - 3 && h <= A - 2 * cfg.margen - 3); });
     if (entra) nest.push({ id: pz.id, poly: pz.simple, simple: pz.simple, area: pz.area });
     else grandes.push(pz);
   }
-  return { cfg: { ...cfg }, nest, grandes };
+  return { cfg: { ...cfg }, nest, grandes, recs };
 }
 function detenerWorkers() {
   for (const w of S.workers) w.terminate();
@@ -598,15 +658,16 @@ function crearWorkers(nest, cfgW) {
   }
 }
 function iniciar(seguir) {
-  const { cfg, nest, grandes } = prepararNest();
+  const { cfg, nest, grandes, recs } = prepararNest();
   S.grandes = grandes;
   $('sec-resultado').hidden = false;
   if (!nest.length) { S.mejor = null; pintarResultado(); return; }
-  const firma = JSON.stringify([nest.map((p) => p.id + ':' + Math.round(p.area)), cfg.largo, cfg.ancho, cfg.sep, cfg.margen, cfg.paso]);
+  const soloRecortes = recs.length > 0 && cfg.enteras === false;
+  const firma = JSON.stringify([nest.map((p) => p.id + ':' + Math.round(p.area)), cfg.largo, cfg.ancho, cfg.sep, cfg.margen, cfg.paso, recs.map((r) => r.id), soloRecortes]);
   if (firma !== S.firmaMejor || !seguir) { S.mejor = null; S.firmaMejor = firma; }
-  const cfgW = { largo: cfg.largo, ancho: cfg.ancho, sep: cfg.sep, margen: cfg.margen, paso: cfg.paso, res: 1, tol: TOL_NEST };
+  const cfgW = { largo: cfg.largo, ancho: cfg.ancho, sep: cfg.sep, margen: cfg.margen, paso: cfg.paso, res: 1, tol: TOL_NEST, recortes: recs.map((r) => ({ rings: r.rings, largo: r.largo, ancho: r.ancho })), soloRecortes };
   if (firma !== S.firmaWorkers || !S.workers.length) { crearWorkers(nest, cfgW); S.firmaWorkers = firma; }
-  S.nest = nest; S.cfgNest = cfg; S.errorWorker = null;
+  S.nest = nest; S.cfgNest = cfg; S.recNest = recs; S.errorWorker = null;
   S.ronda++; S.vivos = S.workers.length; S.corridas = 0; S.t0 = Date.now(); S.seg = cfg.seg; S.corriendo = true;
   const base = seguir && S.mejor ? S.mejor.orden : undefined;
   S.workers.forEach((w, i) => w.postMessage({ tipo: 'correr', semilla: S.ronda * 100 + i + 1, segundos: cfg.seg, base, nuevo: !seguir }));
@@ -638,8 +699,12 @@ function textoEstado() {
   const r = S.mejor, cfg = S.cfgNest;
   if (!r) return S.corriendo ? 'Acomodando… (la primera vuelta tarda unos segundos)' : (S.errorWorker ? 'No se pudo calcular: ' + esc(S.errorWorker) : 'No hay piezas para acomodar.');
   const ult = r.ultimoLargo, area = S.nest.filter((p) => !r.sinLugar.includes(p.id)).reduce((s, p) => s + p.area, 0);
-  const usado = (r.hojas - 1) * cfg.largo * cfg.ancho + ult * cfg.ancho, apr = usado > 0 ? 100 * area / usado : 0;
-  const base = `<b>${r.hojas} placa${r.hojas === 1 ? '' : 's'}</b>, la última usa ${fmt(ult / 10, 0)} cm de los ${fmt(cfg.largo / 10, 0)} · aprovechamiento ${fmt(apr, 1)} %`;
+  const nRec = r.nRec || 0, recUs = r.usadas.filter((s) => s < nRec);
+  const usado = recUs.reduce((s, k) => s + S.recNest[k].area, 0) + (r.nuevas ? (r.nuevas - 1) * cfg.largo * cfg.ancho + ult * cfg.ancho : 0), apr = usado > 0 ? 100 * area / usado : 0;
+  const partes = [];
+  if (recUs.length) partes.push(`${recUs.length} recorte${recUs.length === 1 ? '' : 's'}`);
+  if (r.nuevas || !recUs.length) partes.push(`${r.nuevas} placa${r.nuevas === 1 ? '' : 's'}`);
+  const base = `<b>${partes.join(' y ')}</b>${r.nuevas ? `, la última usa ${fmt(ult / 10, 0)} cm de los ${fmt(cfg.largo / 10, 0)}` : ''} · aprovechamiento ${fmt(apr, 1)} %`;
   return S.corriendo ? `Buscando… ${S.corridas} vuelta${S.corridas === 1 ? '' : 's'} probada${S.corridas === 1 ? '' : 's'} · por ahora: ${base}` : `Listo: ${base}`;
 }
 function pintarEstado() {
@@ -648,7 +713,7 @@ function pintarEstado() {
   $('barra').firstElementChild.style.width = p + '%';
   $('b-detener').disabled = !S.corriendo;
   $('b-seguir').disabled = S.corriendo || !S.mejor;
-  $('b-zip').disabled = !S.mejor || !S.mejor.hojas;
+  $('b-zip').disabled = !S.mejor || !S.mejor.usadas.length;
   $('b-acomodar').disabled = S.corriendo;
 }
 function pintarResultado() {
@@ -656,18 +721,18 @@ function pintarResultado() {
   const cont = $('placas');
   cont.innerHTML = '';
   const avisos = [];
-  for (const pz of S.grandes) avisos.push(`No entra en la placa: pieza de ${fmt((pz.bb.x1 - pz.bb.x0) / 10, 1)} × ${fmt((pz.bb.y1 - pz.bb.y0) / 10, 1)} cm de ${esc(pz.archivo)}.`);
-  if (S.mejor && S.mejor.sinLugar.length) avisos.push(`${S.mejor.sinLugar.length} pieza${S.mejor.sinLugar.length === 1 ? '' : 's'} no se pudo acomodar.`);
+  const solo = S.recNest.length > 0 && S.cfgNest && S.cfgNest.enteras === false;
+  for (const pz of S.grandes) avisos.push(`No entra en ${solo ? 'ningún recorte' : S.recNest.length ? 'ninguna placa ni recorte' : 'la placa'}: pieza de ${fmt((pz.bb.x1 - pz.bb.x0) / 10, 1)} × ${fmt((pz.bb.y1 - pz.bb.y0) / 10, 1)} cm de ${esc(pz.archivo)}.`);
+  if (S.mejor && S.mejor.sinLugar.length) avisos.push(`${S.mejor.sinLugar.length} pieza${S.mejor.sinLugar.length === 1 ? '' : 's'} no ${S.mejor.sinLugar.length === 1 ? 'entró' : 'entraron'}${solo ? ' en los recortes (está destildado usar placas enteras)' : ''}.`);
   if (avisos.length) { const ul = document.createElement('ul'); ul.className = 'avisos'; ul.innerHTML = avisos.map((t) => `<li class="grave">${t}</li>`).join(''); cont.appendChild(ul); }
   const r = S.mejor; if (!r) return;
-  const cfg = S.cfgNest, placa = cfg.largo * cfg.ancho;
-  for (let h = 0; h < r.hojas; h++) {
-    const cs = r.coloc.filter((c) => c.hoja === h);
-    const area = cs.reduce((s, c) => s + S.piezas[c.id].area, 0);
+  for (const s of r.usadas) {
+    const lam = laminaInfo(s), cs = r.coloc.filter((c) => c.hoja === s);
+    const area = cs.reduce((t, c) => t + S.piezas[c.id].area, 0);
     const d = document.createElement('div'); d.className = 'vista placa';
-    d.innerHTML = `<div class="cap"><b>Placa ${h + 1}</b><span class="sutil">${cs.length} pieza${cs.length === 1 ? '' : 's'} · ${fmt(100 * area / placa, 0)} % de la placa con piezas</span><button class="chico" data-dxf="${h}"${S.corriendo ? ' disabled' : ''}>DXF</button></div><canvas></canvas>`;
+    d.innerHTML = `<div class="cap"><b>${esc(lam.titulo)}</b><span class="sutil">${cs.length} pieza${cs.length === 1 ? '' : 's'} · ${fmt(100 * area / lam.area, 0)} % ${lam.tipo === 'recorte' ? 'del recorte' : 'de la placa'} con piezas</span><button class="chico" data-sobrante="${s}"${S.corriendo ? ' disabled' : ''} title="Guarda lo que sobra de esta lámina como recorte del taller">Guardar sobrante</button><button class="chico" data-dxf="${s}"${S.corriendo ? ' disabled' : ''}>DXF</button></div><canvas></canvas>`;
     cont.appendChild(d);
-    dibujarPlaca(d.querySelector('canvas'), h);
+    dibujarLamina(d.querySelector('canvas'), s);
   }
 }
 
@@ -681,14 +746,14 @@ function circulo(pts) {
   return r > 0.2 && rmax - rmin <= Math.max(0.03, 0.01 * r) ? { cx, cy, r } : null;
 }
 function dxfPlaca(h) {
-  const cfg = S.cfgNest, L = [];
+  const cfg = S.cfgNest, lam = laminaInfo(h), L = [];
   const g = (c, v) => { L.push(String(c).padStart(3, ' '), String(v)); };
   const n = (v) => (Math.round(v * 1000) / 1000 || 0).toFixed(3);
   g(0, 'SECTION'); g(2, 'HEADER');
   g(9, '$ACADVER'); g(1, 'AC1009');
   g(9, '$INSBASE'); g(10, '0.000'); g(20, '0.000'); g(30, '0.000');
   g(9, '$EXTMIN'); g(10, '0.000'); g(20, '0.000'); g(30, '0.000');
-  g(9, '$EXTMAX'); g(10, n(cfg.largo)); g(20, n(cfg.ancho)); g(30, '0.000');
+  g(9, '$EXTMAX'); g(10, n(lam.largo)); g(20, n(lam.ancho)); g(30, '0.000');
   g(9, '$INSUNITS'); g(70, 4);
   g(9, '$MEASUREMENT'); g(70, 1);
   g(0, 'ENDSEC');
@@ -708,7 +773,7 @@ function dxfPlaca(h) {
     for (const [x, y] of pts) { g(0, 'VERTEX'); g(8, capa); g(10, n(x)); g(20, n(y)); g(30, '0.000'); }
     g(0, 'SEQEND'); g(8, capa);
   };
-  if (cfg.borde) poli('PLACA', [[0, 0], [cfg.largo, 0], [cfg.largo, cfg.ancho], [0, cfg.ancho]], true);
+  if (cfg.borde) for (const rg of lam.rings) poli('PLACA', rg, true); // en un recorte: su contorno (y sus huecos)
   const geos = S.mejor.coloc.filter((c) => c.hoja === h).map((c) => colocada(S.piezas[c.id], c));
   // Orden de mecanizado: calados, agujeros, cortes de adentro y al final los contornos (la pieza se suelta última).
   for (const q of geos) for (const s of q.calados) poli('CALADO', s.pts, s.cerrado);
@@ -754,11 +819,205 @@ function nombreBase() {
   const base = ok.length === 1 ? ok[0] : ok.length ? ok[0] + ' y ' + (ok.length - 1) + ' más' : 'nesting';
   return base.replace(/[\\/:*?"<>|]+/g, ' ').trim().slice(0, 60) || 'nesting';
 }
-function bajarDxf(h) { bajar(new Blob([dxfPlaca(h)], { type: 'application/dxf' }), `${nombreBase()} - placa ${h + 1}.dxf`); }
+const nombreDxf = (s) => `${nombreBase()} - ${laminaInfo(s).archivo.replace(/[\\/:*?"<>|]+/g, ' ').trim()}.dxf`;
+function bajarDxf(s) { bajar(new Blob([dxfPlaca(s)], { type: 'application/dxf' }), nombreDxf(s)); }
 function bajarZip() {
   const r = S.mejor; if (!r) return;
-  const arch = []; for (let h = 0; h < r.hojas; h++) arch.push({ nombre: `${nombreBase()} - placa ${h + 1}.dxf`, datos: dxfPlaca(h) });
-  bajar(zip(arch), `${nombreBase()} - ${r.hojas} placa${r.hojas === 1 ? '' : 's'}.zip`);
+  const arch = r.usadas.map((s) => ({ nombre: nombreDxf(s), datos: dxfPlaca(s) }));
+  bajar(zip(arch), `${nombreBase()} - ${arch.length} lámina${arch.length === 1 ? '' : 's'}.zip`);
+}
+
+// ───────────── recortes del taller ─────────────
+const ESQUINAS = [['bl', 'abajo a la izquierda'], ['br', 'abajo a la derecha'], ['tr', 'arriba a la derecha'], ['tl', 'arriba a la izquierda']];
+const ORIGEN = { medidas: 'por medidas', archivo: 'dibujado', sobrante: 'sobrante de un nesting' };
+function cargarRecortes() {
+  try { const v = JSON.parse(localStorage.getItem('nesting_recortes') || '[]'); return Array.isArray(v) ? v.filter((r) => r && Array.isArray(r.rings)) : []; } catch (_) { return []; }
+}
+function guardarRecortes() {
+  try { localStorage.setItem('nesting_recortes', JSON.stringify(S.recortes)); }
+  catch (_) { $('rec-nota').textContent = 'No se pudieron guardar los recortes en esta compu: duran hasta que cierres la página.'; }
+}
+const idNuevo = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+const hoyCorto = () => new Date().toLocaleDateString('es-AR', { day: 'numeric', month: 'numeric' });
+// Contornos en mm → con la esquina de su caja en (0, 0); el más grande es el borde y los demás, huecos.
+function normalizarRings(rings) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const r of rings) for (const [x, y] of r) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  const out = rings.map((r) => r.map(([x, y]) => [Math.round((x - x0) * 100) / 100, Math.round((y - y0) * 100) / 100]));
+  const areas = out.map(areaPts), mayor = Math.max(...areas);
+  return { rings: out, largo: x1 - x0, ancho: y1 - y0, area: 2 * mayor - areas.reduce((s, a) => s + a, 0) };
+}
+// Rectángulo de largo × ancho con esquinas sacadas: escalón (un rectángulo de a × b) o diagonal (de a en el largo a b en el ancho).
+function poligonoMedidas(L, A, esq) {
+  const e = (k) => { const v = esq[k]; return v && v.tipo && v.a > 0 && v.b > 0 ? v : null; };
+  const bl = e('bl'), br = e('br'), tr = e('tr'), tl = e('tl');
+  const sa = (v) => (v ? v.a : 0), sb = (v) => (v ? v.b : 0);
+  if (sa(bl) + sa(br) >= L || sa(tl) + sa(tr) >= L) return { error: 'Las esquinas de un mismo lado se pisan: lo que sacás en el largo, sumando las dos, tiene que ser menos que el largo.' };
+  if (sb(bl) + sb(tl) >= A || sb(br) + sb(tr) >= A) return { error: 'Las esquinas de un mismo lado se pisan: lo que sacás en el ancho, sumando las dos, tiene que ser menos que el ancho.' };
+  const p = [];
+  if (!bl) p.push([0, 0]); else if (bl.tipo === 'escalon') p.push([0, bl.b], [bl.a, bl.b], [bl.a, 0]); else p.push([0, bl.b], [bl.a, 0]);
+  if (!br) p.push([L, 0]); else if (br.tipo === 'escalon') p.push([L - br.a, 0], [L - br.a, br.b], [L, br.b]); else p.push([L - br.a, 0], [L, br.b]);
+  if (!tr) p.push([L, A]); else if (tr.tipo === 'escalon') p.push([L, A - tr.b], [L - tr.a, A - tr.b], [L - tr.a, A]); else p.push([L, A - tr.b], [L - tr.a, A]);
+  if (!tl) p.push([0, A]); else if (tl.tipo === 'escalon') p.push([tl.a, A], [tl.a, A - tl.b], [0, A - tl.b]); else p.push([tl.a, A], [0, A - tl.b]);
+  return { ring: sinRepetidos(p) };
+}
+function leerFormRecorte() {
+  const num = (el) => { const v = parseFloat(String(el.value).replace(',', '.')); return isFinite(v) ? v : 0; };
+  const L = num($('r-largo')), A = num($('r-ancho'));
+  if (L < 50 || A < 50) return { error: 'Poné el largo y el ancho del recorte en milímetros (50 o más).' };
+  const esq = {};
+  for (const [k] of ESQUINAS) {
+    const tipo = document.querySelector(`[data-esq="${k}"]`).value;
+    esq[k] = { tipo, a: num(document.querySelector(`[data-esq-a="${k}"]`)), b: num(document.querySelector(`[data-esq-b="${k}"]`)) };
+    if (tipo && (esq[k].a <= 0 || esq[k].b <= 0)) return { error: `Falta la medida de la esquina de ${ESQUINAS.find((x) => x[0] === k)[1]}: cuánto se saca en el largo y en el ancho.` };
+  }
+  const r = poligonoMedidas(L, A, esq);
+  return r.error ? r : { ring: r.ring, nombre: $('r-nombre').value.trim(), L, A };
+}
+function vistaFormRecorte() {
+  const f = leerFormRecorte(), cv = $('r-vista');
+  $('r-error').textContent = f.error || '';
+  const W = cv.parentElement.clientWidth - 24 || 500;
+  if (f.error) { const L = parseFloat($('r-largo').value) || 1200, A = parseFloat($('r-ancho').value) || 600; dibujarRings(cv, [], L, A, W, 200); return; }
+  dibujarRings(cv, [f.ring], f.L, f.A, W, Math.max(120, Math.min(260, W * f.A / f.L)));
+}
+function abrirFormRecorte() {
+  $('r-esquinas').innerHTML = ESQUINAS.map(([k, t]) => `<label>Esquina de ${t} (mm)<span class="esq"><select data-esq="${k}"><option value="">entera</option><option value="escalon">escalón</option><option value="diagonal">diagonal</option></select><input type="number" data-esq-a="${k}" min="0" step="1" placeholder="largo"> × <input type="number" data-esq-b="${k}" min="0" step="1" placeholder="ancho"></span></label>`).join('');
+  $('r-nombre').value = ''; $('form-rec').hidden = false;
+  vistaFormRecorte();
+}
+function agregarRecorte(rec) {
+  S.recortes.push(rec);
+  guardarRecortes(); pintarRecortes();
+  if (rec.usar && (S.mejor || S.corriendo)) invalidarResultado('Cambiaron los recortes: volvé a acomodar.');
+}
+function pintarRecortes() {
+  const cont = $('lista-recortes');
+  cont.innerHTML = S.recortes.length ? '' : '<p class="sutil" style="margin:8px 0 0">Todavía no hay recortes guardados.</p>';
+  for (const r of S.recortes) {
+    const d = document.createElement('div'); d.className = 'rec';
+    d.innerHTML = `<canvas></canvas><span class="nom">${esc(r.nombre)}</span><span class="det">${fmt(r.largo / 10, 1)} × ${fmt(r.ancho / 10, 1)} cm · ${fmt(r.area / 1e6, 2)} m² · ${ORIGEN[r.origen] || ''}</span><label><input type="checkbox" data-rec-usar="${esc(r.id)}"${r.usar ? ' checked' : ''}> Usar</label><button class="chico" data-rec-borrar="${esc(r.id)}">Borrar</button>`;
+    cont.appendChild(d);
+    dibujarRings(d.querySelector('canvas'), r.rings, r.largo, r.ancho, 96, 54);
+  }
+}
+// Recorte dibujado: el contorno cerrado más grande de la primera página es el borde; los cerrados que están adentro, huecos.
+async function recorteDesdeArchivo(file) {
+  const a = { paginas: [], textos: 0, imagenes: 0 };
+  await leerArchivo(file, a);
+  const cerrados = [];
+  for (const el of a.paginas[0].els) for (const s of el.subs) if (s.cerrado && s.pts.length >= 3) cerrados.push({ pts: s.pts, area: areaPts(s.pts), bb: caja(s.pts) });
+  if (!cerrados.length) throw new Error('No encontré ningún contorno cerrado en ' + file.name + '.');
+  cerrados.sort((u, v) => v.area - u.area);
+  const borde = cerrados[0], huecos = [];
+  for (const c of cerrados.slice(1)) {
+    if (c.area < 100 || (Math.abs(c.area - borde.area) <= 0.01 * borde.area && cajaParecida(c.bb, borde.bb, 0.5))) continue;
+    if (contiene(borde, c) && !huecos.some((h) => contiene(h, c))) huecos.push(c);
+  }
+  return { id: idNuevo(), nombre: file.name.replace(/\.(ai|pdf)$/i, ''), ...normalizarRings([borde.pts, ...huecos.map((h) => h.pts)]), origen: 'archivo', usar: true };
+}
+
+// ───────────── sobrante de una lámina ─────────────
+// Se rearma la ocupación de la lámina (lo de afuera del recorte, sin margen, y cada pieza agrandada por la separación, que es
+// lo que se lleva la fresa), se sacan las franjas de menos de ~2,5 cm entre piezas (una apertura), y queda la parte libre
+// más grande, con sus huecos, como contornos simplificados a 1 mm.
+function abrir(m, W, H, R) {
+  const t1 = new Uint8Array(W * H), t2 = new Uint8Array(W * H), lado = 2 * R + 1;
+  const filas = (src, dst, todo) => {
+    const pre = new Int32Array(W + 1);
+    for (let j = 0; j < H; j++) {
+      const o = j * W;
+      for (let x = 0; x < W; x++) pre[x + 1] = pre[x] + src[o + x];
+      for (let x = 0; x < W; x++) { const n = pre[Math.min(W - 1, x + R) + 1] - pre[Math.max(0, x - R)]; dst[o + x] = todo ? (n === lado ? 1 : 0) : (n > 0 ? 1 : 0); }
+    }
+  };
+  const columnas = (src, dst, todo) => {
+    const pre = new Int32Array(H + 1);
+    for (let x = 0; x < W; x++) {
+      for (let j = 0; j < H; j++) pre[j + 1] = pre[j] + src[j * W + x];
+      for (let j = 0; j < H; j++) { const n = pre[Math.min(H - 1, j + R) + 1] - pre[Math.max(0, j - R)]; dst[j * W + x] = todo ? (n === lado ? 1 : 0) : (n > 0 ? 1 : 0); }
+    }
+  };
+  filas(m, t1, true); columnas(t1, t2, true);   // erosión con un cuadrado
+  filas(t2, t1, false); columnas(t1, t2, false); // dilatación con el mismo cuadrado
+  return t2;
+}
+function mayorComponente(m, W, H) {
+  const et = new Int32Array(W * H), cola = new Int32Array(W * H);
+  let id = 0, mejor = 0, mejorN = 0;
+  for (let i = 0; i < W * H; i++) {
+    if (!m[i] || et[i]) continue;
+    id++; let ini = 0, fin = 0; cola[fin++] = i; et[i] = id;
+    while (ini < fin) {
+      const k = cola[ini++], x = k % W;
+      if (x > 0 && m[k - 1] && !et[k - 1]) { et[k - 1] = id; cola[fin++] = k - 1; }
+      if (x < W - 1 && m[k + 1] && !et[k + 1]) { et[k + 1] = id; cola[fin++] = k + 1; }
+      if (k >= W && m[k - W] && !et[k - W]) { et[k - W] = id; cola[fin++] = k - W; }
+      if (k + W < W * H && m[k + W] && !et[k + W]) { et[k + W] = id; cola[fin++] = k + W; }
+    }
+    if (fin > mejorN) { mejorN = fin; mejor = id; }
+  }
+  if (!mejor) return null;
+  const out = new Uint8Array(W * H);
+  for (let i = 0; i < W * H; i++) if (et[i] === mejor) out[i] = 1;
+  return { mascara: out, celdas: mejorN };
+}
+// Bordes de una máscara de celdas como contornos cerrados (lo lleno queda a la izquierda; en un cruce en diagonal se dobla a
+// la izquierda, así dos zonas que se tocan en una punta quedan separadas).
+function contornos(m, W, H) {
+  const V = W + 1, sal = new Map();
+  const lleno = (x, y) => x >= 0 && y >= 0 && x < W && y < H && m[y * W + x] === 1;
+  const arista = (x0, y0, x1, y1) => { const k = y0 * V + x0, d = y1 * V + x1, l = sal.get(k); if (l) l.push(d); else sal.set(k, [d]); };
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    if (!m[y * W + x]) continue;
+    if (!lleno(x, y - 1)) arista(x, y, x + 1, y);
+    if (!lleno(x + 1, y)) arista(x + 1, y, x + 1, y + 1);
+    if (!lleno(x, y + 1)) arista(x + 1, y + 1, x, y + 1);
+    if (!lleno(x - 1, y)) arista(x, y + 1, x, y);
+  }
+  const lazos = [];
+  while (sal.size) {
+    const k0 = sal.keys().next().value, pts = [];
+    let cur = k0, dx = 0, dy = 0;
+    do {
+      const l = sal.get(cur), cx = cur % V, cy = (cur - cx) / V;
+      let i = 0;
+      if (l.length > 1) { let mejor = -Infinity; l.forEach((d, j) => { const ex = (d % V) - cx, ey = ((d - (d % V)) / V) - cy, giro = dx * ey - dy * ex; if (giro > mejor) { mejor = giro; i = j; } }); }
+      const sig = l.splice(i, 1)[0]; if (!l.length) sal.delete(cur);
+      const nx = (sig % V) - cx, ny = ((sig - (sig % V)) / V) - cy;
+      if (nx !== dx || ny !== dy) pts.push([cx, cy]); // solo los quiebres
+      dx = nx; dy = ny; cur = sig;
+    } while (cur !== k0 && sal.has(cur));
+    if (pts.length >= 3) lazos.push(pts);
+  }
+  return lazos;
+}
+function calcularSobrante(s) {
+  const r = S.mejor, cfg = S.cfgNest, lam = laminaInfo(s), N = NestCore;
+  const hoja = lam.tipo === 'recorte' ? N.hojaLamina(lam, 1, null) : N.nuevaHoja(Math.ceil(lam.largo), Math.ceil(lam.ancho));
+  const dsc = N.disco(cfg.sep);
+  for (const c of r.coloc) if (c.hoja === s) {
+    const pz = S.piezas[c.id], m = N.mascara(pz.simple, c.grados * Math.PI / 180, 1);
+    N.colocar(hoja, m, Math.round(c.dx + m.ox), Math.round(c.dy + m.oy), dsc);
+  }
+  const W = hoja.W, H = hoja.H, libre = new Uint8Array(W * H).fill(1);
+  for (let j = 0; j < H; j++) for (const [a, b] of hoja.filas[j]) { const a0 = Math.max(0, a), b0 = Math.min(W - 1, b); if (a0 <= b0) libre.fill(0, j * W + a0, j * W + b0 + 1); }
+  const comp = mayorComponente(abrir(libre, W, H, 12), W, H);
+  if (!comp || comp.celdas < 30000) return null; // menos de 0,03 m²: no vale la pena guardarlo
+  const rings = contornos(comp.mascara, W, H).map((l) => N.simplificar(l, 1)).filter((l) => l.length >= 3 && areaPts(l) > 100);
+  return rings.length ? normalizarRings(rings) : null;
+}
+function guardarSobrante(s, btn) {
+  btn.disabled = true; btn.textContent = 'Calculando…';
+  setTimeout(() => {
+    let rec = null;
+    try { rec = calcularSobrante(s); } catch (e) { console.error(e); }
+    if (!rec) { btn.textContent = 'No sobra nada que sirva'; return; }
+    const lam = laminaInfo(s);
+    agregarRecorte({ id: idNuevo(), nombre: `Sobrante de ${lam.archivo} (${nombreBase()}, ${hoyCorto()})`, ...rec, origen: 'sobrante', usar: false });
+    btn.textContent = 'Guardado ✓';
+    $('rec-nota').textContent = 'El sobrante quedó en Recortes del taller, destildado: tildalo cuando ya esté cortada esta tanda.';
+  }, 30);
 }
 
 // ───────────── eventos ─────────────
@@ -792,7 +1051,43 @@ $('b-acomodar').addEventListener('click', () => iniciar(false));
 $('b-seguir').addEventListener('click', () => iniciar(true));
 $('b-detener').addEventListener('click', detener);
 $('b-zip').addEventListener('click', bajarZip);
-$('placas').addEventListener('click', (e) => { const b = e.target.closest('[data-dxf]'); if (b) bajarDxf(parseInt(b.getAttribute('data-dxf'), 10)); });
+$('placas').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-dxf]'); if (b) bajarDxf(parseInt(b.getAttribute('data-dxf'), 10));
+  const so = e.target.closest('[data-sobrante]'); if (so) guardarSobrante(parseInt(so.getAttribute('data-sobrante'), 10), so);
+});
+pintarRecortes();
+$('b-rec-medidas').addEventListener('click', abrirFormRecorte);
+$('form-rec').addEventListener('input', vistaFormRecorte);
+$('form-rec').addEventListener('change', vistaFormRecorte);
+$('r-cancelar').addEventListener('click', () => { $('form-rec').hidden = true; });
+$('r-guardar').addEventListener('click', () => {
+  const f = leerFormRecorte();
+  if (f.error) { $('r-error').textContent = f.error; return; }
+  agregarRecorte({ id: idNuevo(), nombre: f.nombre || `Recorte ${S.recortes.length + 1}`, ...normalizarRings([f.ring]), origen: 'medidas', usar: true });
+  $('form-rec').hidden = true; $('rec-nota').textContent = '';
+});
+$('b-rec-archivo').addEventListener('click', () => $('inp-rec').click());
+$('inp-rec').addEventListener('change', async () => {
+  const f = $('inp-rec').files[0]; $('inp-rec').value = '';
+  if (!f) return;
+  $('rec-nota').textContent = 'Leyendo ' + f.name + '…';
+  try { agregarRecorte(await recorteDesdeArchivo(f)); $('rec-nota').textContent = ''; }
+  catch (e) { $('rec-nota').textContent = (e && e.message) || String(e); }
+});
+$('lista-recortes').addEventListener('change', (e) => {
+  const c = e.target.closest('[data-rec-usar]'); if (!c) return;
+  const r = S.recortes.find((x) => x.id === c.getAttribute('data-rec-usar')); if (!r) return;
+  r.usar = c.checked; guardarRecortes();
+  if (S.mejor || S.corriendo) invalidarResultado('Cambiaron los recortes: volvé a acomodar.');
+});
+$('lista-recortes').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-rec-borrar]'); if (!b) return;
+  const r = S.recortes.find((x) => x.id === b.getAttribute('data-rec-borrar')); if (!r) return;
+  if (!confirm('¿Borrar el recorte "' + r.nombre + '"?')) return;
+  S.recortes = S.recortes.filter((x) => x !== r); guardarRecortes(); pintarRecortes();
+  if (r.usar && (S.mejor || S.corriendo)) invalidarResultado('Cambiaron los recortes: volvé a acomodar.');
+});
+$('c-enteras').addEventListener('change', () => { cfgDelForm(); if (S.mejor || S.corriendo) invalidarResultado('Cambió la configuración: volvé a acomodar.'); });
 let anchoPrevio = window.innerWidth;
 window.addEventListener('resize', () => {
   if (Math.abs(window.innerWidth - anchoPrevio) < 40) return;

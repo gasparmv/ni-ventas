@@ -5,6 +5,7 @@
 //  · se coloca cada pieza donde su borde derecho quede lo más a la izquierda posible (y lo más abajo), probando todas las
 //    rotaciones y las placas en orden; si no entra en ninguna, abre otra.
 //  · varias corridas con distinto orden de piezas; gana la que usa menos placas y deja la última más corta.
+//  · recortes del taller (cfg.recortes, con cualquier forma): se llenan primero y después se abren placas enteras.
 // Sin dependencias: sirve en un Worker (importScripts) y en Node (require) para las pruebas.
 (function (raiz) {
   'use strict';
@@ -112,6 +113,61 @@
     return { Rv, dx };
   }
   function nuevaHoja(W, H) { const filas = new Array(H); for (let j = 0; j < H; j++) filas[j] = []; return { W, H, filas, usado: 0, ocupadas: 0 }; }
+  // Tramos ordenados y sin pisarse: A menos B, y lo que falta de [0, W-1].
+  function restar(A, B) {
+    const out = []; let k = 0;
+    for (const [a0, b0] of A) {
+      let a = a0;
+      while (k < B.length && B[k][1] < a) k++;
+      for (let q = k; q < B.length && B[q][0] <= b0; q++) { if (B[q][0] > a) out.push([a, B[q][0] - 1]); a = Math.max(a, B[q][1] + 1); }
+      if (a <= b0) out.push([a, b0]);
+    }
+    return out;
+  }
+  function complemento(sp, W) { const out = []; let x = 0; for (const [a, b] of sp) { if (a > x) out.push([x, a - 1]); x = b + 1; } if (x <= W - 1) out.push([x, W - 1]); return out; }
+  // Lámina con forma (un recorte del taller): rings = contornos en mm con la esquina de su caja en (0, 0), par-impar (el borde
+  // y sus huecos). Queda ocupado todo lo que no es lámina entera: las celdas de afuera y las que toca el borde. Con dsc, eso
+  // se agranda por el margen (las piezas quedan a margen mm o más del borde del recorte).
+  function hojaLamina(rec, res, dsc) {
+    const W = Math.ceil(rec.largo / res) + 1, H = Math.ceil(rec.ancho / res) + 1;
+    const borde = new Array(H); for (let j = 0; j < H; j++) borde[j] = [];
+    const cx = (x) => Math.floor(x / res), fila = (y) => Math.min(H - 1, Math.max(0, Math.floor(y / res)));
+    const ar = [];
+    for (const p of rec.rings) for (let i = 0, n = p.length, q = n - 1; i < n; q = i++) {
+      let xa = p[q][0], ya = p[q][1], xb = p[i][0], yb = p[i][1];
+      if (ya > yb) { const tx = xa, ty = ya; xa = xb; ya = yb; xb = tx; yb = ty; }
+      const j0 = fila(ya), j1 = fila(yb);
+      if (j0 === j1) borde[j0].push([cx(Math.min(xa, xb)), cx(Math.max(xa, xb))]);
+      else {
+        const pend = (xb - xa) / (yb - ya);
+        for (let j = j0; j <= j1; j++) { const x1 = xa + (Math.max(ya, j * res) - ya) * pend, x2 = xa + (Math.min(yb, (j + 1) * res) - ya) * pend; borde[j].push(x1 < x2 ? [cx(x1), cx(x2)] : [cx(x2), cx(x1)]); }
+      }
+      if (ya !== yb) ar.push([ya, yb, xa, xb]);
+    }
+    ar.sort((u, v) => u[0] - v[0]);
+    const hoja = nuevaHoja(W, H), act = [], xs = [];
+    let sig = 0, total = 0;
+    const afuera = new Array(H);
+    for (let j = 0; j < H; j++) {
+      const y = j * res + res * 1e-6;
+      while (sig < ar.length && ar[sig][0] <= y) act.push(ar[sig++]);
+      xs.length = 0;
+      for (let z = act.length - 1; z >= 0; z--) { const e = act[z]; if (e[1] <= y) { act.splice(z, 1); continue; } xs.push(e[2] + (y - e[0]) * (e[3] - e[2]) / (e[1] - e[0])); }
+      xs.sort((u, v) => u - v);
+      const dentro = [];
+      for (let k = 0; k + 1 < xs.length; k += 2) { const a = Math.ceil(xs[k] / res - 1e-9), b = Math.floor(xs[k + 1] / res + 1e-9) - 1; if (a <= b) dentro.push([a, b]); }
+      afuera[j] = complemento(restar(unir(dentro, 0, W - 1), unir(borde[j], 0, W - 1)), W);
+      total += afuera[j].length;
+    }
+    if (!dsc) { for (let j = 0; j < H; j++) { hoja.filas[j] = afuera[j]; for (const [a, b] of afuera[j]) hoja.ocupadas += b - a + 1; } return hoja; }
+    const ini = new Int32Array(H + 1), dat = new Int32Array(total * 2);
+    let k = 0;
+    for (let j = 0; j < H; j++) { ini[j] = k; for (const [a, b] of afuera[j]) { dat[k++] = a; dat[k++] = b; } }
+    ini[H] = k;
+    colocar(hoja, { h: H, ini, dat, r0: 0, r1: H - 1, c1: -1 }, 0, 0, dsc);
+    hoja.usado = 0;
+    return hoja;
+  }
   // Primer tramo ocupado de la fila cuyo fin es >= x (los tramos están ordenados y no se pisan).
   function primeroConFin(occ, x) { let lo = 0, hi = occ.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (occ[mid][1] < x) lo = mid + 1; else hi = mid; } return lo; }
   // La x más a la izquierda (>= x0) donde la máscara entra en la fila gy sin pisar nada; null si pasa de xlim.
@@ -177,13 +233,23 @@
     const M = Math.ceil((cfg.margen + tol) / res - 1e-9), dsc = disco((cfg.sep + 2 * tol) / res + (cfg.holgura || 0));
     const angs = angulos(cfg.paso);
     const rapido = cfg.rapido !== false, paso3 = Math.max(1, Math.round(15 / cfg.paso)); // rotaciones gruesas cada ~15°
-    const hojas = [], coloc = [], sinLugar = [];
+    // Los recortes del taller van primero (en el orden que vienen); después, placas enteras de largo × ancho si hacen falta
+    // (cfg.soloRecortes: no se abren placas y lo que no entra queda sin lugar).
+    const recs = cfg.recortes || [], dscM = recs.length ? disco((cfg.margen + tol) / res) : null;
+    const hojas = recs.map((rc, k) => {
+      const clave = 'lamina|' + k;
+      let base = cache.get(clave);
+      if (!base) { base = hojaLamina(rc, res, dscM); cache.set(clave, base); }
+      return { W: base.W, H: base.H, filas: base.filas.slice(), usado: 0, ocupadas: base.ocupadas };
+    });
+    const R = hojas.length, coloc = [], sinLugar = [];
     for (const idx of orden) {
       const pz = piezas[idx];
       let elegido = null;
       for (let s = 0; s <= hojas.length; s++) {
+        if (s === hojas.length && cfg.soloRecortes) break;
         const hoja = s < hojas.length ? hojas[s] : nuevaHoja(W, H);
-        if (s < hojas.length && (W * H - hoja.ocupadas) < pz.celdas) continue; // no le queda lugar ni contando todo lo libre
+        if (s < hojas.length && (hoja.W * hoja.H - hoja.ocupadas) < pz.celdas) continue; // no le queda lugar ni contando todo lo libre
         let mejor = null;
         const vistos = new Set(), puntos = [];
         const probarAng = (a) => {
@@ -214,8 +280,12 @@
       if (elegido) coloc.push({ id: pz.id, hoja: elegido.hoja, grados: elegido.a * cfg.paso, dx: elegido.gx * res - elegido.m.ox, dy: elegido.gy * res - elegido.m.oy });
       else sinLugar.push(pz.id);
     }
-    const ult = hojas.length ? hojas[hojas.length - 1].usado * res : 0;
-    return { coloc, sinLugar, hojas: hojas.length, ultimoLargo: ult, puntaje: sinLugar.length * 1e9 + hojas.length * 1e6 + ult };
+    // Puntaje: menos piezas sin lugar, menos placas enteras y la última más corta; si alcanzó con recortes, usar menos.
+    const nuevas = hojas.length - R, usadas = [];
+    hojas.forEach((h, k) => { if (k >= R || h.usado > 0) usadas.push(k); });
+    const recUsados = usadas.filter((k) => k < R);
+    const ult = nuevas ? hojas[hojas.length - 1].usado * res : 0, ultRec = recUsados.length ? hojas[recUsados[recUsados.length - 1]].usado * res : 0;
+    return { coloc, sinLugar, hojas: hojas.length, nRec: R, nuevas, usadas, ultimoLargo: ult, puntaje: sinLugar.length * 1e9 + nuevas * 1e6 + (nuevas ? ult : recUsados.length * 1e4 + ultRec) };
   }
   // Órdenes para probar: por área, por lado mayor, por ancho, y después variantes al azar del mejor.
   function rng(sem) { let s = sem >>> 0 || 1; return () => { s ^= s << 13; s >>>= 0; s ^= s >> 17; s ^= s << 5; s >>>= 0; return s / 4294967296; }; }
@@ -233,6 +303,6 @@
     for (let t = 0; t < k; t++) { const i = Math.floor(azar() * n), j = Math.min(n - 1, Math.max(0, i + Math.floor((azar() - 0.5) * 6))); const x = o[i]; o[i] = o[j]; o[j] = x; }
     return o;
   }
-  raiz.NestCore = { bbox, area, rotar, simplificar, mascara, disco, corrida, ordenesBase, variar, rng, angulos };
+  raiz.NestCore = { bbox, area, rotar, simplificar, mascara, disco, corrida, ordenesBase, variar, rng, angulos, nuevaHoja, hojaLamina, colocar };
   if (typeof module !== 'undefined' && module.exports) module.exports = raiz.NestCore;
 })(typeof self !== 'undefined' ? self : this);
