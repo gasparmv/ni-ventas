@@ -7829,11 +7829,40 @@ async function corteNeonEscribirPendientes(env, ahora) {
   if (!token) return;
   const ocupadas = new Set();
   for (const f of new Set(cand.map(p => corteNeonLunes(p.disenado_at)).filter(Boolean))) { try { ((await env.DB.prepare('SELECT hoja_fila FROM corte_pedidos WHERE hoja_fecha=? AND hoja_fila IS NOT NULL').bind(f).all()).results || []).forEach(r => ocupadas.add(+r.hoja_fila)); } catch (_) {} }
+  // Cargado tarde (Gaspar 25-oct: take away, natural market y Parking ya estaban cortados y pagados en semanas anteriores y se
+  // anotaron de nuevo): una fila "neon" con el mismo nombre (o uno contiene al otro) de los 60 días anteriores que no es de otra
+  // pieza → se vincula esa en vez de anotar otra, y aviso a Gaspar por si era un corte nuevo.
+  let hoja = null, vinculadas = null;
+  const yaAnotada = async (p, fecha) => {
+    const nom = corteNormNombre(p.diseno_nombre), hasta = corteHojaSerial(fecha);
+    if (nom.length < 3 || !hasta) return null;
+    if (!hoja) hoja = await corteHojaLeer(token, CORTE_PEDIDOS_SHEET_ID, 'sheet1!A1:J');
+    if (!vinculadas) { vinculadas = new Set(); ((await env.DB.prepare('SELECT hoja_fila FROM corte_pedidos WHERE hoja_fila IS NOT NULL').all()).results || []).forEach(r => vinculadas.add(+r.hoja_fila)); }
+    for (let i = hoja.length - 1; i >= 1; i--) {
+      const r = hoja[i] || [], fila = i + 1;
+      if (corteNormNombre(r[1]) !== 'neon' || vinculadas.has(fila) || ocupadas.has(fila)) continue;
+      const s = corteHojaSerial(r[5]), n = corteNormNombre(r[2]);
+      if (!s || s >= hasta || s < hasta - 60 || !n) continue;
+      if (n === nom || (n.length >= 5 && nom.includes(n)) || (nom.length >= 5 && n.includes(nom))) return { fila, fecha: corteFechaNorm(r[5]), ancho: r[6], alto: r[7], cant: r[3] };
+    }
+    return null;
+  };
   let ok = 0;
   for (const p of cand) {
     const fecha = corteNeonLunes(p.disenado_at);
     if (!fecha) continue;
     try {
+      const vieja = await yaAnotada(p, fecha);
+      if (vieja) {
+        const u = await env.DB.prepare("UPDATE corte_pedidos SET hoja_fila=?, hoja_cliente='neon', hoja_fecha=?, updated_at=? WHERE id=? AND hoja_fila IS NULL").bind(vieja.fila, vieja.fecha, new Date().toISOString(), p.id).run();
+        if ((u && u.meta && u.meta.changes) || 0) {
+          ocupadas.add(vieja.fila); if (vinculadas) vinculadas.add(vieja.fila);
+          const dm = String(vieja.fecha || '').split('/').slice(0, 2).join('/');
+          try { await precotizNotifyGaspar(env, 'Corte · el cartel "' + (p.diseno_nombre || '') + '" (' + p.ancho_real + '×' + p.alto_real + ') ya estaba en la planilla de cortes, en la tanda del ' + dm + ' (fila ' + vieja.fila + ', ' + (vieja.ancho || '?') + '×' + (vieja.alto || '?') + (+vieja.cant > 1 ? ' ×' + vieja.cant : '') + '). Lo tomé como ese corte y no lo anoté de nuevo, así a Aníbal no se le paga dos veces. Si era un corte nuevo, avisame y lo anoto.', { tipo: 'corte_neon_dup', prioridad: 'P3', clave: 'corte_neon_dup:' + p.id }); } catch (_) {}
+          ok++;
+        }
+        continue;
+      }
       const r = await corteHojaFilaPieza(token, { cliente: 'neon', diseno: String(p.diseno_nombre || 'cartel').trim(), cantidad: Math.max(1, parseInt(p.cantidad, 10) || 1), fecha, ancho: +p.ancho_real, alto: +p.alto_real, producto: 'TRANS', aclaracion: '' }, ocupadas);
       ocupadas.add(r.fila);
       await env.DB.prepare("UPDATE corte_pedidos SET hoja_fila=?, hoja_cliente='neon', hoja_fecha=?, updated_at=? WHERE id=? AND hoja_fila IS NULL").bind(r.fila, fecha, new Date().toISOString(), p.id).run();
