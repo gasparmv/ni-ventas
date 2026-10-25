@@ -5141,6 +5141,7 @@ function renderCorte() {
           ${sel && sel.estado === info.estado ? corteDetalleHtml(sel) : ''}
           ${cola.length ? cola.map(p => corteCardHtml(p, true)).join('') : vacio('No hay nada para cortar')}
           ${corteM2AnibalHtml()}
+          <div data-anb-panel style="background:var(--ink-100);border:1px solid var(--border);border-radius:12px;padding:14px;margin-top:16px"><div style="font-size:16px;font-weight:800;margin-bottom:8px">💰 Tus tandas</div>${anibalPanelHtml(false)}</div>
         </div>`;
     }
     // EMMA (disenador): MODO RELEVAMIENTO — un pedido a la vez, línea de montaje.
@@ -5351,6 +5352,7 @@ function renderCorte() {
       <p style="color:var(--fg-mute);font-size:13px;margin:0 0 16px">Tu semana de un vistazo — una fila por cliente. Tocá un cliente para ver sus diseños; tocá un diseño para moverlo de etapa.</p>
       ${corteSinPagarBtnHtml()}
       ${corteSenasHtml()}
+      ${corteAnibalCardHtml()}
       ${corteHerramientasHtml()}
       ${sel ? corteDetalleHtml(sel) : ''}
       ${corteWebPanelHtml(pedidosWeb)}
@@ -9627,6 +9629,137 @@ function corteSenasBind() {
     location.hash = 'chat'; render();
   }; });
 }
+// ===== PAGOS A ANÍBAL (Gaspar 24-oct): sus tandas semanales (acrílicos de alumnos + carteles de Neon Infinito, sin insumos), lo
+// que cobra (15 % de $175.000 el m², por cada pieza cortada) y los pagos. Gaspar paga desde acá los viernes y queda la fecha en la
+// planilla (Venta_Insumos col S). Aníbal ve lo mismo en su usuario, sin los botones. =====
+function anibalFetch(force) {
+  if (!(isAdmin() || isAnibalUser(STATE.user))) return Promise.resolve();
+  if (!force && STATE._anibalAt && Date.now() - STATE._anibalAt < 5 * 60000) return Promise.resolve();
+  STATE._anibalAt = Date.now();
+  return fetch(CONFIG.trackerUrl + '/admin/anibal/tandas', { headers: authHeaders() }).then(r => r.json()).then(j => {
+    STATE.anibal = j && j.ok ? j : { error: (j && (j.motivo || j.error)) || 'No se pudo cargar' };
+    if (STATE.view === 'corte') render();
+    if (document.querySelector('.modal-bg[data-anb-modal]')) anibalModalPintar();
+  }).catch(() => { STATE.anibal = STATE.anibal || { error: 'Error de red' }; });
+}
+function anibalDm(t) { return String(t || '').split('/').slice(0, 2).map(x => x.padStart(2, '0')).join('/'); }
+function anibalPanelHtml(admin) {
+  const a = STATE.anibal;
+  if (!a) return '<div style="padding:12px;color:var(--fg-mute);font-size:13px">Cargando las tandas…</div>';
+  if (a.error) return `<div style="padding:12px;color:#ef4444;font-size:13px">${escapeHtml(a.error)}</div>`;
+  const fm = fmtMoney;
+  const MESES = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
+  const mesNom = k => { const [y, m] = String(k).split('-'); return (MESES[+m - 1] || k) + ' ' + y; };
+  const estPieza = p => p.estado === 'pagada' ? `<span style="color:#22c55e">pagada ${escapeHtml(anibalDm(p.pagado))}</span>` : p.estado === 'cortada' ? `<span style="color:#f59e0b;font-weight:700">${admin ? 'a pagar' : 'a cobrar'}</span>` : p.estado === 'sin_cortar' ? '<span style="color:var(--fg-mute)">sin cortar</span>' : '<span style="color:var(--fg-mute)">cancelada</span>';
+  const chip = s => s.a_pagar > 0 ? `<span style="color:#f59e0b;font-weight:800">${admin ? 'A pagar' : 'A cobrar'} ${fm(s.a_pagar)}</span>`
+    : s.sin_cortar > 0 ? `<span style="color:var(--fg-mute);font-weight:700">Sin cortar todavía</span>`
+    : s.pagado > 0 ? '<span style="color:#22c55e;font-weight:800">Pagada ✓</span>' : '';
+  const semana = s => {
+    const fechas = [...new Set(s.piezas.filter(p => p.estado === 'pagada').map(p => anibalDm(p.pagado)))];
+    const neon = s.piezas.filter(p => p.neon && p.estado !== 'cancelada').length, alum = s.piezas.filter(p => !p.neon && p.estado !== 'cancelada').length;
+    return `<details style="border-top:1px solid var(--border);padding:8px 0"${s.a_pagar > 0 || s.sin_cortar > 0 ? ' open' : ''}>
+      <summary style="cursor:pointer;display:flex;align-items:center;gap:10px;flex-wrap:wrap;list-style:none">
+        <span style="font-weight:800">Tanda del ${escapeHtml(anibalDm(s.lunes))}</span>
+        <span style="font-size:12px;color:var(--fg-mute)">${alum} de alumnos · ${neon} de neón · ${String(s.m2).replace('.', ',')} m² · ${fm(s.total)} · se paga el vie ${escapeHtml(anibalDm(s.viernes))}${fechas.length ? ' · pagada el ' + fechas.map(escapeHtml).join(', ') : ''}</span>
+        <span style="margin-left:auto;font-size:13px">${chip(s)}</span>
+        ${admin && s.a_pagar > 0 ? `<button type="button" class="btn" data-anb-pagar="${s.serial}" style="padding:4px 10px;font-size:12px">Pagar esta tanda</button>` : ''}
+      </summary>
+      <div style="margin-top:6px">
+        ${s.piezas.map(p => `<div style="display:flex;gap:10px;align-items:flex-start;padding:5px 0;border-top:1px dashed var(--border);font-size:12.5px">
+          <div style="flex:1;min-width:0"><div style="overflow-wrap:anywhere">${p.neon ? '<b style="color:var(--accent-cyan,#8FD4DE)">Neon Infinito</b>' : escapeHtml(p.cliente)} · ${escapeHtml(p.diseno)}</div>
+            <div style="font-size:11.5px;color:var(--fg-mute)">${String(p.ancho).replace('.', ',')} × ${String(p.alto).replace('.', ',')} cm${p.cantidad > 1 ? ' · <b style="color:var(--fg)">' + p.cantidad + ' unidades</b>' : ''}</div></div>
+          <div style="text-align:right;white-space:nowrap"><div style="font-weight:700">${fm(p.monto)}</div><div style="font-size:11.5px">${estPieza(p)}</div></div></div>`).join('')}
+      </div>
+    </details>`;
+  };
+  const sinCortar = a.semanas.reduce((x, s) => x + s.sin_cortar, 0);
+  return `
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:6px">
+      <div><div style="font-size:12px;color:var(--fg-mute)">${admin ? 'Para pagarle ahora' : 'Te toca cobrar'}</div><div style="font-size:24px;font-weight:900">${fm(a.a_pagar)}</div>
+        <div style="font-size:12px;color:var(--fg-mute)">Lo cortado que todavía no se pagó · se paga los viernes${sinCortar > 0 ? ' · ' + fm(sinCortar) + ' más cuando se corte lo que falta' : ''}</div></div>
+      ${admin && a.a_pagar > 0 ? `<button type="button" class="btn" data-anb-pagar="" style="margin-left:auto;background:#22c55e;border-color:#22c55e;color:#04140a;font-weight:800">Pagar ${fm(a.a_pagar)}</button>` : ''}
+    </div>
+    <div style="font-size:11.5px;color:var(--fg-subtle);margin-bottom:6px">${Math.round((a.pct || 0.15) * 100)} % de ${fm(a.precio_m2 || 175000)} el m², por cada pieza cortada (alumnos y carteles de Neon Infinito; los insumos no).</div>
+    ${a.semanas.length ? a.semanas.map(semana).join('') : '<div style="padding:12px;color:var(--fg-mute)">Todavía no hay tandas.</div>'}
+    ${a.meses.length ? `<div style="font-weight:800;margin:14px 0 4px">Por mes</div><table style="width:100%;border-collapse:collapse;font-size:13px"><tr style="color:var(--fg-mute);font-size:12px"><td>Mes</td><td style="text-align:right">Cortó</td><td style="text-align:right">${admin ? 'Le pagaste' : 'Cobraste'}</td></tr>${a.meses.map(m => `<tr style="border-top:1px solid var(--border)"><td style="padding:4px 0">${escapeHtml(mesNom(m.mes))}</td><td style="text-align:right">${fm(m.cortado)}</td><td style="text-align:right">${fm(m.pagado)}</td></tr>`).join('')}</table>` : ''}
+    ${a.pagos.length ? `<div style="font-weight:800;margin:14px 0 4px">Pagos</div>${a.pagos.map(p => `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:5px 0;border-top:1px solid var(--border);font-size:12.5px">
+        <b>${fm(p.monto)}</b><span style="color:var(--fg-mute)">${escapeHtml(new Date(p.pagado_at).toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires', weekday: 'short', day: '2-digit', month: '2-digit' }))} · ${escapeHtml(p.metodo || '')} · tanda${String(p.semanas || '').includes(',') ? 's' : ''} ${escapeHtml(String(p.semanas || '').split(',').map(anibalDm).join(', '))}${p.calculado != null && Math.abs((+p.calculado || 0) - (+p.monto || 0)) > 1 ? ' · el sistema daba ' + fm(p.calculado) : ''}${p.nota ? ' · ' + escapeHtml(p.nota) : ''}</span>
+        ${admin ? `<button type="button" class="btn btn-ghost" data-anb-deshacer="${p.id}" style="margin-left:auto;padding:2px 8px;font-size:11.5px">Deshacer</button>` : ''}</div>`).join('')}` : ''}`;
+}
+function corteAnibalCardHtml() {
+  if (!isAdmin()) return '';
+  const a = STATE.anibal;
+  const txt = !a ? 'cargando…' : a.error ? escapeHtml(a.error) : (a.a_pagar > 0 ? 'para pagarle: <b style="color:var(--fg)">' + fmtMoney(a.a_pagar) + '</b>' : 'no hay nada para pagarle');
+  return `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;border:1px solid var(--border);background:var(--ink-100);border-radius:12px;padding:10px 14px;margin:0 0 14px">
+    <span style="font-size:15px;font-weight:800">✂ Aníbal</span><span style="font-size:13px;color:var(--fg-mute)">${txt}</span>
+    <button type="button" class="btn btn-ghost" data-anb-abrir style="margin-left:auto;padding:5px 12px;font-size:12.5px">Tandas y pagos</button></div>`;
+}
+function anibalModal() {
+  if (document.querySelector('.modal-bg[data-anb-modal]')) return;
+  const bg = document.createElement('div'); bg.className = 'modal-bg'; bg.setAttribute('data-anb-modal', '1');
+  bg.innerHTML = '<div class="modal" style="max-width:760px;width:calc(100vw - 32px)"><div class="modal-body" data-anb-body></div></div>';
+  document.body.appendChild(bg); void bg.offsetWidth; bg.classList.add('open');
+  bg.addEventListener('click', e => { if (e.target === bg) anibalModalCerrar(); });
+  anibalModalPintar();
+  anibalFetch(true);
+}
+function anibalModalCerrar() { const bg = document.querySelector('.modal-bg[data-anb-modal]'); if (!bg) return; bg.classList.remove('open'); setTimeout(() => bg.remove(), 150); }
+function anibalModalPintar() {
+  const body = document.querySelector('.modal-bg[data-anb-modal] [data-anb-body]'); if (!body) return;
+  body.innerHTML = `<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px"><div style="flex:1;font-size:18px;font-weight:900">✂ Aníbal · tandas y pagos</div><button type="button" class="btn btn-ghost" data-anb-cerrar style="padding:4px 10px">✕</button></div>
+    <div style="max-height:72vh;overflow:auto">${anibalPanelHtml(true)}</div>`;
+  body.querySelector('[data-anb-cerrar]').onclick = anibalModalCerrar;
+  anibalBindAcciones(body);
+}
+function anibalBindAcciones(root) {
+  root.querySelectorAll('[data-anb-pagar]').forEach(b => { b.onclick = (e) => { e.preventDefault(); e.stopPropagation(); const v = b.getAttribute('data-anb-pagar'); anibalPagarUI(v ? [parseInt(v, 10)] : []); }; });
+  root.querySelectorAll('[data-anb-deshacer]').forEach(b => { b.onclick = async () => {
+    const p = ((STATE.anibal || {}).pagos || []).find(x => String(x.id) === b.getAttribute('data-anb-deshacer')); if (!p) return;
+    if (!(await showConfirm('Deshago el pago de ' + fmtMoney(p.monto) + ': las piezas vuelven a "a pagar" y se borra la fecha en la planilla. A Aníbal no se le avisa nada.', { title: 'Deshacer pago', confirmLabel: 'Deshacer', cancelLabel: 'Cancelar' }))) return;
+    b.disabled = true;
+    let j = {}; try { j = await fetch(CONFIG.trackerUrl + '/admin/anibal/deshacer', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ id: p.id }) }).then(r => r.json()); } catch (_) {}
+    niToast(j.ok ? 'Pago deshecho' : (j.motivo || 'No se pudo deshacer'), j.ok ? {} : { error: true });
+    anibalFetch(true);
+  }; });
+}
+// Pagar (todo o una tanda): muestra qué se paga, deja corregir el monto y anotar cómo; el server vuelve a calcular y, si la
+// planilla cambió en el medio, no paga.
+function anibalPagarUI(semanas) {
+  const a = STATE.anibal; if (!a || a.error) return;
+  const sel = a.semanas.filter(s => s.a_pagar > 0 && (!semanas.length || semanas.includes(s.serial)));
+  const piezas = sel.flatMap(s => s.piezas.filter(p => p.estado === 'cortada'));
+  const visto = Math.round(piezas.reduce((x, p) => x + (+p.monto || 0), 0));
+  if (!visto) { niToast('No hay nada para pagar'); return; }
+  const bg = document.createElement('div'); bg.className = 'modal-bg';
+  bg.innerHTML = `<div class="modal modal--login"><div class="modal-h"><h3>Pagarle a Aníbal</h3></div><div class="modal-body">
+      ${sel.map(s => `<div style="display:flex;justify-content:space-between;gap:10px;padding:4px 0;border-top:1px dashed var(--border)"><span>Tanda del ${escapeHtml(anibalDm(s.lunes))} · ${s.piezas.filter(p => p.estado === 'cortada').length} piezas</span><b>${fmtMoney(s.a_pagar)}</b></div>`).join('')}
+      <div style="display:flex;justify-content:space-between;margin:8px 0 12px;font-size:15px"><span>Total</span><b>${fmtMoney(visto)}</b></div>
+      <label class="nc-field"><span class="nc-label">Monto que le pagás</span><input class="nc-input" data-anb-monto inputmode="numeric" value="${visto}"></label>
+      <div style="display:flex;gap:8px;margin:10px 0">${[['transferencia', 'Transferencia'], ['efectivo', 'Efectivo']].map(([v, l], i) => `<label style="display:flex;gap:6px;align-items:center;border:1px solid var(--border);border-radius:8px;padding:6px 10px;cursor:pointer"><input type="radio" name="anb-metodo" value="${v}"${i ? '' : ' checked'}>${l}</label>`).join('')}</div>
+      <label class="nc-field"><span class="nc-label">Nota (opcional)</span><input class="nc-input" data-anb-nota maxlength="200"></label>
+      <div style="font-size:12px;margin-top:10px;color:var(--fg-mute)">Queda anotado acá y con la fecha de hoy en la planilla (Venta_Insumos, columna S). A Aníbal no se le manda nada.</div>
+    </div><div class="modal-actions"><button class="btn btn-ghost" data-anb-no>Cancelar</button><button class="btn btn-cyan" data-anb-si>Registrar pago</button></div></div>`;
+  document.body.appendChild(bg); void bg.offsetWidth; bg.classList.add('open');
+  const cerrar = () => { bg.classList.remove('open'); setTimeout(() => bg.remove(), 150); };
+  let enviando = false;
+  bg.querySelector('[data-anb-no]').onclick = () => { if (!enviando) cerrar(); };
+  bg.addEventListener('click', e => { if (e.target === bg && !enviando) cerrar(); });
+  const si = bg.querySelector('[data-anb-si]');
+  si.onclick = async () => {
+    if (enviando) return;
+    const monto = parseInt(String(bg.querySelector('[data-anb-monto]').value || '').replace(/\D/g, ''), 10);
+    if (!(monto >= 0)) { niToast('Poné el monto', { error: true }); return; }
+    enviando = true; si.disabled = true; si.textContent = 'Registrando…';
+    const metodo = (bg.querySelector('input[name="anb-metodo"]:checked') || {}).value || 'transferencia';
+    let j = {};
+    try { j = await fetch(CONFIG.trackerUrl + '/admin/anibal/pagar', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ semanas: sel.map(s => s.serial), visto, monto, metodo, nota: bg.querySelector('[data-anb-nota]').value }) }).then(r => r.json()); } catch (_) {}
+    if (j.ok) {
+      cerrar();
+      niToast('Pago de ' + fmtMoney(j.monto) + ' registrado · ' + j.piezas + ' piezas marcadas en la planilla' + (j.registrado ? '' : ' (⚠ no quedó en el historial)'));
+      anibalFetch(true);
+    } else { enviando = false; si.disabled = false; si.textContent = 'Registrar pago'; niToast(j.motivo || 'No se pudo registrar', { error: true }); if (j.error === 'cambio') anibalFetch(true); }
+  };
+}
 // ===== SIN PAGAR DESPUÉS DEL MARTES 16 h (Gaspar 20-oct: "un botón a la derecha bien notorio para los que no paguen hasta
 // el martes 16 h así les hago un seguimiento") =====
 function corteSinPagarFetch(force) {
@@ -9793,6 +9926,8 @@ async function bindCorte() {
   // "Sin pagar" después del martes 16 h: el botón rojo de la derecha (solo admin).
   if (isAdmin()) { corteSinPagarFetch(false); const spb = document.querySelector('[data-corte-sinpagar]'); if (spb) spb.onclick = corteSinPagarModal; }
   if (isAdmin()) corteSenasBind(); // señas de pedidos web
+  // Aníbal: tandas y pagos (Gaspar abre el panel desde la tarjeta; Aníbal lo ve en su pantalla).
+  if (isAdmin() || isAnibalUser(STATE.user)) { anibalFetch(false); document.querySelectorAll('[data-anb-abrir]').forEach(b => { b.onclick = anibalModal; }); const ap = document.querySelector('[data-anb-panel]'); if (ap) anibalBindAcciones(ap); }
   if (STATE.cortePedidos === undefined && !STATE._corteLoading) {
     await corteCargar(false);
     return;

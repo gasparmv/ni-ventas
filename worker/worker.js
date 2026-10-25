@@ -7019,6 +7019,113 @@ async function corteMarcarPagadoPorTotal(env, cliente, totalEsperado, caja, fech
     return { ok: true, marcadas: rowIdx.length, caja: cajaOk };
   } catch (e) { return { error: String((e && e.message) || e) }; }
 }
+// ===== PAGOS A ANÍBAL (corte de acrílico) — Gaspar 24-oct-2026 =====
+// "Aníbal cobra el 15% de lo que le cobramos a cada alumno de corte, o sea el 15% de $175.000 por metro cuadrado", "tiene que
+// pagarle por cada pieza cortada" (las de varias unidades cuentan todas), de los acrílicos de los alumnos y de los carteles de
+// Neon Infinito; los insumos (cables, fuentes, packs) no. Se le paga los viernes lo que cortó el finde anterior.
+//  · La lista sale de Venta_Insumos (2026 v4), que trae fila por fila la planilla de cortes de Emma: es lo mismo con lo que Gaspar
+//    le pagaba "con la captura del Excel". Semana = la fecha de la tanda (col B, el lunes después del finde de corte).
+//  · El monto lo calcula el sistema (m² × cantidad × precio del m² × 15 %): la columna Anibal de la planilla divide por la cantidad
+//    en las filas nuevas y Gaspar pidió dejarla como está.
+//  · Pagada = la fila tiene fecha en la col S ("Aníbal pagado"), que escribe el pago. Una pieza que el CRM tiene sin cortar
+//    (pedido / matriz_lista) no se paga hasta que se corta; una cancelada no se paga.
+// kv: anibal_pct (0.15), corte_precio_m2 (TRANS, 175000), anibal_precio_negro (154000), anibal_desde ('28/9/2026': lo anterior no
+// se mira), anibal_aviso_on ('1': aviso a Gaspar los viernes desde las 10 AR si hay algo para pagarle).
+const ANIBAL_VI_GID = 2035803009; // pestaña Venta_Insumos
+const ANIBAL_CORTADA = ['cortado', 'separado', 'embalado', 'despachado', 'entregado'];
+let _anibalSchemaOk = false;
+async function ensureAnibalSchema(env) {
+  if (_anibalSchemaOk) return true;
+  try { await env.DB.prepare('CREATE TABLE IF NOT EXISTS anibal_pagos (id INTEGER PRIMARY KEY AUTOINCREMENT, pagado_at TEXT, monto INTEGER, calculado INTEGER, filas TEXT, semanas TEXT, n_filas INTEGER, metodo TEXT, nota TEXT, por TEXT, created_at TEXT)').run(); _anibalSchemaOk = true; } catch (_) {}
+  return _anibalSchemaOk;
+}
+// Serial de Sheets ↔ 'd/m/aaaa' y el día de hoy en hora AR como serial.
+function anibalSerialTxt(s) { const d = new Date(Date.UTC(1899, 11, 30) + Math.floor(s) * 86400000); return d.getUTCDate() + '/' + (d.getUTCMonth() + 1) + '/' + d.getUTCFullYear(); }
+function anibalHoySerial() { return Math.floor((Date.now() - 3 * 3600000) / 86400000) + 25569; }
+function anibalEsAnibal(session) { return corteNormNombre((session && session.user) || '') === 'anibal'; }
+// Las filas de acrílico de Venta_Insumos desde anibal_desde, con su monto y su estado ('pagada' | 'cortada' | 'sin_cortar' |
+// 'cancelada'). → { filas, token }
+async function anibalLeer(env) {
+  const token = await sheetsAccessToken(env);
+  if (!token) throw new Error('sin acceso a la planilla');
+  const desde = corteHojaSerial(await kvGet(env, 'anibal_desde', '28/9/2026')) || 0;
+  const pct = parseFloat(await kvGet(env, 'anibal_pct', '0.15')) || 0.15;
+  const precio = { TRANS: parseInt(await kvGet(env, 'corte_precio_m2', '175000'), 10) || 175000, NEGRO: parseInt(await kvGet(env, 'anibal_precio_negro', '154000'), 10) || 154000, BLANCO: 127000 };
+  let ult = 0; try { const r = await env.DB.prepare('SELECT MAX(hoja_fila) AS m FROM corte_pedidos').first(); ult = +(r && r.m) || 0; } catch (_) {}
+  const ini = Math.max(2, ult - 2000);
+  const v = (await corteSheetsReq(token, 'GET', SHEETS_API_BASE + CORTE_SHEET_ID + '/values/' + encodeURIComponent('Venta_Insumos!A' + ini + ':S') + '?valueRenderOption=UNFORMATTED_VALUE')).values || [];
+  const est = {};
+  try { ((await env.DB.prepare('SELECT hoja_fila, estado FROM corte_pedidos WHERE hoja_fila >= ?').bind(ini).all()).results || []).forEach(r => { est[r.hoja_fila] = String(r.estado || ''); }); } catch (_) {}
+  const hoy = anibalHoySerial(), filas = [];
+  v.forEach((r, i) => {
+    const fila = ini + i, serial = typeof r[1] === 'number' ? Math.floor(r[1]) : 0;
+    if (!serial || serial < desde) return;
+    const producto = String(r[3] || '').trim().toUpperCase();
+    if (!precio[producto]) return; // insumos: no son de Aníbal
+    const ancho = +r[5] || 0, alto = +r[6] || 0, cantidad = Math.max(1, parseInt(r[7], 10) || 1);
+    if (!(ancho > 0 && alto > 0)) return;
+    const m2 = ancho * alto / 10000 * cantidad;
+    const p = r[18], pagado = typeof p === 'number' ? anibalSerialTxt(p) : String(p == null ? '' : p).trim();
+    const e = est[fila] || '';
+    const estado = pagado ? 'pagada' : (e === 'cancelado' || e === 'prueba') ? 'cancelada'
+      : ((e && !ANIBAL_CORTADA.includes(e)) || (!e && serial - 2 > hoy)) ? 'sin_cortar' : 'cortada'; // sin vínculo y de una semana que todavía no se cortó → sin cortar
+    const cliente = String(r[2] || '').trim();
+    filas.push({ fila, serial, lunes: anibalSerialTxt(serial), cliente, neon: corteNormNombre(cliente) === 'neon', producto, diseno: String(r[4] || '').trim(), ancho, alto, cantidad, m2: Math.round(m2 * 10000) / 10000, monto: Math.round(m2 * precio[producto] * pct * 100) / 100, pagado, estado });
+  });
+  return { filas, token, pct, precio: precio.TRANS };
+}
+// Lo que ven Gaspar y Aníbal: semanas (más nuevas primero) con sus piezas, lo que hay para pagar, los meses y los pagos.
+async function anibalResumen(env) {
+  const { filas, pct, precio } = await anibalLeer(env);
+  await ensureAnibalSchema(env);
+  let pagos = [];
+  try { pagos = (await env.DB.prepare('SELECT id, pagado_at, monto, calculado, semanas, n_filas, metodo, nota, por FROM anibal_pagos ORDER BY pagado_at DESC, id DESC LIMIT 100').all()).results || []; } catch (_) {}
+  const sem = new Map();
+  for (const f of filas) {
+    const s = sem.get(f.serial) || { lunes: f.lunes, serial: f.serial, viernes: anibalSerialTxt(f.serial + 4), piezas: [], total: 0, pagado: 0, a_pagar: 0, sin_cortar: 0, m2: 0 };
+    s.piezas.push(f);
+    if (f.estado !== 'cancelada') { s.total += f.monto; s.m2 += f.m2; }
+    if (f.estado === 'pagada') s.pagado += f.monto; else if (f.estado === 'cortada') s.a_pagar += f.monto; else if (f.estado === 'sin_cortar') s.sin_cortar += f.monto;
+    sem.set(f.serial, s);
+  }
+  const semanas = [...sem.values()].sort((a, b) => b.serial - a.serial).map(s => ({ ...s, total: Math.round(s.total), pagado: Math.round(s.pagado), a_pagar: Math.round(s.a_pagar), sin_cortar: Math.round(s.sin_cortar), m2: Math.round(s.m2 * 100) / 100 }));
+  const aPagar = Math.round(filas.filter(f => f.estado === 'cortada').reduce((a, f) => a + f.monto, 0));
+  // Meses: lo que cortó (por la fecha de la tanda) y lo que se le pagó (por la fecha del pago).
+  const meses = new Map(), mesDe = (y, m) => y + '-' + String(m).padStart(2, '0');
+  const mes = k => meses.get(k) || meses.set(k, { mes: k, cortado: 0, pagado: 0 }).get(k);
+  for (const f of filas) { if (f.estado === 'cancelada') continue; const d = new Date(Date.UTC(1899, 11, 30) + f.serial * 86400000); mes(mesDe(d.getUTCFullYear(), d.getUTCMonth() + 1)).cortado += f.monto; }
+  for (const p of pagos) { const d = new Date(Date.parse(p.pagado_at || '') - 3 * 3600000); if (!isNaN(d.getTime())) mes(mesDe(d.getUTCFullYear(), d.getUTCMonth() + 1)).pagado += +p.monto || 0; }
+  return { ok: true, a_pagar: aPagar, semanas, meses: [...meses.values()].sort((a, b) => b.mes.localeCompare(a.mes)).map(m => ({ ...m, cortado: Math.round(m.cortado), pagado: Math.round(m.pagado) })), pagos, pct, precio_m2: precio };
+}
+// Escribe (o borra, serial = '') la fecha de pago en la col S de esas filas, con formato de fecha. Tira si la planilla falla.
+async function anibalMarcarFilas(token, filas, serial) {
+  if (!filas.length) return;
+  if (serial !== '') {
+    // Formato de fecha por tramos de filas seguidas (y el encabezado, si la columna todavía no lo tiene).
+    const tramos = []; [...filas].sort((a, b) => a - b).forEach(f => { const t = tramos[tramos.length - 1]; if (t && t[1] === f - 1) t[1] = f; else tramos.push([f, f]); });
+    await corteSheetsReq(token, 'POST', SHEETS_API_BASE + CORTE_SHEET_ID + ':batchUpdate', { requests: tramos.map(([a, b]) => ({ repeatCell: { range: { sheetId: ANIBAL_VI_GID, startRowIndex: a - 1, endRowIndex: b, startColumnIndex: 18, endColumnIndex: 19 }, cell: { userEnteredFormat: { numberFormat: { type: 'DATE', pattern: 'd/m/yyyy' } } }, fields: 'userEnteredFormat.numberFormat' } })) });
+    const h = ((await corteHojaLeer(token, CORTE_SHEET_ID, 'Venta_Insumos!S1:S1'))[0] || [])[0];
+    if (!String(h || '').trim()) await corteHojaEscribir(token, CORTE_SHEET_ID, 'RAW', [{ range: 'Venta_Insumos!S1', values: [['Aníbal pagado']] }]);
+  }
+  await corteHojaEscribir(token, CORTE_SHEET_ID, 'RAW', filas.map(f => ({ range: 'Venta_Insumos!S' + f, values: [[serial]] })));
+}
+// Aviso a Gaspar los viernes (desde las 10 AR, una vez): lo que hay para pagarle a Aníbal.
+async function anibalAvisoViernes(env) {
+  try {
+    if ((await kvGet(env, 'anibal_aviso_on', '1')) !== '1') return;
+    const ar = new Date(Date.now() - 3 * 3600000);
+    if (ar.getUTCDay() !== 5 || ar.getUTCHours() < 10) return;
+    const dia = ar.toISOString().slice(0, 10), nowIso = new Date().toISOString();
+    let lk = null;
+    try { lk = await env.DB.prepare("INSERT INTO kv_cache (k, v, updated_at) VALUES ('anibal_aviso_dia', ?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at WHERE kv_cache.v < excluded.v RETURNING k").bind(dia, nowIso).first(); } catch (_) {}
+    if (!lk) return;
+    const r = await anibalResumen(env);
+    if (!(r.a_pagar > 0)) return;
+    const fm = n => '$' + Math.round(n).toLocaleString('es-AR');
+    const det = r.semanas.filter(s => s.a_pagar > 0).map(s => 'tanda del ' + s.lunes.split('/').slice(0, 2).join('/') + ': ' + fm(s.a_pagar)).join(' · ');
+    await precotizNotifyGaspar(env, 'Aníbal: hoy le toca cobrar ' + fm(r.a_pagar) + ' (' + det + '). Pagale desde Corte → ✂ Aníbal: queda anotado y marcado en la planilla.', { tipo: 'anibal_pago', prioridad: 'P3', clave: 'anibal_aviso:' + dia });
+  } catch (e) { try { console.log('anibalAvisoViernes: ' + String((e && e.message) || e)); } catch (_) {} }
+}
 function corteIsoSemana(d) {
   const dt = new Date(d.getTime()); dt.setUTCHours(0, 0, 0, 0);
   dt.setUTCDate(dt.getUTCDate() + 4 - (dt.getUTCDay() || 7));
@@ -31930,6 +32037,68 @@ const handler = {
         } else err = 'sin token (falta GOOGLE_SA_KEY o firma falló)';
         return json({ ok: !!read, sa_email: email, header: read, error: err });
       }
+      // ===== Pagos a Aníbal (24-oct, ver anibalLeer) =====
+      // GET /admin/anibal/tandas → semanas con sus piezas, lo que hay para pagar, meses y pagos (admin y el propio Aníbal).
+      // POST /admin/anibal/pagar {semanas?: [serial], visto, monto?, metodo?, nota?} (admin) → paga lo cortado sin pagar (de esas
+      //   semanas o de todas): primero la fecha en la col S de cada fila (si la planilla falla no se registra nada) y después el
+      //   pago en anibal_pagos. `visto` = lo que mostraba la pantalla: si la planilla cambió en el medio, no paga y avisa.
+      // POST /admin/anibal/deshacer {id} (admin) → borra la fecha de esas filas (solo donde sigue la de ese pago) y el pago.
+      if (request.method === 'GET' && path === '/admin/anibal/tandas') {
+        if ((await getSessionRole(env, session.user)) !== 'admin' && !anibalEsAnibal(session)) return json({ error: 'forbidden' }, 403);
+        try { return json(await anibalResumen(env)); }
+        catch (e) { return json({ ok: false, error: 'planilla', motivo: 'No pude leer la planilla (' + String((e && e.message) || e).slice(0, 100) + '). Probá de nuevo en un momento.' }, 502); }
+      }
+      if (request.method === 'POST' && path === '/admin/anibal/pagar') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        let body = {}; try { body = await request.json(); } catch (_) {}
+        await ensureAnibalSchema(env);
+        const nowIso = new Date().toISOString();
+        let lk = null;
+        try { lk = await env.DB.prepare("INSERT INTO kv_cache (k, v, updated_at) VALUES ('anibal_pago_lock', ?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at WHERE kv_cache.updated_at < ? RETURNING k").bind(nowIso, nowIso, new Date(Date.now() - 60000).toISOString()).first(); } catch (_) {}
+        if (!lk) return json({ error: 'ocupado', motivo: 'Ya se está registrando un pago. Esperá un momento.' }, 409);
+        try {
+          let L;
+          try { L = await anibalLeer(env); } catch (e) { return json({ error: 'planilla', motivo: 'No pude leer la planilla: ' + String((e && e.message) || e).slice(0, 100) }, 502); }
+          const sems = Array.isArray(body.semanas) && body.semanas.length ? new Set(body.semanas.map(x => parseInt(x, 10)).filter(Boolean)) : null;
+          const elegidas = L.filas.filter(f => f.estado === 'cortada' && (!sems || sems.has(f.serial)));
+          if (!elegidas.length) return json({ error: 'nada', motivo: 'No hay nada cortado sin pagar' }, 409);
+          const calculado = Math.round(elegidas.reduce((a, f) => a + f.monto, 0));
+          if (body.visto != null && Math.abs(calculado - (Number(body.visto) || 0)) > 1) return json({ error: 'cambio', motivo: 'Cambió algo en la planilla desde que abriste la lista: ahora da $' + calculado.toLocaleString('es-AR') + '. Revisalo y volvé a pagar.', calculado }, 409);
+          const monto = body.monto != null && String(body.monto).trim() !== '' ? Math.max(0, Math.round(Number(body.monto) || 0)) : calculado;
+          const hoy = anibalHoySerial();
+          try { await anibalMarcarFilas(L.token, elegidas.map(f => f.fila), hoy); }
+          catch (e) { return json({ error: 'planilla', motivo: 'No pude marcar la planilla, así que no registré el pago: ' + String((e && e.message) || e).slice(0, 100) }, 502); }
+          const semanas = [...new Set(elegidas.map(f => f.lunes))];
+          const metodo = ['transferencia', 'efectivo'].includes(body.metodo) ? body.metodo : 'transferencia';
+          const nota = String(body.nota || '').replace(/\s+/g, ' ').trim().slice(0, 300);
+          let id = null;
+          try { const r = await env.DB.prepare('INSERT INTO anibal_pagos (pagado_at, monto, calculado, filas, semanas, n_filas, metodo, nota, por, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id').bind(nowIso, monto, calculado, JSON.stringify(elegidas.map(f => [f.fila, f.monto, f.lunes])), semanas.join(','), elegidas.length, metodo, nota, String(session.user || ''), nowIso).first(); id = r && r.id; } catch (_) {}
+          return json({ ok: true, id, monto, calculado, piezas: elegidas.length, semanas, fecha: anibalSerialTxt(hoy), registrado: !!id });
+        } finally { try { await env.DB.prepare("DELETE FROM kv_cache WHERE k='anibal_pago_lock' AND v=?").bind(nowIso).run(); } catch (_) {} }
+      }
+      if (request.method === 'POST' && path === '/admin/anibal/deshacer') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        let body = {}; try { body = await request.json(); } catch (_) {}
+        await ensureAnibalSchema(env);
+        const p = await env.DB.prepare('SELECT * FROM anibal_pagos WHERE id = ?').bind(parseInt(body.id, 10) || 0).first();
+        if (!p) return json({ error: 'no', motivo: 'No encontré ese pago' }, 404);
+        let filas = []; try { filas = (JSON.parse(p.filas || '[]') || []).map(x => parseInt(Array.isArray(x) ? x[0] : x, 10)).filter(f => f > 1); } catch (_) {}
+        const serial = Math.floor((Date.parse(p.pagado_at) - 3 * 3600000) / 86400000) + 25569;
+        let borradas = 0;
+        if (filas.length) {
+          try {
+            const token = await sheetsAccessToken(env);
+            if (!token) throw new Error('sin acceso a la planilla');
+            const ini = Math.min(...filas), fin = Math.max(...filas);
+            const s = (await corteSheetsReq(token, 'GET', SHEETS_API_BASE + CORTE_SHEET_ID + '/values/' + encodeURIComponent('Venta_Insumos!S' + ini + ':S' + fin) + '?valueRenderOption=UNFORMATTED_VALUE')).values || [];
+            const conEsa = filas.filter(f => Math.floor(+((s[f - ini] || [])[0]) || 0) === serial); // solo donde sigue la fecha de ESTE pago
+            await anibalMarcarFilas(token, conEsa, '');
+            borradas = conEsa.length;
+          } catch (e) { return json({ error: 'planilla', motivo: 'No pude borrar las fechas de la planilla, así que el pago sigue: ' + String((e && e.message) || e).slice(0, 100) }, 502); }
+        }
+        await env.DB.prepare('DELETE FROM anibal_pagos WHERE id = ?').bind(p.id).run();
+        return json({ ok: true, filas: borradas });
+      }
       // POST /admin/corte/planilla-reconciliar {dry?, cajas?: {telefono: caja}, tandas?} → lo que el CRM tiene pagado y en
       // Venta_Insumos sigue sin "pagado" (por fila, con control de nombre). dry (por defecto) solo lista. La caja no se adivina:
       // va solo para los teléfonos de `cajas`. Admin.
@@ -32607,6 +32776,7 @@ const handler = {
       ctx.waitUntil(processCorteVigiaAuto(env)); // vigía de pagos: corre SIEMPRE (aunque el bot esté off) para el día de cobro (gate corte_vigia_on)
       ctx.waitUntil(processCorteEntregaSync(env)); // entrega retira/envío desde la planilla de cortes (1×hora, 8-21 AR; kill-switch corte_entrega_sync_on)
       ctx.waitUntil(corteSheetPagoReconAuto(env)); // pagado en el CRM y no en Venta_Insumos: 1×día desde las 9 AR (kill-switch corte_sheet_recon_on)
+      ctx.waitUntil(anibalAvisoViernes(env)); // viernes desde las 10 AR: lo que hay para pagarle a Aníbal (kill-switch anibal_aviso_on)
       // Nudge del piloto: persigue leads a medias que se callaron (cada 15 min; gate 9-21 AR adentro).
       // OJO: usamos getUTCMinutes() INLINE, no la var `minute` (que recién se declara con const más
       // abajo, línea ~10932 -> referenciarla acá era ReferenceError por TDZ en cada tick */1).
