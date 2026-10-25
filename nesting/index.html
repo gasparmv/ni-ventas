@@ -616,7 +616,7 @@ function iniciar(seguir) {
 }
 function alMensaje(m) {
   if (m.tipo === 'mejor') { if (!S.mejor || m.r.puntaje < S.mejor.puntaje) { S.mejor = m.r; programarPintado(); } }
-  else if (m.tipo === 'corrida') { S.corridas++; }
+  else if (m.tipo === 'corrida') { S.corridas += m.n || 1; }
   else if (m.tipo === 'fin') { S.vivos--; if (S.vivos <= 0) finRonda(); }
 }
 function finRonda() {
