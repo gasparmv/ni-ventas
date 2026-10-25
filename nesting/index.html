@@ -94,6 +94,18 @@
   .form-rec canvas { width: 100%; border-radius: 8px; }
   .err { color: var(--error); font-size: 13px; }
   input[type=text] { font: inherit; background: var(--bg); color: var(--fg); border: 1px solid var(--borde); border-radius: 8px; padding: 5px 8px; }
+  .perfiles { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 0 0 10px; }
+  .perfiles select { min-width: 180px; }
+  .gtabla-caja { overflow-x: auto; margin: 4px 0 12px; }
+  table.gtabla { border-collapse: collapse; font-size: 13px; min-width: 660px; width: 100%; }
+  table.gtabla th, table.gtabla td { padding: 5px 6px; border-top: 1px solid var(--borde); text-align: left; vertical-align: middle; }
+  table.gtabla thead th { border-top: 0; color: var(--sutil); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; font-weight: 700; }
+  table.gtabla thead th span, table.gtabla tbody th span { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--sutil); font-size: 11.5px; }
+  table.gtabla input[type=number] { width: 84px; }
+  .placa .cap .tiempo { color: var(--mute); font-size: 12.5px; }
+  .placa .cap .aviso-g { color: var(--aviso); font-size: 12.5px; flex-basis: 100%; }
+  .placa .leyenda-g { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--mute); padding: 6px 12px; border-top: 1px solid var(--borde); }
+  .placa .leyenda-g i { display: inline-block; width: 16px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 5px; }
   @media (max-width: 560px) { main { padding: 16px 12px 60px; } h1 { font-size: 19px; } .archivo button { margin-left: 0; } }
 </style>
 </head>
@@ -181,17 +193,43 @@
     <p class="estado" id="estado"></p>
     <div class="barra" id="barra"><div></div></div>
     <div class="acciones">
-      <button class="primario" id="b-zip" disabled>Descargar los DXF (ZIP)</button>
+      <button class="primario" id="b-zip" disabled>Descargar todo (ZIP)</button>
       <button id="b-seguir" disabled>Seguir optimizando</button>
       <button id="b-detener" disabled>Detener</button>
     </div>
-    <p class="nota">Cada DXF tiene la placa en milímetros, con el origen abajo a la izquierda (largo en X, ancho en Y). Los agujeros redondos salen como círculos; lo demás, como polilíneas.</p>
+    <p class="nota">Cada DXF tiene la placa en milímetros, con el origen abajo a la izquierda (largo en X, ancho en Y). Los agujeros redondos salen como círculos; lo demás, como polilíneas. El ZIP lleva también el código G de cada placa (se configura en el paso 6).</p>
     <div class="placas" id="placas"></div>
+  </section>
+
+  <section class="card" id="sec-gcode" hidden>
+    <div class="titulo"><span class="paso">Paso 6</span><h2>Código G</h2><span class="sutil">los parámetros de corte, como en Aspire</span></div>
+    <div class="perfiles">
+      <span class="mute" style="font-size:12.5px">Perfil</span>
+      <select id="g-perfil"></select>
+      <button class="chico" id="g-guardar-como">Guardar como perfil nuevo</button>
+      <button class="chico" id="g-borrar">Borrar este perfil</button>
+    </div>
+    <div class="gtabla-caja"><table class="gtabla">
+      <thead><tr><th></th><th>Avance <span>mm/s</span></th><th>Bajada <span>mm/s</span></th><th>Husillo <span>rpm</span></th><th>Prof. inicial <span>mm</span></th><th>Prof. final <span>mm</span></th><th>Por pasada <span>mm</span></th></tr></thead>
+      <tbody id="g-filas"></tbody>
+    </table></div>
+    <div class="config">
+      <label>Fresa (diámetro, mm)<span class="fila"><input type="number" data-g="fresa" min="0.5" step="0.5"></span></label>
+      <label>Altura de seguridad (mm)<span class="fila"><input type="number" data-g="seguridad" min="1" step="1"><span class="sutil">entre cortes</span></span></label>
+      <label>Altura de inicio y fin (mm)<span class="fila"><input type="number" data-g="inicio" min="1" step="1"></span></label>
+      <label>Sentido del corte<span class="fila"><select data-g="sentido"><option value="trepado">trepado (climb)</option><option value="convencional">convencional</option></select></span></label>
+      <label>Archivo<span class="fila"><select data-g="ext"><option value="nc">.nc</option><option value="tap">.tap</option><option value="gcode">.gcode</option></select></span></label>
+      <label>Prueba en el aire (mm)<span class="fila"><input type="number" data-g="aire" min="0" step="5"><span class="sutil">0 = corte de verdad</span></span></label>
+    </div>
+    <label class="check" style="margin-top:12px"><input type="checkbox" id="g-zip"> Sumar el código G al ZIP</label>
+    <p class="nota">El avance y la bajada van en mm/s como en Aspire (en el archivo quedan en mm/min). Cero: X0 Y0 en la esquina de abajo a la izquierda de cada placa y Z0 arriba del material. El corte va por fuera de cada pieza (se corre el radio de la fresa), los cortes de adentro por dentro, el calado sobre la línea y los agujeros de la medida de la fresa con un taladro en el centro. Orden: calado, agujeros, cortes de adentro y contornos. "Prueba en el aire" sube todo esos milímetros para correr el programa sin tocar la placa.</p>
   </section>
 </main>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" integrity="sha384-/1qUCSGwTur9vjf/z9lmu/eCUYbpOTgSjmpbMQZ1/CtX2v/WcAIKqRv+U1DUCG6e" crossorigin="anonymous"></script>
 <script src="nest-core.js?v=3"></script>
+<script src="clipper.js?v=1"></script>
+<script src="gcode.js?v=1"></script>
 <script>
 'use strict';
 // Nesting de placas para el corte (Gaspar 25-oct-2026). Lee los .ai/.pdf de Emma con pdf.js, separa por color (corte rojo,
@@ -203,9 +241,9 @@ const TOL_CURVA = 0.05;      // mm: error máximo al pasar las curvas a tramos r
 const TOL_NEST = 0.05;       // mm: simplificación del contorno para acomodar (el motor la suma a la separación)
 const COL = { corte: '#ff4d4d', calado: '#f2f2f2', agujero: '#4d8dff', suelto: '#ff9f1a', ignorado: '#4a5263', fondo: '#0b0d11', placa: '#161a22' };
 const CLASES = [['corte', 'Corte'], ['calado', 'Calado'], ['agujero', 'Agujeros'], ['ignorar', 'Ignorar']];
-const CFG_DEF = { largo: 2440, ancho: 1220, sep: 6.5, margen: 5, paso: 5, seg: 20, borde: true, enteras: true };
+const CFG_DEF = { largo: 2440, ancho: 1220, sep: 6.5, margen: 5, paso: 5, seg: 20, borde: true, enteras: true, gzip: true };
 const VERSION_MOTOR = '3'; // subirla (y la de nest-core.js?v= arriba) cada vez que cambian nest-core.js o nest-worker.js: GitHub Pages los cachea 10 min
-const S = { archivos: [], sec: 0, mapa: {}, piezas: [], grandes: [], cfg: cargarCfg(), recortes: cargarRecortes(), recNest: [], mejor: null, firmaMejor: '', workers: [], firmaWorkers: '', vivos: 0, corridas: 0, t0: 0, ronda: 0, corriendo: false, timer: null, nest: null, cfgNest: null, pintarPend: false };
+const S = { archivos: [], sec: 0, mapa: {}, piezas: [], grandes: [], cfg: cargarCfg(), recortes: cargarRecortes(), recNest: [], perfiles: cargarPerfiles(), gcodeCache: new Map(), verRec: new Set(), mejor: null, firmaMejor: '', workers: [], firmaWorkers: '', vivos: 0, corridas: 0, t0: 0, ronda: 0, corriendo: false, timer: null, nest: null, cfgNest: null, pintarPend: false };
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const fmt = (n, d = 0) => Number(n).toLocaleString('es-AR', { minimumFractionDigits: d, maximumFractionDigits: d });
@@ -223,6 +261,7 @@ function cfgAlForm() {
   $('c-largo').value = S.cfg.largo; $('c-ancho').value = S.cfg.ancho; $('c-sep').value = S.cfg.sep; $('c-margen').value = S.cfg.margen;
   $('c-paso').value = String(S.cfg.paso); $('c-seg').value = String(S.cfg.seg); $('c-borde').checked = !!S.cfg.borde;
   $('c-enteras').checked = S.cfg.enteras !== false;
+  $('g-zip').checked = S.cfg.gzip !== false;
 }
 function cfgDelForm() {
   const num = (id, def, lo, hi) => { const v = parseFloat(String($(id).value).replace(',', '.')); return isFinite(v) ? Math.min(hi, Math.max(lo, v)) : def; };
@@ -230,7 +269,7 @@ function cfgDelForm() {
     largo: num('c-largo', CFG_DEF.largo, 100, 10000), ancho: num('c-ancho', CFG_DEF.ancho, 100, 10000),
     sep: num('c-sep', CFG_DEF.sep, 6.5, 50), margen: num('c-margen', CFG_DEF.margen, 5, 8),
     paso: parseInt($('c-paso').value, 10) || 5, seg: parseInt($('c-seg').value, 10) || 20, borde: $('c-borde').checked,
-    enteras: $('c-enteras').checked,
+    enteras: $('c-enteras').checked, gzip: $('g-zip').checked,
   };
   guardarCfg();
 }
@@ -534,6 +573,27 @@ function dibujarLamina(cv, s) {
   ctx.fillStyle = COL.placa; ctx.fill('evenodd'); ctx.strokeStyle = '#4a5263'; ctx.lineWidth = 1; ctx.stroke();
   if (lam.tipo === 'placa') { ctx.strokeStyle = '#3b4252'; ctx.setLineDash([4, 4]); const m = S.cfgNest.margen * e; ctx.strokeRect(X(0) + m, m, lam.largo * e - 2 * m, H - 2 * m); ctx.setLineDash([]); }
   for (const c of S.mejor.coloc) if (c.hoja === s) dibujarPieza(ctx, colocada(S.piezas[c.id], c), X, Y, e);
+  if (S.verRec.has(s) && !S.corriendo) dibujarRecorrido(ctx, s, X, Y);
+}
+// Lo que va a hacer la máquina, leído del mismo código G que se baja: movimientos en el aire punteados, calado en amarillo,
+// cortes en celeste y taladros como puntos azules.
+function dibujarRecorrido(ctx, s, X, Y) {
+  const tr = NestGcode.leer(gcodeLamina(s).texto), cal = -(+perfilActual().calado.final || 0) - 0.001;
+  ctx.save();
+  ctx.lineWidth = 1; ctx.setLineDash([3, 3]); ctx.strokeStyle = 'rgba(154,164,184,.55)';
+  ctx.beginPath(); for (const t of tr) if (t.rapido && (t.a[0] !== t.b[0] || t.a[1] !== t.b[1])) { ctx.moveTo(X(t.a[0]), Y(t.a[1])); ctx.lineTo(X(t.b[0]), Y(t.b[1])); } ctx.stroke();
+  ctx.setLineDash([]); ctx.lineWidth = 1.4;
+  for (const [hondo, color] of [[false, '#facc15'], [true, '#22d3ee']]) {
+    ctx.strokeStyle = color; ctx.beginPath();
+    for (const t of tr) if (!t.rapido && (t.a[0] !== t.b[0] || t.a[1] !== t.b[1]) && (t.b[2] < cal) === hondo) { ctx.moveTo(X(t.a[0]), Y(t.a[1])); ctx.lineTo(X(t.b[0]), Y(t.b[1])); }
+    ctx.stroke();
+  }
+  ctx.fillStyle = '#4d8dff';
+  for (let i = 0; i + 1 < tr.length; i++) {
+    const t = tr[i], u = tr[i + 1];
+    if (!t.rapido && t.a[0] === t.b[0] && t.a[1] === t.b[1] && t.b[2] < t.a[2] && u.rapido && u.b[2] > t.b[2] && u.a[0] === u.b[0] && u.a[1] === u.b[1]) { ctx.beginPath(); ctx.arc(X(t.b[0]), Y(t.b[1]), 2.5, 0, 2 * Math.PI); ctx.fill(); }
+  }
+  ctx.restore();
 }
 function dibujarRings(cv, rings, largo, ancho, W, H) {
   const ctx = prepararCanvas(cv, W, H);
@@ -601,8 +661,8 @@ function pintarPiezas() {
 function pintarTodo() { armar(); pintarArchivos(); pintarColores(); pintarPiezas(); }
 function invalidarResultado(msg) {
   detenerWorkers();
-  S.mejor = null; S.firmaMejor = '';
-  $('sec-resultado').hidden = true;
+  S.mejor = null; S.firmaMejor = ''; S.gcodeCache = new Map(); S.verRec = new Set();
+  $('sec-resultado').hidden = true; $('sec-gcode').hidden = true;
   $('cfg-nota').textContent = msg || '';
 }
 async function agregarArchivos(lista) {
@@ -677,7 +737,7 @@ function iniciar(seguir) {
   pintarResultado();
 }
 function alMensaje(m) {
-  if (m.tipo === 'mejor') { if (!S.mejor || m.r.puntaje < S.mejor.puntaje) { S.mejor = m.r; programarPintado(); } }
+  if (m.tipo === 'mejor') { if (!S.mejor || m.r.puntaje < S.mejor.puntaje) { S.mejor = m.r; S.gcodeCache = new Map(); programarPintado(); } }
   else if (m.tipo === 'corrida') { S.corridas += m.n || 1; }
   else if (m.tipo === 'fin') { S.vivos--; if (S.vivos <= 0) finRonda(); }
 }
@@ -725,12 +785,27 @@ function pintarResultado() {
   for (const pz of S.grandes) avisos.push(`No entra en ${solo ? 'ningún recorte' : S.recNest.length ? 'ninguna placa ni recorte' : 'la placa'}: pieza de ${fmt((pz.bb.x1 - pz.bb.x0) / 10, 1)} × ${fmt((pz.bb.y1 - pz.bb.y0) / 10, 1)} cm de ${esc(pz.archivo)}.`);
   if (S.mejor && S.mejor.sinLugar.length) avisos.push(`${S.mejor.sinLugar.length} pieza${S.mejor.sinLugar.length === 1 ? '' : 's'} no ${S.mejor.sinLugar.length === 1 ? 'entró' : 'entraron'}${solo ? ' en los recortes (está destildado usar placas enteras)' : ''}.`);
   if (avisos.length) { const ul = document.createElement('ul'); ul.className = 'avisos'; ul.innerHTML = avisos.map((t) => `<li class="grave">${t}</li>`).join(''); cont.appendChild(ul); }
-  const r = S.mejor; if (!r) return;
+  const r = S.mejor;
+  $('sec-gcode').hidden = !r;
+  if (!r) return;
+  const dis = S.corriendo ? ' disabled' : '';
   for (const s of r.usadas) {
     const lam = laminaInfo(s), cs = r.coloc.filter((c) => c.hoja === s);
     const area = cs.reduce((t, c) => t + S.piezas[c.id].area, 0);
+    let extra = '';
+    if (!S.corriendo) {
+      // Tiempo de máquina estimado y lo que el código G no puede hacer con esta fresa.
+      let g = null; try { g = gcodeLamina(s); } catch (e) { console.error(e); }
+      if (g) {
+        extra = `<span class="tiempo">≈ ${fmt(Math.max(1, Math.round(g.segundos / 60)), 0)} min de máquina</span>`;
+        const a = g.avisos, fr = fmt(perfilActual().fresa, 1), t = [];
+        if (a.huecosChicos) t.push(`${a.huecosChicos} corte${a.huecosChicos === 1 ? '' : 's'} de adentro más chico${a.huecosChicos === 1 ? '' : 's'} que la fresa: no se ${a.huecosChicos === 1 ? 'corta' : 'cortan'}`);
+        if (a.agujerosChicos) t.push(`${a.agujerosChicos} agujero${a.agujerosChicos === 1 ? '' : 's'} de menos de ${fr} mm: ${a.agujerosChicos === 1 ? 'queda' : 'quedan'} de ${fr}`);
+        if (t.length) extra += `<span class="aviso-g">${t.join(' · ')}</span>`;
+      }
+    }
     const d = document.createElement('div'); d.className = 'vista placa';
-    d.innerHTML = `<div class="cap"><b>${esc(lam.titulo)}</b><span class="sutil">${cs.length} pieza${cs.length === 1 ? '' : 's'} · ${fmt(100 * area / lam.area, 0)} % ${lam.tipo === 'recorte' ? 'del recorte' : 'de la placa'} con piezas</span><button class="chico" data-sobrante="${s}"${S.corriendo ? ' disabled' : ''} title="Guarda lo que sobra de esta lámina como recorte del taller">Guardar sobrante</button><button class="chico" data-dxf="${s}"${S.corriendo ? ' disabled' : ''}>DXF</button></div><canvas></canvas>`;
+    d.innerHTML = `<div class="cap"><b>${esc(lam.titulo)}</b><span class="sutil">${cs.length} pieza${cs.length === 1 ? '' : 's'} · ${fmt(100 * area / lam.area, 0)} % ${lam.tipo === 'recorte' ? 'del recorte' : 'de la placa'} con piezas</span>${extra}<button class="chico" data-sobrante="${s}"${dis} title="Guarda lo que sobra de esta lámina como recorte del taller">Guardar sobrante</button><button class="chico" data-ver="${s}"${dis}>${S.verRec.has(s) ? 'Ocultar recorrido' : 'Ver recorrido'}</button><button class="chico" data-dxf="${s}"${dis}>DXF</button><button class="chico" data-gcode="${s}"${dis}>Código G</button></div><canvas></canvas>${S.verRec.has(s) && !S.corriendo ? '<div class="leyenda-g"><span><i style="background:#facc15"></i>calado</span><span><i style="background:#22d3ee"></i>corte y agujeros grandes</span><span><i style="background:#4d8dff"></i>taladros</span><span><i style="background:repeating-linear-gradient(90deg,#9aa4b8 0 3px,transparent 3px 6px)"></i>movimientos en el aire</span></div>' : ''}`;
     cont.appendChild(d);
     dibujarLamina(d.querySelector('canvas'), s);
   }
@@ -824,8 +899,59 @@ function bajarDxf(s) { bajar(new Blob([dxfPlaca(s)], { type: 'application/dxf' }
 function bajarZip() {
   const r = S.mejor; if (!r) return;
   const arch = r.usadas.map((s) => ({ nombre: nombreDxf(s), datos: dxfPlaca(s) }));
-  bajar(zip(arch), `${nombreBase()} - ${arch.length} lámina${arch.length === 1 ? '' : 's'}.zip`);
+  if ($('g-zip').checked) for (const s of r.usadas) arch.push({ nombre: nombreGcode(s), datos: gcodeLamina(s).texto });
+  bajar(zip(arch), `${nombreBase()} - ${r.usadas.length} lámina${r.usadas.length === 1 ? '' : 's'}.zip`);
 }
+
+// ───────────── código G ─────────────
+// Perfiles de corte (como la base de herramientas de Aspire), guardados en esta compu. El de fábrica es el de acrílico 3 mm.
+const OPS_G = [['corte', 'Corte', 'por fuera de cada pieza y los cortes de adentro'], ['calado', 'Calado', 'sobre la línea'], ['agujero', 'Agujeros', 'taladro de una; el avance es para los más grandes que la fresa']];
+function completarPerfil(p) {
+  const d = NestGcode.PERFIL_DEF, out = { ...d, ...(p || {}) };
+  for (const o of ['corte', 'calado', 'agujero']) out[o] = { ...d[o], ...((p && p[o]) || {}) };
+  return out;
+}
+function cargarPerfiles() {
+  let v = null;
+  try { v = JSON.parse(localStorage.getItem('nesting_perfiles') || 'null'); } catch (_) {}
+  if (!v || !v.lista || !Object.keys(v.lista).length) v = { actual: 'Acrílico 3 mm', lista: { 'Acrílico 3 mm': NestGcode.PERFIL_DEF } };
+  for (const k of Object.keys(v.lista)) v.lista[k] = completarPerfil(v.lista[k]);
+  if (!v.lista[v.actual]) v.actual = Object.keys(v.lista)[0];
+  return v;
+}
+function guardarPerfiles() { try { localStorage.setItem('nesting_perfiles', JSON.stringify(S.perfiles)); } catch (_) {} }
+const perfilActual = () => S.perfiles.lista[S.perfiles.actual];
+function pintarPerfil() {
+  const p = perfilActual();
+  $('g-perfil').innerHTML = Object.keys(S.perfiles.lista).map((n) => `<option${n === S.perfiles.actual ? ' selected' : ''}>${esc(n)}</option>`).join('');
+  const paso = { avance: 1, bajada: 1, rpm: 500, inicial: 0.1, final: 0.1, pasada: 0.1 };
+  $('g-filas').innerHTML = OPS_G.map(([k, t, d]) => `<tr><th>${t}<br><span>${d}</span></th>${Object.keys(paso).map((c) => `<td><input type="number" data-g="${k}.${c}" min="0" step="${paso[c]}" value="${esc(p[k][c])}"></td>`).join('')}</tr>`).join('');
+  document.querySelectorAll('#sec-gcode .config [data-g]').forEach((el) => { el.value = p[el.getAttribute('data-g')]; });
+  $('g-borrar').disabled = Object.keys(S.perfiles.lista).length < 2;
+}
+function leerPerfilForm() {
+  const p = perfilActual();
+  document.querySelectorAll('#sec-gcode [data-g]').forEach((el) => {
+    const [a, b] = el.getAttribute('data-g').split('.');
+    let v = el.value;
+    if (el.tagName !== 'SELECT') { v = parseFloat(String(v).replace(',', '.')); if (!isFinite(v) || v < 0) return; }
+    if (b) p[a][b] = v; else p[a] = v;
+  });
+  if (!(p.fresa > 0)) p.fresa = NestGcode.PERFIL_DEF.fresa;
+  guardarPerfiles(); S.gcodeCache = new Map();
+}
+function gcodeLamina(s) {
+  const p = perfilActual(), clave = s + '|' + JSON.stringify(p);
+  let g = S.gcodeCache.get(clave);
+  if (!g) {
+    const lam = laminaInfo(s), geos = S.mejor.coloc.filter((c) => c.hoja === s).map((c) => colocada(S.piezas[c.id], c));
+    g = NestGcode.escribir(NestGcode.recorridos(geos, p), p, { titulo: lam.titulo + ' - ' + nombreBase(), largo: lam.largo, ancho: lam.ancho });
+    S.gcodeCache.set(clave, g);
+  }
+  return g;
+}
+const nombreGcode = (s) => nombreDxf(s).replace(/\.dxf$/, '.' + (perfilActual().ext || 'nc'));
+function bajarGcode(s) { bajar(new Blob([gcodeLamina(s).texto], { type: 'text/plain' }), nombreGcode(s)); }
 
 // ───────────── recortes del taller ─────────────
 const ESQUINAS = [['bl', 'abajo a la izquierda'], ['br', 'abajo a la derecha'], ['tr', 'arriba a la derecha'], ['tl', 'arriba a la izquierda']];
@@ -1054,6 +1180,32 @@ $('b-zip').addEventListener('click', bajarZip);
 $('placas').addEventListener('click', (e) => {
   const b = e.target.closest('[data-dxf]'); if (b) bajarDxf(parseInt(b.getAttribute('data-dxf'), 10));
   const so = e.target.closest('[data-sobrante]'); if (so) guardarSobrante(parseInt(so.getAttribute('data-sobrante'), 10), so);
+  const gc = e.target.closest('[data-gcode]'); if (gc) bajarGcode(parseInt(gc.getAttribute('data-gcode'), 10));
+  const ve = e.target.closest('[data-ver]');
+  if (ve) { const s = parseInt(ve.getAttribute('data-ver'), 10); if (S.verRec.has(s)) S.verRec.delete(s); else S.verRec.add(s); pintarResultado(); }
+});
+pintarPerfil();
+$('sec-gcode').addEventListener('change', (e) => {
+  if (e.target.id === 'g-perfil') { S.perfiles.actual = e.target.value; guardarPerfiles(); pintarPerfil(); }
+  else if (e.target.id === 'g-zip') { cfgDelForm(); return; }
+  else if (e.target.closest('[data-g]')) leerPerfilForm();
+  else return;
+  S.gcodeCache = new Map();
+  if (S.mejor && !S.corriendo) pintarResultado();
+});
+$('g-guardar-como').addEventListener('click', () => {
+  leerPerfilForm();
+  const n = (prompt('Nombre del perfil nuevo (por ejemplo: Acrílico 5 mm):', '') || '').trim();
+  if (!n) return;
+  S.perfiles.lista[n] = JSON.parse(JSON.stringify(perfilActual()));
+  S.perfiles.actual = n; guardarPerfiles(); pintarPerfil();
+});
+$('g-borrar').addEventListener('click', () => {
+  const n = S.perfiles.actual;
+  if (Object.keys(S.perfiles.lista).length < 2 || !confirm('¿Borrar el perfil "' + n + '"?')) return;
+  delete S.perfiles.lista[n]; S.perfiles.actual = Object.keys(S.perfiles.lista)[0];
+  guardarPerfiles(); pintarPerfil(); S.gcodeCache = new Map();
+  if (S.mejor && !S.corriendo) pintarResultado();
 });
 pintarRecortes();
 $('b-rec-medidas').addEventListener('click', abrirFormRecorte);
