@@ -8104,13 +8104,12 @@ function nkbEntrega(c) {
 function nkbChips(c, ficha) {
   const ch = [], ce = c.corte_estado, pr = c.productor || '', rep = nkbRep(c);
   const P = (cls, t) => `<span class="logi-pill ${cls}">${escapeHtml(t)}</span>`;
-  // Repartida: un chip por parte ("GONZALO ×4 · armando", "OCTAVIO ×5 · terminado · falta traer") y las libres en rojo.
+  // Repartida: un chip por parte ("GONZALO ×4 · armando", "OCTAVIO ×5 · terminado · falta traer").
   const PP = (p) => P(p.prod_estado === 'pendiente' ? 'a' : (p.prod_estado === 'terminado' && !p.f.recibido) ? 'a' : 'v', nkbParteTxt(p) + ' · ' + (p.prod_estado === 'terminado' ? (p.f.recibido ? 'en el taller' : 'terminado · falta traer') : NKB_PROD_TXT[p.prod_estado] || p.prod_estado));
-  const libres = () => { if (rep && c.libres) ch.push(P('r', 'Sin asignar: ' + c.libres)); };
-  if (c.etapa === 'confirmado') ch.push(!c.corte_id ? P('g', 'Anterior al circuito de corte') : P('r', 'Falta la foto del diseño' + (c.vendedor ? ' · ' + c.vendedor : '')));
-  else if (c.etapa === 'diseno') { ch.push(!c.corte_id ? P('g', 'Sin pieza de corte') : ce === 'pedido' ? P('a', 'Emma: por diseñar') : ce === 'matriz_lista' ? P('a', 'Falta cortar') : ce === 'cortado' ? P('a', 'Cortado · falta separar') : P('v', 'Base lista' + (pr ? '' : ' · falta derivar'))); if (rep) { c.partes.forEach(p => ch.push(P('g', 'Derivado a ' + nkbParteTxt(p)))); libres(); } else if (pr) ch.push(P('g', 'Derivado a ' + pr)); }
+    if (c.etapa === 'confirmado') ch.push(!c.corte_id ? P('g', 'Anterior al circuito de corte') : P('r', 'Falta la foto del diseño' + (c.vendedor ? ' · ' + c.vendedor : '')));
+  else if (c.etapa === 'diseno') { ch.push(!c.corte_id ? P('g', 'Sin pieza de corte') : ce === 'pedido' ? P('a', 'Emma: por diseñar') : ce === 'matriz_lista' ? P('a', 'Falta cortar') : ce === 'cortado' ? P('a', 'Cortado · falta separar') : P('v', 'Base lista' + (pr ? '' : ' · falta derivar'))); if (rep) c.partes.forEach(p => ch.push(P('g', 'Derivado a ' + nkbParteTxt(p)))); else if (pr) ch.push(P('g', 'Derivado a ' + pr)); }
   else if (c.etapa === 'montando') {
-    if (rep) { c.partes.forEach(p => ch.push(PP(p))); libres(); }
+    if (rep) c.partes.forEach(p => ch.push(PP(p)));   // las libres van en el aviso grande (nkbRepBannerHtml)
     else ch.push(pr ? P(c.prod_estado === 'en_armado' ? 'v' : 'a', pr + (c.prod_estado === 'en_armado' ? ' · armando' : ' · sin empezar')) : P('r', 'Sin productor'));
     if (c.corte_id && ce === 'cortado') ch.push(P('a', 'Base cortada · falta separar'));
     else if (c.corte_id && !['embalado', 'cobrado', 'despachado', 'entregado'].includes(ce)) ch.push(P('r', 'Falta la base'));
@@ -8517,7 +8516,9 @@ async function repAplicar() {
   const R = STATE.rep; if (!R || R.aplicando) return;
   const plan = R.prods.filter((p) => p.on && (R.asig[p.id] || []).length).map((p) => ({ p, us: R.asig[p.id], ids: R.asig[p.id].flatMap((u) => u.carteles.map((c) => c.id)) }));
   const n = plan.reduce((s, x) => s + x.ids.length, 0); if (!n) return;
-  const det = plan.map((x) => `${x.p.nombre}: ${x.ids.length} cartel${x.ids.length === 1 ? '' : 'es'} · ${fmtMoney(x.us.reduce((s, u) => s + u.mo, 0))}`).join('\n');
+  // Repartidas: se aclara que van sus unidades libres ("5 de las 9 de #1000"), no el cartel entero.
+  const sueltas = (x) => x.us.flatMap((u) => u.carteles).filter((c) => c.repartida).map((c) => `${c.cantidad} de las ${c.total} de #${c.numero}`);
+  const det = plan.map((x) => `${x.p.nombre}: ${x.ids.length} cartel${x.ids.length === 1 ? '' : 'es'} · ${fmtMoney(x.us.reduce((s, u) => s + u.mo, 0))}${sueltas(x).length ? ' (' + sueltas(x).join(', ') + ')' : ''}`).join('\n');
   if (!(await showConfirm(`Se derivan ${n} cartel${n === 1 ? '' : 'es'}:\n\n${det}\n\nCada productor los ve en su pantalla y Neyen arma los paquetes con este reparto.`, { title: 'Repartir', confirmLabel: 'Repartir', cancelLabel: 'Volver' }).catch(() => false))) return;
   R.aplicando = true; repPintar();
   let hechos = 0; const saltados = [];
@@ -26906,7 +26907,7 @@ async function prodRepartirElegir(pedidoId, o) {
   if (!(o.partes || []).length && o.productorId && o.productorId !== '*') actual[o.productorId] = N;
   // Los que tienen unidades ahora, aunque estén de baja, se muestran (para poder sacárselas).
   for (const id of Object.keys(actual)) if (!prods.some(p => p.id === id)) prods.push({ id, nombre: id, activo: false });
-  const filas = prods.map(p => `<label class="nc-field" style="display:flex;align-items:center;gap:10px;margin:0 0 6px"><span style="flex:1;font-weight:700">${escapeHtml(p.nombre)}${p.activo ? '' : ' <span class="muted" style="font-weight:400;font-size:11px">(sin usuario)</span>'}</span>
+  const filas = prods.map(p => `<label style="display:flex;align-items:center;gap:10px;padding:5px 0;border-bottom:1px dashed var(--border)"><span style="flex:1;font-weight:700;font-size:14px">${escapeHtml(p.nombre)}${p.activo ? '' : ' <span class="muted" style="font-weight:400;font-size:11px">(sin usuario)</span>'}</span>
       <input class="nc-input" type="number" min="0" max="${N}" step="1" inputmode="numeric" data-f="u:${escapeHtml(p.id)}" value="${actual[p.id] || ''}" placeholder="0" style="width:84px;text-align:center"></label>`).join('');
   const leer = (f) => prods.map(p => ({ productor_id: p.id, nombre: p.nombre, unidades: f['u:' + p.id] === '' || f['u:' + p.id] == null ? 0 : Number(f['u:' + p.id]) }));
   const prom = nkbModal({
