@@ -699,7 +699,9 @@ async function ensurePedidosSchema(env) {
     // 'pendiente' + cobrar_el = 'AAAA-MM-DD' en que tiene que cobrarlo (recordatorio: processCobrosPendientes).
     'cobrar_el TEXT',
     // Varios comprobantes por pago (22-oct, mig. 066): los de más de la seña y del saldo, en JSON (compsExtraLeer).
-    'comprobantes_extra TEXT']) {
+    'comprobantes_extra TEXT',
+    // Cómo se entrega el pedido de neón (26-oct, mig. 072): lo elige el vendedor al registrar el 2do pago. Ver ENTREGA_MODOS.
+    'entrega_modo TEXT', 'entrega_modo_at TEXT', 'entrega_modo_por TEXT']) {
     try { await env.DB.prepare(`ALTER TABLE pedidos ADD COLUMN ${col}`).run(); } catch (_) {}
   }
   // source_id = ad_id EXACTO de Meta que trajo la venta (auditable, no un título adivinado).
@@ -713,7 +715,29 @@ async function ensurePedidosSchema(env) {
   try { await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_pedidos_comercial ON pedidos(comercial_id)').run(); } catch (_) {}
   // Memo solo si las columnas nuevas existen de verdad: los ALTER se tragan cualquier error (también un timeout de
   // D1), y con el memo puesto y una columna faltante cada alta de ese isolate fallaría.
-  try { await env.DB.prepare('SELECT caja, pago_metodo, comprobante_key, cobro2, caja2, comprobante2_key, cobro2_at, caja_sync, caja_sync_attempts, cobrar_el, comprobantes_extra FROM pedidos LIMIT 0').all(); _pedidosSchemaOk = true; } catch (_) {}
+  try { await env.DB.prepare('SELECT caja, pago_metodo, comprobante_key, cobro2, caja2, comprobante2_key, cobro2_at, caja_sync, caja_sync_attempts, cobrar_el, comprobantes_extra, entrega_modo, entrega_modo_at, entrega_modo_por FROM pedidos LIMIT 0').all(); _pedidosSchemaOk = true; } catch (_) {}
+}
+// Cómo se entrega un pedido de NEÓN (Gaspar 26-oct): lo elige el vendedor al registrar el 2do pago (o al cargar uno que pagó
+// todo de una). retira / uber → los saca Neyen del taller (logística no los ve); encomienda → la despacha Siempre a Tiempo
+// (pestaña Producción neón de logística); instalacion → lo instalamos nosotros. Vacío = de antes: el front lo deduce del texto
+// de la columna Envío (nkbEntrega). Los corpóreos todavía no lo usan (Gaspar: "dejemos afuera por ahora").
+const ENTREGA_MODOS = { retira: 'Retira en el taller', uber: 'Uber / auto de aplicación', encomienda: 'Encomienda al interior', instalacion: 'Instalación' };
+const ENTREGA_CON_DIRECCION = ['uber', 'encomienda'];
+function entregaModoOk(v) { return Object.prototype.hasOwnProperty.call(ENTREGA_MODOS, String(v || '')); }
+function entregaDatosOk(s) {
+  const t = String(s || '');
+  return t.replace(/\s+/g, '').length >= 10 && /\d/.test(t) && !/\bretir|\bbusca\b|\btaller\b|\blocal\b|coordin/i.test(t);
+}
+// Guarda la entrega en las filas de NEÓN del pedido (grupo = mismo N° + fecha + vendedor [+ cliente en los del CRM]). datos = los
+// datos de envío nuevos (Uber / encomienda): si cambiaron, reemplazan el texto de Envío de esas filas y van a la planilla.
+function entregaGrupoStmt(env, grpSql, grpArgs, modo, datos, quien, now) {
+  const d = String(datos || '').trim().slice(0, 400);
+  return env.DB.prepare(`UPDATE pedidos SET entrega_modo = ?, entrega_modo_at = ?, entrega_modo_por = ?,
+      envio = CASE WHEN ? <> '' THEN ? ELSE envio END,
+      mirror_dirty = CASE WHEN ? <> '' AND IFNULL(envio, '') <> ? THEN 1 ELSE mirror_dirty END,
+      mirror_attempts = CASE WHEN ? <> '' AND IFNULL(envio, '') <> ? THEN 0 ELSE mirror_attempts END,
+      updated_at = CASE WHEN ? <> '' AND IFNULL(envio, '') <> ? THEN ? ELSE updated_at END
+    WHERE ${grpSql} AND IFNULL(es_corporeo, 0) = 0`).bind(modo, now, String(quien || ''), d, d, d, d, d, d, d, d, now, ...grpArgs);
 }
 // Nombre de diseño "aplastado" para comparar pedido ↔ brief: minúsculas, sin espacios ni puntuación
 // (. , - '). sqlNombreAplastado hace lo mismo en SQL (lower() de SQLite solo baja ASCII: alcanza).
@@ -21934,19 +21958,19 @@ const NEON_ETAPAS = [['confirmado', 'Confirmado'], ['diseno', 'En diseño y cort
 const NEON_IDX = Object.fromEntries(NEON_ETAPAS.map(([k], i) => [k, i]));
 const NEON_TABLERO_DESDE = '2026-09-01';
 const NEON_ENVIADO_DIAS = 30;      // los enviados vuelven al tablero 30 días (la columna muestra 14; el resto en "Ver todos")
-const NEON_DESPACHO_MODOS = { envio: 'Salió por envío', retira: 'Retiró en el taller', instalacion: 'Instalado', sinfrontera: 'Entregado a Sin Frontera' };
+const NEON_DESPACHO_MODOS = { envio: 'Salió por envío', retira: 'Retiró en el taller', uber: 'Salió en Uber', instalacion: 'Instalado', sinfrontera: 'Entregado a Sin Frontera' };
 const NEON_VEND = { joaco: 'Joaco', joaquin: 'Joaco', facundo: 'Facu', agustina: 'Agus', debi: 'Debi', gaspar: 'Gaspar' };
 let _neonTabOk = false;
 async function ensureNeonTableroSchema(env) {
   if (_neonTabOk) return;
   try {
     await env.DB.prepare('SELECT diseno_inicio_at, diseno_inicio_por, cortado_at, separado_at FROM corte_pedidos LIMIT 0').all();
-    await env.DB.prepare('SELECT recibido_at, recibido_por, despachado_at, despachado_por, despacho_modo, despacho_transporte, despacho_seguimiento, despacho_prev_estado, neon_piso, neon_piso_at, neon_piso_por, neon_piso_motivo FROM pedidos LIMIT 0').all();
+    await env.DB.prepare('SELECT recibido_at, recibido_por, despachado_at, despachado_por, despacho_modo, despacho_transporte, despacho_seguimiento, despacho_prev_estado, neon_piso, neon_piso_at, neon_piso_por, neon_piso_motivo, entrega_modo, entrega_modo_at, entrega_modo_por FROM pedidos LIMIT 0').all();
     _neonTabOk = true; return;
   } catch (_) {}
   const alters = [
     ['corte_pedidos', ['diseno_inicio_at TEXT', 'diseno_inicio_por TEXT', 'cortado_at TEXT', 'separado_at TEXT']],
-    ['pedidos', ['recibido_at TEXT', 'recibido_por TEXT', 'despachado_at TEXT', 'despachado_por TEXT', 'despacho_modo TEXT', 'despacho_transporte TEXT', 'despacho_seguimiento TEXT', 'despacho_prev_estado TEXT', 'neon_piso TEXT', 'neon_piso_at TEXT', 'neon_piso_por TEXT', 'neon_piso_motivo TEXT']],
+    ['pedidos', ['recibido_at TEXT', 'recibido_por TEXT', 'despachado_at TEXT', 'despachado_por TEXT', 'despacho_modo TEXT', 'despacho_transporte TEXT', 'despacho_seguimiento TEXT', 'despacho_prev_estado TEXT', 'neon_piso TEXT', 'neon_piso_at TEXT', 'neon_piso_por TEXT', 'neon_piso_motivo TEXT', 'entrega_modo TEXT', 'entrega_modo_at TEXT', 'entrega_modo_por TEXT']],
   ];
   for (const [t, cols] of alters) for (const c of cols) { try { await env.DB.prepare('ALTER TABLE ' + t + ' ADD COLUMN ' + c).run(); } catch (_) {} }
   _neonTabOk = true;
@@ -21986,7 +22010,7 @@ async function neonTableroFilas(env, opts = {}) {
   try { await ensureCorteNeonSchema(env); } catch (_) {}
   const sel = 'SELECT p.id, p.numero, p.fecha, p.cartel, p.colores, p.alto, p.ancho, p.cantidad, p.base, p.dimer, p.tipo, p.envio, p.aclaracion, p.telefono, p.comercial_id, p.cargado_por, p.origen, ' +
     'p.estado_pedido, p.estado_pago, p.pago_metodo, p.pagado AS _pag, p.cobro2_at, p.productor_id, p.productor, p.prod_estado, p.prod_estado_at, p.prod_asignado_at, p.prod_terminado_at, p.created_at, p.foto_diseno_key, ' +
-    'p.recibido_at, p.recibido_por, p.despachado_at, p.despachado_por, p.despacho_modo, p.despacho_transporte, p.despacho_seguimiento, p.despacho_prev_estado, p.neon_piso, p.neon_piso_at, p.neon_piso_por, p.neon_piso_motivo, ' +
+    'p.recibido_at, p.recibido_por, p.despachado_at, p.despachado_por, p.despacho_modo, p.despacho_transporte, p.despacho_seguimiento, p.despacho_prev_estado, p.neon_piso, p.neon_piso_at, p.neon_piso_por, p.neon_piso_motivo, p.entrega_modo, ' +
     'cp.id AS corte_id, cp.estado AS corte_estado, cp.foto_key AS corte_foto, cp.medida_declarada, cp.ancho_real, cp.alto_real, cp.disenado_at, cp.diseno_inicio_at, cp.diseno_inicio_por, cp.cortado_at, cp.separado_at, cp.cm_colores, ' +
     '(SELECT COUNT(*) FROM pedido_prod_fotos f WHERE f.pedido_id = p.id) AS fotos_n, ' +
     // Total del pedido ENTERO (con los corpóreos del grupo): para saber si lo pagó todo con la seña.
@@ -22107,6 +22131,7 @@ function neonTarjeta(r, ctx) {
       asignado: r.prod_asignado_at || '', prod: r.prod_estado_at || '', terminado: r.prod_terminado_at || '', recibido: r.recibido_at || '', despachado: salio ? r.despachado_at : '' },
     recibido_por: r.recibido_por || '', despacho: salio ? { modo: r.despacho_modo || '', transporte: r.despacho_transporte || '', seguimiento: r.despacho_seguimiento || '', por: r.despachado_por || '' } : null,
     mio: propio,
+    entrega_modo: String(r.entrega_modo || ''),   // cómo se entrega (lo eligió el vendedor); vacío = se deduce del texto de Envío
   };
   if (ctx.rol !== 'logistica') { o.vendedor = NEON_VEND[com] || com; o.aclaracion = String(r.aclaracion || '').trim().slice(0, 300); }
   // Repartida entre productores: una tarjeta, con cada parte (quién, cuántas, su estado, sus fotos y su llegada al taller) y las
@@ -22116,7 +22141,8 @@ function neonTarjeta(r, ctx) {
       f: { asignado: p.asignado_at || '', prod: p.prod_estado_at || '', terminado: p.prod_estado === 'terminado' ? (p.terminado_at || '') : '', recibido: p.recibido_at || '' }, recibido_por: p.recibido_por || '' }));
     o.libres = Math.max(0, o.cantidad - r._partes.reduce((s, p) => s + p.unidades, 0));
   }
-  if (dir) o.envio = String(r.envio || '').trim().slice(0, 400);
+  // Logística solo despacha encomiendas: la dirección de los que retiran, van en Uber o se instalan no le viaja.
+  if (dir && !(ctx.rol === 'logistica' && ['retira', 'uber', 'instalacion'].includes(String(r.entrega_modo || '')))) o.envio = String(r.envio || '').trim().slice(0, 400);
   if (ctx.rol === 'admin' && r.neon_piso) o.piso = { etapa: r.neon_piso, motivo: r.neon_piso_motivo || '', por: r.neon_piso_por || '', at: r.neon_piso_at || '' };
   return o;
 }
@@ -22138,7 +22164,7 @@ async function neonTablero(env, ctx) {
   if (ctx.rol === 'comercial') {
     vis = rows.filter(r => String(r.comercial_id || 'joaco') === ctx.com);
     otros = {}; for (const r of rows) if (String(r.comercial_id || 'joaco') !== ctx.com) otros[r._etapa] = (otros[r._etapa] || 0) + 1;
-  } else if (ctx.rol === 'logistica') vis = rows.filter(r => r._i >= 5);
+  } else if (ctx.rol === 'logistica') vis = rows.filter(r => r._i >= 5 && !['retira', 'uber', 'instalacion'].includes(String(r.entrega_modo || '')));
   // Partes de las repartidas visibles (solo esas filas: una consulta de partes y una de fotos por parte, por índice).
   const rep = vis.filter(r => String(r.productor_id || '') === PROD_VARIOS);
   if (rep.length) {
@@ -30732,6 +30758,10 @@ const handler = {
         let estadoPago = esCuentaSF ? 'Cuenta corriente' : (esSinPago ? '1er pago' : String(body.estado_pago || '1er pago'));
         if (!esCuentaSF && /^cuenta corriente$/i.test(estadoPago.trim())) estadoPago = '1er pago';
         if (estadoPago === '2do pago' && !(pagado != null && pagado >= total - 1)) estadoPago = '1er pago';   // '2do pago' = pagó todo
+        // Entrega (Gaspar 26-oct): si pagó todo de una, el vendedor ya elige cómo sale el neón. Uber y encomienda necesitan la
+        // dirección completa en el Envío de algún cartel de neón.
+        const entregaAlta = (estadoPago === '2do pago' && entregaModoOk(body.entrega_modo)) ? String(body.entrega_modo) : '';
+        if (entregaAlta && ENTREGA_CON_DIRECCION.includes(entregaAlta) && !carteles.some(c => !(c.es_corporeo === 1 || c.es_corporeo === true || c.es_corporeo === '1') && entregaDatosOk(c.envio))) return json({ error: 'Para Uber o encomienda poné la dirección completa en "Envío"', campo: 'envio' }, 400);
         // PAGO (oct-2026): comprobante + caja OBLIGATORIOS. Se exigen solo si el front es el nuevo (pago_v ≥ 2): un
         // vendedor con la PWA vieja en caché no manda estos campos y no se le frena la venta (regla de la casa).
         // Efectivo ⇔ caja 'Efectivo' y sin comprobante (el importe es `pagado`).
@@ -30865,6 +30895,8 @@ const handler = {
           }
         }
         if (_compsEx.length) { try { await env.DB.prepare("UPDATE pedidos SET comprobantes_extra = ? WHERE numero = ? AND origen = 'crm' AND created_at = ?").bind(JSON.stringify(_compsEx), numero, now).run(); } catch (_) {} }
+        let avisoEntrega = '';
+        if (entregaAlta) { try { await env.DB.prepare("UPDATE pedidos SET entrega_modo = ?, entrega_modo_at = ?, entrega_modo_por = ? WHERE numero = ? AND origen = 'crm' AND created_at = ? AND IFNULL(es_corporeo, 0) = 0").bind(entregaAlta, now, String(session.user || ''), numero, now).run(); } catch (_) { avisoEntrega = 'No se pudo guardar cómo se entrega: elegilo desde el pedido (🚚 Entrega)'; } }
         // SOLO las filas recién creadas (mismo número + created_at de este alta): el N° se repite entre
         // vendedores, y antes la respuesta (y el trazado de ad de abajo) arrastraba pedidos de otro.
         const rs = { results: await pedidosConDiseno(env, 'WHERE pedidos.numero = ? AND pedidos.origen = ? AND pedidos.created_at = ? ORDER BY pedidos.id', [numero, 'crm', now], { interno: (await getSessionRole(env, session.user)) === 'admin', fotos: true }) };
@@ -30910,7 +30942,7 @@ const handler = {
         } catch (_) {}
         // OC de ese cliente → pagada (saca POR PAGAR, pone "Cartel primer pago", oc_enviadas.pagado_at). Ver ocCerrarPorPedido.
         if (!esCuentaSF && !esSinPago) await ocCerrarPorPedido(env, [telefono, igId], estadoPago);
-        return json({ ok: true, numero, pedidos: rs.results || [], ...(body.cliente_sf ? { sf_vinculado: sfVinculado } : {}) });
+        return json({ ok: true, numero, pedidos: rs.results || [], ...(body.cliente_sf ? { sf_vinculado: sfVinculado } : {}), ...(avisoEntrega ? { aviso_entrega: avisoEntrega } : {}) });
       }
 
       // PATCH /admin/pedidos/:id → edita un pedido. Dos alcances:
@@ -31210,6 +31242,16 @@ const handler = {
         const sena = Math.round((sena0 + suma) * 100) / 100;
         const restante = Math.max(0, total - sena - cobro2);
         const estado = restante <= 1 ? '2do pago' : '1er pago';
+        // Entrega (Gaspar 26-oct): si con esto pagó todo, el vendedor elige en el mismo modal cómo sale el neón. Se valida antes de
+        // tocar nada y se guarda después (solo si quedó '2do pago').
+        const entregaS = estado === '2do pago' ? String(body.entrega || '') : '';
+        if (entregaS && !entregaModoOk(entregaS)) return json({ error: 'Entrega inválida', campo: 'entrega' }, 400);
+        const datosS = ENTREGA_CON_DIRECCION.includes(entregaS) ? String(body.datos_envio || '').trim() : '';
+        if (ENTREGA_CON_DIRECCION.includes(entregaS)) {
+          let _envS = datosS;
+          if (!_envS) { try { _envS = ((await env.DB.prepare(`SELECT envio FROM pedidos WHERE ${_grp} AND IFNULL(es_corporeo,0) = 0 ORDER BY LENGTH(IFNULL(envio,'')) DESC LIMIT 1`).bind(..._grpArgs).first()) || {}).envio || ''; } catch (_) {} }
+          if (!entregaDatosOk(_envS)) return json({ error: 'Para Uber o encomienda faltan los datos de envío (dirección completa)', campo: 'entrega' }, 400);
+        }
         const usados = [];
         for (const x of nuevos) { const u = await compUsadoFuera(env, x.key, _grp, _grpArgs); if (u) usados.push(`Ojo: un comprobante también está cargado en el pedido #${u.numero}${u.cartel ? ' (' + String(u.cartel).slice(0, 40) + ')' : ''}`); }
         // Pedido cargado antes de que el comprobante fuera obligatorio: el primero pasa a ser EL comprobante de la seña.
@@ -31229,8 +31271,42 @@ const handler = {
         const caja1 = String(g.caja || '');
         if (caja1 && caja1 !== caja) avisos.push(`la seña figura en ${caja1}: en la planilla queda ${caja1}`);
         avisos.push(...usados);
+        if (entregaS) {
+          try { await ensureNeonTableroSchema(env); await entregaGrupoStmt(env, _grp, _grpArgs, entregaS, datosS, session.user, new Date(Date.parse(now) + 1).toISOString()).run(); }
+          catch (_) { avisos.push('No se pudo guardar la entrega: elegila desde el pedido'); }
+        }
         const rsS = { results: await pedidosConDiseno(env, 'WHERE ' + _grp.replace(/\b(numero|fecha|comercial_id|origen|telefono)\b/g, 'pedidos.$1') + ' ORDER BY pedidos.id', _grpArgs, { interno: _pr === 'admin', fotos: true }) };
         return json({ ok: true, numero: ref.numero, pedidos: rsS.results || [], avisos });
+      }
+
+      // POST /admin/pedidos/:id/entrega {entrega, datos_envio?} → cambia cómo se entrega el pedido de neón (todo el grupo, como el
+      // 2do pago). El vendedor del pedido o Gaspar. Uber y encomienda llevan la dirección completa (datos_envio o la que ya tiene).
+      // No se cambia si ya salió. Los corpóreos no usan esto.
+      if (request.method === 'POST' && /^\/admin\/pedidos\/\d+\/entrega$/.test(path)) {
+        const _pr = await getSessionRole(env, session.user);
+        if (!['admin', 'comercial'].includes(_pr)) return json({ error: 'forbidden' }, 403);
+        await ensurePedidosSchema(env);
+        try { await ensureNeonTableroSchema(env); } catch (_) {}
+        const id = parseInt(path.split('/')[3], 10);
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const modo = String(body.entrega || '');
+        if (!entregaModoOk(modo)) return json({ error: 'Elegí cómo se entrega', campo: 'entrega' }, 400);
+        const ref = await env.DB.prepare("SELECT numero, fecha, IFNULL(comercial_id,'joaco') AS com, origen, IFNULL(telefono,'') AS tel FROM pedidos WHERE id = ?").bind(id).first();
+        if (!ref) return json({ error: 'pedido no encontrado' }, 404);
+        if (_pr === 'comercial' && ref.com !== await resolveComercial(env, { sessionUser: session.user })) return json({ error: 'ese pedido es de otro vendedor' }, 403);
+        let _grp = "numero = ? AND fecha = ? AND IFNULL(comercial_id,'joaco') = ?";
+        const _grpArgs = [ref.numero, ref.fecha, ref.com];
+        if (ref.origen === 'crm' && ref.tel) { _grp += " AND origen = 'crm' AND IFNULL(telefono,'') = ?"; _grpArgs.push(ref.tel); }
+        const g = await env.DB.prepare(`SELECT COUNT(*) AS n, MAX(CASE WHEN despachado_at IS NOT NULL OR lower(IFNULL(estado_pedido,'')) LIKE 'entregad%' THEN 1 ELSE 0 END) AS salio,
+            (SELECT envio FROM pedidos WHERE ${_grp} AND IFNULL(es_corporeo,0) = 0 ORDER BY LENGTH(IFNULL(envio,'')) DESC LIMIT 1) AS env
+          FROM pedidos WHERE ${_grp} AND IFNULL(es_corporeo,0) = 0`).bind(..._grpArgs, ..._grpArgs).first();
+        if (!g || !(Number(g.n) > 0)) return json({ error: 'Los corpóreos todavía no usan la entrega' }, 409);
+        if (Number(g.salio) === 1) return json({ error: 'Ese pedido ya salió: la entrega no se cambia' }, 409);
+        const datos = String(body.datos_envio || '').trim();
+        if (ENTREGA_CON_DIRECCION.includes(modo) && !entregaDatosOk(datos || g.env)) return json({ error: 'Para Uber o encomienda faltan los datos de envío (dirección completa)', campo: 'datos_envio' }, 400);
+        await entregaGrupoStmt(env, _grp, _grpArgs, modo, ENTREGA_CON_DIRECCION.includes(modo) ? datos : '', session.user, new Date().toISOString()).run();
+        const rsE = await pedidosConDiseno(env, 'WHERE ' + _grp.replace(/\b(numero|fecha|comercial_id|origen|telefono)\b/g, 'pedidos.$1') + ' ORDER BY pedidos.id', _grpArgs, { interno: _pr === 'admin', fotos: true });
+        return json({ ok: true, numero: ref.numero, pedidos: rsE || [] });
       }
 
       // POST /admin/pedidos/:id/segundo-pago → registra el 2do pago (el saldo) de TODO el pedido (mismo grupo que el PATCH).
@@ -31268,6 +31344,21 @@ const handler = {
         const g = await env.DB.prepare(`SELECT COALESCE(SUM(precio),0) + COALESCE(SUM(precio_dimmer),0) AS t, MAX(pagado) AS pagado, CASE WHEN SUM(CASE WHEN IFNULL(origen,'') = 'crm' THEN 0 ELSE 1 END) = 0 THEN MAX(IFNULL(pagado,0)) WHEN MAX(ABS(IFNULL(pagado,0) + IFNULL(restante,0) - IFNULL(precio,0) - IFNULL(precio_dimmer,0))) <= 1 OR MIN(IFNULL(pagado,0)) <> MAX(IFNULL(pagado,0)) THEN SUM(IFNULL(pagado,0)) ELSE MAX(IFNULL(pagado,0)) END AS sena, CASE WHEN SUM(CASE WHEN IFNULL(origen,'') = 'crm' THEN 0 ELSE 1 END) > 0 AND (MAX(ABS(IFNULL(pagado,0) + IFNULL(restante,0) - IFNULL(precio,0) - IFNULL(precio_dimmer,0))) <= 1 OR MIN(IFNULL(pagado,0)) <> MAX(IFNULL(pagado,0))) THEN 1 ELSE 0 END AS por_fila, MIN(id) AS min_id, MAX(CASE WHEN lower(IFNULL(estado_pago,'')) = 'cuenta corriente' THEN 1 ELSE 0 END) AS cc, MAX(IFNULL(caja,'')) AS caja, MAX(cobro2) AS cobro2, MAX(IFNULL(comprobante_key,'')) AS ck1, MAX(IFNULL(pago_metodo,'')) AS pm, MAX(IFNULL(comprobante2_key,'')) AS ck2, MAX(IFNULL(comprobantes_extra,'')) AS cx FROM pedidos WHERE ${_grp}`).bind(..._grpArgs).first();
         // Cuenta corriente (Sin Frontera): se cobra en su Excel, acá no se registra (pasarlo a '1er pago' lo trababa en el tablero).
         if (g && Number(g.cc) === 1) return json({ error: 'Es cuenta corriente (Sin Frontera): se cobra en su Excel, no acá' }, 409);
+        // Entrega (Gaspar 26-oct): el vendedor elige en este mismo modal cómo sale el neón. Uber y encomienda llevan los datos de
+        // envío (si cambiaron, reemplazan el texto de Envío). Se valida ANTES de registrar el pago (nada a medias).
+        const entregaPed = String(body.entrega || '');
+        if (entregaPed && !entregaModoOk(entregaPed)) return json({ error: 'Entrega inválida', campo: 'entrega' }, 400);
+        const datosEnv = ENTREGA_CON_DIRECCION.includes(entregaPed) ? String(body.datos_envio || '').trim() : '';
+        if (ENTREGA_CON_DIRECCION.includes(entregaPed) && !datosEnv) {
+          let _envAct = ''; try { _envAct = ((await env.DB.prepare(`SELECT envio FROM pedidos WHERE ${_grp} AND IFNULL(es_corporeo,0) = 0 ORDER BY LENGTH(IFNULL(envio,'')) DESC LIMIT 1`).bind(..._grpArgs).first()) || {}).envio || ''; } catch (_) {}
+          if (!entregaDatosOk(_envAct)) return json({ error: 'Para Uber o encomienda faltan los datos de envío (dirección completa)', campo: 'entrega' }, 400);
+        } else if (ENTREGA_CON_DIRECCION.includes(entregaPed) && !entregaDatosOk(datosEnv)) return json({ error: 'Para Uber o encomienda faltan los datos de envío (dirección completa)', campo: 'entrega' }, 400);
+        // Se guarda después del pago (si falla, el pago queda igual y se avisa).
+        const _guardarEntrega = async (nowE) => {
+          if (!entregaPed) return '';
+          try { await ensureNeonTableroSchema(env); await entregaGrupoStmt(env, _grp, _grpArgs, entregaPed, datosEnv, session.user, new Date(Date.parse(nowE) + 1).toISOString()).run(); return ''; }
+          catch (_) { return 'No se pudo guardar la entrega: elegila desde el pedido'; }
+        };
         // Varios comprobantes (pagó con varias transferencias): los de más van a comprobantes_extra. Si es el 1er cobro de un
         // pedido cargado sin pago, cuentan como de la seña (pago 1); si no, del saldo (pago 2).
         const _cxPrev = compsExtraLeer(g && g.cx);
@@ -31286,8 +31377,9 @@ const handler = {
         // Reintento del front (se cortó la respuesta y el pago ya había entrado como 1er cobro): no se registra de nuevo.
         if (body.primer_cobro === true && g && g.pm !== 'pendiente') {
           if (Math.abs((Number(g.pagado) || 0) - importe) <= 1 && g.cobro2 == null) {
+            const _avEntI = await _guardarEntrega(new Date().toISOString());
             const rsI = { results: await pedidosConDiseno(env, 'WHERE ' + _grp.replace(/\b(numero|fecha|comercial_id|origen|telefono)\b/g, 'pedidos.$1') + ' ORDER BY pedidos.id', _grpArgs, { interno: _pr === 'admin', fotos: true }) };
-            return json({ ok: true, numero: ref.numero, pedidos: rsI.results || [], avisos: ['Ese pago ya estaba registrado'], primer_cobro: true });
+            return json({ ok: true, numero: ref.numero, pedidos: rsI.results || [], avisos: ['Ese pago ya estaba registrado'].concat(_avEntI ? [_avEntI] : []), primer_cobro: true });
           }
           return json({ error: 'Ese pedido ya tiene un pago registrado: recargá la lista' }, 409);
         }
@@ -31303,6 +31395,7 @@ const handler = {
           const upSp = await env.DB.prepare(`UPDATE pedidos SET estado_pago = ?, pagado = ?, restante = ?, caja = ?, pago_metodo = ?, comprobante_key = ?, comprobante_wamid = ?, comprobantes_extra = ?, caja_sync_attempts = 0, caja_sync_err = NULL, mirror_dirty = 1, mirror_attempts = 0, mirror_error = NULL, updated_at = ? WHERE ${_grp} AND pago_metodo = 'pendiente' AND IFNULL(pagado,0) = 0`)
             .bind(estadoSp, importe, restSp, caja, metodo, compKey || null, compWamid, _cxSp, nowSp, ..._grpArgs).run();
           if (!(upSp && upSp.meta && upSp.meta.changes > 0)) return json({ error: 'Ese pedido ya tiene un pago registrado: recargá la lista' }, 409);
+          const _avEntSp = await _guardarEntrega(nowSp);
           // La plata entró: la OC del chat deja de estar POR PAGAR (al cargarlo sin pago se había dejado abierta a propósito).
           try { const igSp = /^@|[a-z_.]/i.test(ref.tel) ? await igsidDeUsuario(env, ref.tel) : ''; await ocCerrarPorPedido(env, [ref.tel, igSp], estadoSp); } catch (_) {}
           const fmSp = (n) => '$' + Math.round(n).toLocaleString('es-AR');
@@ -31311,6 +31404,7 @@ const handler = {
           else if (importe > totalSp + 1) avisosSp.push(`Pagó ${fmSp(importe - totalSp)} de más`);
           if (usadoSp) avisosSp.push(`Ojo: ese comprobante también está cargado en el pedido #${usadoSp.numero}${usadoSp.cartel ? ' (' + String(usadoSp.cartel).slice(0, 40) + ')' : ''}`);
           avisosSp.push(..._usadosEx);
+          if (_avEntSp) avisosSp.push(_avEntSp);
           const rsSp = { results: await pedidosConDiseno(env, 'WHERE ' + _grp.replace(/\b(numero|fecha|comercial_id|origen|telefono)\b/g, 'pedidos.$1') + ' ORDER BY pedidos.id', _grpArgs, { interno: _pr === 'admin', fotos: true }) };
           return json({ ok: true, numero: ref.numero, pedidos: rsSp.results || [], avisos: avisosSp, primer_cobro: true });
         }
@@ -31343,6 +31437,7 @@ const handler = {
         const up2 = await env.DB.prepare(`UPDATE pedidos SET estado_pago = ?, cobro2 = ?, caja2 = ?, pago2_metodo = ?, comprobante2_key = ?, comprobante2_wamid = ?, cobro2_at = ?, comprobantes_extra = ?, restante = CASE WHEN ? = 0 OR id = ? THEN ? ELSE 0 END, mirror_dirty = 1, mirror_attempts = 0, mirror_error = NULL, updated_at = ? WHERE ${_grp} AND IFNULL(cobro2, -1) = ?`)
           .bind(estadoPago, importe, caja, metodo, compKey || null, compWamid, now, _cxNuevo.length ? JSON.stringify(_cxNuevo) : null, porFila ? 1 : 0, g ? Number(g.min_id) || 0 : 0, restante, now, ..._grpArgs, (g && g.cobro2 != null) ? Number(g.cobro2) : -1).run();
         if (!(up2 && up2.meta && up2.meta.changes > 0)) return json({ error: 'Recién se registró otro pago de este pedido: recargá la lista y fijate antes de cargarlo de nuevo' }, 409);
+        const _avEnt = await _guardarEntrega(now);
         const fm = (n) => '$' + Math.round(n).toLocaleString('es-AR');
         const avisos = [];
         const caja1 = String((g && g.caja) || '');
@@ -31351,6 +31446,7 @@ const handler = {
         if (!caja1) avisos.push('Este pedido no tiene cargada la caja de la seña');
         if (_usadoEn) avisos.push(`Ojo: ese comprobante también está cargado en el pedido #${_usadoEn.numero}${_usadoEn.cartel ? ' (' + String(_usadoEn.cartel).slice(0, 40) + ')' : ''}`);
         avisos.push(..._usadosEx);
+        if (_avEnt) avisos.push(_avEnt);
         if (importe < saldo - 1) avisos.push(`Queda debiendo ${fm(saldo - importe)}: sigue en 1er pago y no se puede mandar hasta que pague todo`);
         else if (importe > saldo + 1) avisos.push(`Pagó ${fm(importe - saldo)} de más`);
         if (caja1 && caja1 !== caja) {
@@ -32691,6 +32787,7 @@ const handler = {
           const modo = String(body.modo || '');
           if (!NEON_DESPACHO_MODOS[modo]) return json({ error: 'modo inválido' }, 400);
           if (ctx.rol === 'logistica' && modo !== 'envio') return json({ error: 'logística solo marca "salió por envío"' }, 403);
+          if (ctx.rol === 'logistica' && ['retira', 'uber', 'instalacion'].includes(String(yo.entrega_modo || ''))) return json({ error: 'Ese pedido no va por encomienda: lo saca Neyen del taller' }, 403);
           if (yo._etapa === 'enviado') return json({ ok: true, sin_cambios: true });
           if (yo._etapa !== 'enviar' && !forzar) return json({ error: yo._etapa === 'pago' ? 'Todavía no está pagado: no sale.' : 'Todavía no está para enviar.', etapa: yo._etapa }, 409);
           // Gaspar 17-oct: "no se puede mandar algo que no está saldado" → ni forzado.
