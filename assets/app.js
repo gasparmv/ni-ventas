@@ -4996,7 +4996,7 @@ function corteHybridBoard(pedidos) {
   });
   groups.forEach(g => { g.debeOtra = !g.deuda && !!debeOtra[corteClaveClienteFront(g.tel, g.nombre)]; });
   // Frenos del corte: pidió sumar algo o hay una diferencia de plata. 'Frenado' = traba el paquete; los de prueba no se muestran.
-  groups.forEach(g => { g.frenos = g.tel ? (STATE.corteFrenos || []).filter(f => f.estado === 'abierto' && !+f.prueba && String(f.telefono) === String(g.tel)) : []; g.frenado = g.frenos.some(f => +f.frena); });
+  groups.forEach(g => { g.frenos = g.tel ? (STATE.corteFrenos || []).filter(f => f.estado === 'abierto' && !+f.prueba && String(f.telefono) === String(g.tel)) : []; g.frenado = g.frenos.some(corteFrenoTraba); });
   const seg = STATE.corteSeg || 'todo';
   const sinMedir = groups.filter(g => !g.priced).length;
   const parciales = groups.filter(g => g.pago === 'parcial').length;
@@ -10080,10 +10080,13 @@ function corteSenasBind() {
 // sumar al pedido (el server cotiza con los precios de la web y le manda al cliente el detalle), dejar a favor, devolver,
 // marcar pagado lo pendiente, o liberar. El precio que se ve es orientativo: lo recalcula el server.
 const CORTE_FRENO_TIPO = { agregar: 'Quiere sumar', cambio: 'Pidió un cambio', reclamo: 'Reclamo', pago_de_mas: 'Pagó de más', pago_de_menos: 'Pagó de menos', pago_sin_cobro: 'Pagó sin cobro', pago_repetido: 'Comprobante repetido' };
+// ¿Traba HOY el paquete? El server lo calcula al leer (traba: freno prendido y piezas sin despachar de esa semana); un server
+// viejo solo manda frena.
+function corteFrenoTraba(f) { return f.traba != null ? !!+f.traba : (f.frena == null || !!+f.frena); }
 // Frenos que traban el paquete de un teléfono (admin: la lista completa; Neyen: ya viene filtrada y sin montos).
 function corteFrenosDeTel(tel) {
   if (!tel) return [];
-  return (STATE.corteFrenos || []).filter(f => String(f.telefono) === String(tel) && (f.estado == null || f.estado === 'abierto') && (f.frena == null || +f.frena) && !+f.prueba);
+  return (STATE.corteFrenos || []).filter(f => String(f.telefono) === String(tel) && (f.estado == null || f.estado === 'abierto') && corteFrenoTraba(f) && !+f.prueba);
 }
 function corteFrenoCortoFront(f) {
   if (f.corto) return f.corto;
@@ -10133,7 +10136,8 @@ function corteFrenosHtml() {
     let acciones = '';
     if (f.tipo === 'agregar') acciones = btn(f, 'sumar', pdmAbierto ? 'Sumar (cubierto con lo que pagó)' : (c.cobro === 'cobrando' ? 'Sumar y mandar el detalle' : 'Sumar al pedido'), true) + btn(f, 'liberar', 'Ya lo resolví') + btn(f, 'descartar', 'No era un pedido');
     else if (f.tipo === 'pago_de_mas') acciones = btn(f, 'a_favor', 'Dejar a favor', true) + btn(f, 'devolver', 'Devolver') + btn(f, 'liberar', 'Fue un error de lectura');
-    else if (f.tipo === 'pago_sin_cobro') acciones = (tolOk(f.comprobante_monto, c.pendiente) ? btn(f, 'pagar_pendiente', 'Marcar pagado lo pendiente', true) : '') + btn(f, 'a_favor', 'Dejar a favor', !tolOk(f.comprobante_monto, c.pendiente)) + btn(f, 'devolver', 'Devolver') + btn(f, 'liberar', 'Ya lo resolví');
+    // Si el monto no tiene que ver con lo pendiente, "a favor" no va como acción principal (puede ser la cuota de un curso).
+    else if (f.tipo === 'pago_sin_cobro') acciones = (tolOk(f.comprobante_monto, c.pendiente) ? btn(f, 'pagar_pendiente', 'Marcar pagado lo pendiente', true) + btn(f, 'a_favor', 'Dejar a favor') : btn(f, 'liberar', 'No es del corte') + btn(f, 'a_favor', 'Dejar a favor')) + btn(f, 'devolver', 'Devolver') + btn(f, 'liberar', 'Ya lo resolví');
     else if (f.tipo === 'pago_repetido') acciones = btn(f, 'liberar', 'Es el mismo reenviado', true) + btn(f, 'a_favor', 'Dejar a favor') + btn(f, 'devolver', 'Devolver');
     else acciones = btn(f, 'liberar', 'Ya lo resolví', true) + (f.tipo === 'pago_de_menos' ? '' : btn(f, 'descartar', 'Descartar'));
     const plataHtml = plata ? `<div style="font-size:12.5px;margin-top:4px">${f.cobro_total ? 'Cobro ' + fmtMoney(f.cobro_total) + ' · ' : ''}comprobante ${fmtMoney(f.comprobante_monto)}${f.tipo === 'pago_de_mas' ? ' · <b>de más ' + fmtMoney(f.diferencia) + '</b>' : (f.tipo === 'pago_de_menos' ? ' · <b>faltan ' + fmtMoney(-(+f.diferencia || 0)) + '</b>' : '')}${f.caja ? ' · caja ' + escapeHtml(f.caja) : ''}${f.comprobante_key ? ` · <a href="${escapeHtml(mediaUrl(f.comprobante_key))}" target="_blank" rel="noopener">ver comprobante</a>` : ''}${rel ? '<br><span style="color:#22c55e">Coincide con lo que pidió sumar: aprobalo en su tarjeta.</span>' : ''}${f.tipo === 'pago_sin_cobro' && c.pendiente ? '<br>Lo pendiente suma ' + fmtMoney(c.pendiente) + (tolOk(f.comprobante_monto, c.pendiente) ? ' (coincide)' : '') : ''}</div>` : '';
@@ -10141,7 +10145,7 @@ function corteFrenosHtml() {
       <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
         <span style="font-weight:800;overflow-wrap:anywhere">${escapeHtml(f.nombre || 'Cliente')}</span>
         ${corteChip(CORTE_FRENO_TIPO[f.tipo] || f.tipo, plata ? '#f59e0b' : '#ef4444')}
-        ${+f.frena && !+f.prueba ? corteChip('Frena el paquete', '#ef4444') : ''}${+f.prueba ? corteChip('prueba', 'var(--fg-subtle)') : ''}${f.origen === 'web' ? corteChip('pedido web', '#60a5fa') : ''}
+        ${corteFrenoTraba(f) && !+f.prueba ? corteChip('Frena el paquete', '#ef4444') : ''}${+f.prueba ? corteChip('prueba', 'var(--fg-subtle)') : ''}${f.origen === 'web' ? corteChip('pedido web', '#60a5fa') : ''}
         <span style="font-size:12px;color:var(--fg-mute)">${hace(f.created_at)}</span>
       </div>
       ${c.cobro_txt || c.paquete_txt ? `<div style="font-size:12px;color:var(--fg-mute);margin-top:3px">${escapeHtml([c.cobro_txt, c.paquete_txt].filter(Boolean).join(' '))}</div>` : ''}
@@ -10156,6 +10160,7 @@ function corteFrenosHtml() {
     <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap"><span style="font-size:15px;font-weight:800">🛑 Para resolver</span><span style="font-size:12px;color:var(--fg-mute)">${abiertos.length} abierto${abiertos.length === 1 ? '' : 's'} · lo que pidieron sumar y los pagos que no coinciden. Mientras esté abierto, Neyen no embala y logística no despacha</span></div>
     ${abiertos.map(card).join('') || '<div style="font-size:12.5px;color:var(--fg-mute);margin-top:6px">Nada pendiente ✨</div>'}
     ${resueltos.length ? `<div style="font-size:12px;color:var(--fg-mute);margin-top:9px">Últimos días: ${resueltos.slice(0, 12).map(f => escapeHtml((f.nombre || 'cliente') + ' · ' + (CORTE_FRENO_TIPO[f.tipo] || f.tipo).toLowerCase() + ' (' + (f.resolucion || f.estado) + (f.resuelto_por ? ', ' + f.resuelto_por : '') + ')')).join(' · ')}</div>` : ''}
+    ${resueltos.filter(f => f.a_favor_id).length ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">${resueltos.filter(f => f.a_favor_id).slice(0, 8).map(f => `<button type="button" class="btn btn-ghost" data-fr-acc="deshacer_a_favor" data-fr-id="${f.id}" style="padding:4px 9px;font-size:12px">Deshacer el a favor de ${escapeHtml(f.nombre || 'cliente')}</button>`).join('')}</div>` : ''}
   </div>`;
 }
 // Ítems como están en pantalla (lo que Gaspar corrigió). El precio no viaja: lo pone el server.
@@ -10175,14 +10180,16 @@ async function corteFrenoAccion(id, acc, btn) {
       const its = corteFrenoItemsCot(corteFrenoItemsDom(id).map(x => ({ ...x, nombre: ((STATE.corteCatalogo || []).find(d => d.codigo === x.codigo) || {}).nombre || '' })));
       if (!its.length || its.some(x => !x.ok)) { toast('Completá cada ítem: producto, cantidad y, en los cables de 0,35 y 0,5, el color'); return; }
       body.items = its.map(x => ({ codigo: x.codigo, cantidad: x.cantidad, color: x.color }));
-      f._txtItems = its.map(x => x.cantidad + ' ' + x.nombre + (x.color ? ' ' + x.color : '')).join(', ') + ' (' + fmtMoney(its.reduce((s, x) => s + x.precio, 0)) + ')';
-    } else f._txtItems = (f.items || []).map(x => x.cantidad + ' ' + x.nombre).join(', ') + ' (' + fmtMoney(f.items_total) + ')';
+      f._nuevo = its.reduce((s, x) => s + x.precio, 0);
+      f._txtItems = its.map(x => x.cantidad + ' ' + x.nombre + (x.color ? ' ' + x.color : '')).join(', ') + ' (' + fmtMoney(f._nuevo) + ')';
+    } else { f._nuevo = +f.items_total || 0; f._txtItems = (f.items || []).map(x => x.cantidad + ' ' + x.nombre).join(', ') + ' (' + fmtMoney(f.items_total) + ')'; }
     const pdm = (STATE.corteFrenos || []).find(x => x.estado === 'abierto' && x.telefono === f.telefono && x.tipo === 'pago_de_mas');
     const via = c.ventana ? 'por texto' : 'por plantilla (solo el total; el detalle le llega cuando conteste)';
+    // El total que va a ver el cliente (el server cobra por id: lo de ese cobro más lo nuevo; una deuda de otra semana no entra).
     if (pdm) txt = `Le sumo a ${nom} ${f._txtItems}. Si lo cubre lo que pagó de más (${fmtMoney(pdm.diferencia)}), quedan pagadas y ${c.ventana ? 'le escribo "Listo, con lo que pasaste de más te sumé..." con el recibo' : 'no le escribo (no tiene la ventana abierta)'}. Si no alcanza, lo pagado queda a favor y le mando el cobro de lo que falta ${via}.`;
-    else if (c.cobro === 'cobrando') txt = `Le sumo a ${nom} ${f._txtItems} y le mando el detalle nuevo con el total actualizado ${via}.`;
+    else if (c.cobro === 'cobrando') txt = `Le sumo a ${nom} ${f._txtItems} y le mando el detalle nuevo ${via}: ${c.cobrando_total ? fmtMoney(c.cobrando_total) + ' del cobro + ' + fmtMoney(f._nuevo) + ' = ' + fmtMoney((+c.cobrando_total || 0) + f._nuevo) : 'el total actualizado'}.`;
     else if (c.cobro === 'parcial') txt = `Le sumo a ${nom} ${f._txtItems} al pago parcial y le mando el detalle con lo que ya pagó y lo que le queda ${via}.`;
-    else if (c.cobro === 'pagado') txt = `Le sumo a ${nom} ${f._txtItems} y le mando el cobro solo de eso ${via}.`;
+    else if (c.cobro === 'pagado') txt = `Le sumo a ${nom} ${f._txtItems} y le mando el cobro solo de eso (${fmtMoney(f._nuevo)}) ${via}.`;
     else txt = `Le sumo a ${nom} ${f._txtItems} a su pedido: entra en el cobro de la semana.${c.ventana ? ' Le escribo "Listo, te sumo ... Te paso el total con el cobro."' : ' No le escribo (no tiene la ventana abierta).'}`;
     if (c.paquete_txt && /ya salió/.test(c.paquete_txt)) txt += ' Su paquete ya salió: va en un envío aparte (logística vuelve a pedir el envío).';
   } else if (acc === 'a_favor') {
@@ -10192,6 +10199,7 @@ async function corteFrenoAccion(id, acc, btn) {
   else if (acc === 'pagar_pendiente') txt = `Marco pagado lo pendiente de ${nom} (${fmtMoney(c.pendiente)}) con ese comprobante, también en la planilla.${c.ventana ? ' Le escribo "recibido, gracias! ya quedó pagado tu pedido de esta semana".' : ''}`;
   else if (acc === 'liberar') { txt = `Lo doy por resuelto: el paquete de ${nom} se libera. No le escribo nada.`; body.motivo = btn ? btn.textContent.trim().toLowerCase() : 'ya lo resolví'; }
   else if (acc === 'descartar') txt = `No era un pedido: lo descarto y el paquete de ${nom} se libera. No le escribo nada.`;
+  else if (acc === 'deshacer_a_favor') txt = `Anulo el saldo a favor de ${nom} (ningún cobro lo usó todavía) y el pendiente vuelve a Para resolver para que decidas de nuevo. No le escribo nada.`;
   if (!(await showConfirm(txt, { title: CORTE_FRENO_TIPO[f.tipo] || 'Para resolver', confirmLabel: 'Confirmar', cancelLabel: 'Volver' }))) return;
   if (btn) btn.disabled = true;
   let j = {};
