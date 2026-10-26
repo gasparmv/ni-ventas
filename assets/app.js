@@ -2323,6 +2323,10 @@ function mapPedidoFromD1(row) {
     moMonto: (row.mo_monto == null || row.mo_monto === '') ? null : Number(row.mo_monto),
     moRegla: row.mo_regla || '',
     prodPagadoAt: row.prod_pagado_at || '',
+    // Repartida entre productores (productor_id '*'): cada parte con sus unidades, estado y fotos (MO y pago, solo admin), y las
+    // unidades libres. productorNombre ya trae el texto 'GONZALO ×4 · OCTAVIO ×5'.
+    prodPartes: Array.isArray(row.prod_partes) ? row.prod_partes.map(prodParteDeFila) : [],
+    prodLibres: +row.prod_libres || 0,
     mirrorError: row.mirror_error || '',
     // Corpóreos (letras 3D): flag + specs de producción propios.
     esCorporeo: row.es_corporeo || 0,
@@ -4543,8 +4547,23 @@ function cmColBind(box, onChange, onEnterLast) {
 const NEON_DESPERDICIO = 0.05;
 // Bases separadas ANTES de este paso (16-oct) se dan por entregadas: si no, Neyen vería semanas de separadas viejas.
 const NEON_ENTREGA_DESDE = '2026-10-16T03:00:00.000Z';
+// Neón REPARTIDO entre productores (Gaspar 26-oct): la pieza (una matriz de N bases) se separa UNA vez y Neyen arma un paquete por
+// parte (sus bases y su neón) + uno "sin productor todavía" con las unidades libres. Cada ítem es la pieza con la cantidad, el
+// productor, el estado y la entrega de ESA parte (_parte_id); _parte_de = las bases de toda la matriz. Las demás piezas pasan igual.
+function corteNeonExpandirPartes(lista) {
+  const out = [];
+  for (const p of lista || []) {
+    if (!p || !Array.isArray(p.ped_partes) || !p.ped_partes.length) { out.push(p); continue; }
+    const tot = p.ped_partes.reduce((s, x) => s + (+x.unidades || 0), 0) + (+p.ped_libres || 0);
+    const base = Object.assign({}, p, { ped_partes: null, _parte_de: tot });
+    for (const x of p.ped_partes) out.push(Object.assign({}, base, { cantidad: x.unidades, ped_productor_id: x.productor_id, ped_productor: x.nombre, ped_prod_estado: x.prod_estado, prod_entregado_at: x.entregado_at || null, prod_entregado_por: x.entregado_por || null, _parte_id: x.id }));
+    if (+p.ped_libres > 0) out.push(Object.assign({}, base, { cantidad: +p.ped_libres, ped_productor_id: '', ped_productor: '', ped_prod_estado: '', prod_entregado_at: null, prod_entregado_por: null, _parte_id: null, _libres: true }));
+  }
+  return out;
+}
 // ¿La base sigue en el taller esperando que el productor se la lleve? Cortada (sin separar) o separada y sin entregar.
 function corteNeonPendienteEntrega(p) {
+  if (p && Array.isArray(p.ped_partes) && p.ped_partes.length) return corteNeonExpandirPartes([p]).some(corteNeonPendienteEntrega);   // repartida: alguna parte
   if (!p || p.producto !== 'NEON' || p.prod_entregado_at) return false;
   if (['en_armado', 'terminado'].indexOf(String(p.ped_prod_estado || '')) !== -1) return false;   // el productor ya arrancó: se la llevó
   if (/^(entregad|para enviar)/i.test(String(p.ped_estado || '').trim())) return false;              // el cartel ya está hecho
@@ -4577,9 +4596,16 @@ function corteNeonPaquetes(lista) {
   }).sort((a, b) => ((!a.key) - (!b.key)) || String(a.nombre).localeCompare(String(b.nombre)));
 }
 function _nmM(cm) { return (Math.round(Number(cm) || 0) / 100).toFixed(2).replace('.', ','); }   // cm → "12,60" (metros)
+// Aviso de una base de matriz REPARTIDA entre productores, bien grande (Gaspar 26-oct: "hacé que se vea más grande así no se le
+// pasa visualmente a Neyen"): cuántas de las N bases de esa matriz van en ESTE paquete. Se separa una vez y se reparte.
+function corteNeyenRepartoHtml(p, cant) {
+  const n = `<span style="font-size:26px;line-height:1;color:#f59e0b;vertical-align:-3px">${cant}</span>`;
+  const txt = p._libres ? `${n} de las ${p._parte_de} bases todavía <u>sin productor</u>: separalas y esperá` : `separá ${n} de las ${p._parte_de} bases para <span style="text-transform:uppercase">${escapeHtml(p.ped_productor || 'el productor')}</span>`;
+  return `<div class="neyen-reparto" role="note" style="margin-top:8px;padding:10px 12px;border-radius:10px;background:rgba(245,158,11,.16);border:2px solid #f59e0b;color:var(--fg);font-size:16.5px;font-weight:800;line-height:1.35;overflow-wrap:anywhere">✂ MATRIZ REPARTIDA · ${txt}</div>`;
+}
 // Pestaña "🔴 Productores · neón" de Neyen: una tarjeta por productor (neón para cortar + bases + "Entregado a X").
 function corteNeyenProductoresHtml(pedidos, cargando) {
-  const paqs = corteNeonPaquetes(pedidos.filter(corteNeonPendienteEntrega));
+  const paqs = corteNeonPaquetes(corteNeonExpandirPartes(pedidos).filter(corteNeonPendienteEntrega));
   const pct = Math.round(NEON_DESPERDICIO * 100);
   const dot = (c) => `<span style="width:12px;height:12px;border-radius:50%;flex:0 0 auto;display:inline-block;border:1px solid rgba(255,255,255,.35);background:${PEDIDO_COLOR_HEX[c] || '#888'}"></span>`;
   const baseRow = (p) => {
@@ -4589,8 +4615,9 @@ function corteNeyenProductoresHtml(pedidos, cargando) {
     return `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px dashed var(--border);font-size:13px">
         ${p.foto_key ? `<a href="${escapeHtml(mediaUrl(p.foto_key))}" target="_blank" rel="noopener" style="flex:0 0 auto"><img src="${escapeHtml(disenoThumb(p.foto_key, 200))}" loading="lazy" alt="" style="width:46px;height:46px;object-fit:cover;border-radius:6px;background:#fff;border:1px solid var(--border);display:block"></a>` : ''}
         <div style="flex:1;min-width:0">
-          <div style="overflow-wrap:anywhere">${p.pedido_numero ? `<b>#${escapeHtml(String(p.pedido_numero))}</b> ` : ''}${escapeHtml(p.diseno_nombre || 'cartel')}${cant > 1 ? ` <b>×${cant}</b>` : ''}${med ? ` <span style="color:var(--fg-subtle)">${escapeHtml(med)}</span>` : ''}</div>
+          <div style="overflow-wrap:anywhere">${p.pedido_numero ? `<b>#${escapeHtml(String(p.pedido_numero))}</b> ` : ''}${escapeHtml(p.diseno_nombre || 'cartel')}${p._parte_de ? ` <b style="font-size:18px;color:#f59e0b">×${cant}</b>` : cant > 1 ? ` <b>×${cant}</b>` : ''}${med ? ` <span style="color:var(--fg-subtle)">${escapeHtml(med)}</span>` : ''}</div>
           <div style="font-size:11.5px;margin-top:2px;color:${cc.length ? 'var(--fg-mute)' : '#f59e0b'}">${cc.length ? '🎨 ' + escapeHtml(cmColResumen(cc, true)) + (cant > 1 ? ' · cada uno' : '') : '⚠ faltan los colores (Emma)'}</div>
+          ${p._parte_de ? corteNeyenRepartoHtml(p, cant) : ''}
         </div>
         ${sep ? `<span style="font-size:11px;font-weight:700;color:#22c55e;white-space:nowrap">✓ separada</span><button class="btn ghost" data-corte-desembalar="${p.id}" title="Volver a 'sin separar'" aria-label="Deshacer separada" style="font-size:11px;padding:3px 8px">↩</button>` : `<button class="btn" data-corte-separar="${p.id}" style="font-size:12px;padding:5px 12px">Separar</button>`}
       </div>`;
@@ -4606,11 +4633,11 @@ function corteNeyenProductoresHtml(pedidos, cargando) {
     const aviso = (g.sinCol && g.colores.length) ? `<div style="font-size:12px;color:#f59e0b;margin:4px 0">⚠ ${g.sinCol === 1 ? '1 base no tiene' : g.sinCol + ' bases no tienen'} los colores cargados (Emma): su neón no está sumado.</div>` : '';
     const pie = g.key
       ? `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
-          <button class="btn btn-cyan" data-corte-prod-entregar="${g.items.map(p => p.id).join(',')}" data-corte-prod-nombre="${escapeHtml(nom)}" data-corte-prod-sinsep="${g.sinSeparar}" data-corte-prod-sincol="${g.sinCol}" style="font-size:14px;padding:9px 16px">📦 Entregado a ${escapeHtml(nom)}</button>
+          <button class="btn btn-cyan" data-corte-prod-entregar="${g.items.map(p => p.id).join(',')}" data-corte-prod-partes="${g.items.filter(p => p._parte_id).map(p => p._parte_id).join(',')}" data-corte-prod-nombre="${escapeHtml(nom)}" data-corte-prod-sinsep="${g.sinSeparar}" data-corte-prod-sincol="${g.sinCol}" style="font-size:14px;padding:9px 16px">📦 Entregado a ${escapeHtml(nom)}</button>
           <span style="font-size:12px;color:var(--fg-mute)">cuando se lleve las bases y el neón</span></div>`
       : `<div style="font-size:12px;color:var(--fg-mute);margin-top:8px">Gaspar todavía no les asignó productor: separalas y esperá.</div>`;
     return `<div data-paq="${escapeHtml(g.key || 'sin')}" style="background:var(--ink-100);border:1px solid ${g.key ? 'var(--border)' : 'rgba(245,158,11,.4)'};border-radius:12px;padding:14px 16px;margin-bottom:14px">
-        <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap"><span style="font-size:16px;font-weight:800">${g.key ? '👷 ' + escapeHtml(nom) : '❔ Sin productor todavía'}</span><span style="font-size:12.5px;color:var(--fg-mute)">${g.items.length} base${g.items.length === 1 ? '' : 's'}${g.sinSeparar ? ' · ' + g.sinSeparar + ' sin separar' : ' · todas separadas ✓'}${g.colores.length ? ' · ' + _nmM(g.tot.con) + ' m de neón' : ''}</span></div>
+        <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap"><span style="font-size:16px;font-weight:800">${g.key ? '👷 ' + escapeHtml(nom) : '❔ Sin productor todavía'}</span>${g.items.some(p => p._parte_de) ? '<span style="font-size:13px;font-weight:800;color:#f59e0b;border:2px solid #f59e0b;border-radius:999px;padding:2px 10px">✂ MATRIZ REPARTIDA</span>' : ''}<span style="font-size:12.5px;color:var(--fg-mute)">${g.items.length} base${g.items.length === 1 ? '' : 's'}${g.sinSeparar ? ' · ' + g.sinSeparar + ' sin separar' : ' · todas separadas ✓'}${g.colores.length ? ' · ' + _nmM(g.tot.con) + ' m de neón' : ''}</span></div>
         ${neon}${aviso}
         <div style="margin-top:8px;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--fg-subtle)">Bases de acrílico</div>
         ${g.items.map(baseRow).join('')}
@@ -4619,9 +4646,9 @@ function corteNeyenProductoresHtml(pedidos, cargando) {
   };
   // Entregados en los últimos 7 días (para revisar o deshacer).
   const hace7 = new Date(Date.now() - 7 * 864e5).toISOString();
-  const entregados = corteNeonPaquetes(pedidos.filter(p => p.producto === 'NEON' && p.prod_entregado_at && String(p.prod_entregado_at) >= hace7));
+  const entregados = corteNeonPaquetes(corteNeonExpandirPartes(pedidos).filter(p => p.producto === 'NEON' && p.prod_entregado_at && String(p.prod_entregado_at) >= hace7));
   const fEnt = (g) => { const f = g.items.map(p => String(p.prod_entregado_at || '')).sort().pop(); const d = new Date(f); return isNaN(d.getTime()) ? '' : d.toLocaleDateString('es-AR', { weekday: 'short', day: '2-digit', month: '2-digit' }); };
-  const entHtml = entregados.length ? `<div style="margin-top:20px"><div style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--fg-subtle);margin-bottom:6px">✅ Entregados (últimos 7 días)</div>${entregados.map(g => `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px dashed var(--border);font-size:13px"><span style="flex:1;min-width:0">👷 <b>${escapeHtml(g.nombre || 'productor')}</b> · ${g.items.length} base${g.items.length === 1 ? '' : 's'}${g.colores.length ? ' · ' + _nmM(g.tot.con) + ' m de neón' : ''} <span style="color:var(--fg-mute)">· ${fEnt(g)}</span></span><button class="btn ghost" data-corte-prod-desentregar="${g.items.map(p => p.id).join(',')}" title="Deshacer: vuelve a los paquetes" aria-label="Deshacer entrega" style="font-size:11px;padding:3px 9px">↩</button></div>`).join('')}</div>` : '';
+  const entHtml = entregados.length ? `<div style="margin-top:20px"><div style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--fg-subtle);margin-bottom:6px">✅ Entregados (últimos 7 días)</div>${entregados.map(g => `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px dashed var(--border);font-size:13px"><span style="flex:1;min-width:0">👷 <b>${escapeHtml(g.nombre || 'productor')}</b> · ${g.items.length} base${g.items.length === 1 ? '' : 's'}${g.colores.length ? ' · ' + _nmM(g.tot.con) + ' m de neón' : ''} <span style="color:var(--fg-mute)">· ${fEnt(g)}</span></span><button class="btn ghost" data-corte-prod-desentregar="${g.items.map(p => p.id).join(',')}" data-corte-prod-partes="${g.items.filter(p => p._parte_id).map(p => p._parte_id).join(',')}" title="Deshacer: vuelve a los paquetes" aria-label="Deshacer entrega" style="font-size:11px;padding:3px 9px">↩</button></div>`).join('')}</div>` : '';
   const intro = `<p style="color:var(--fg-mute);font-size:13px;margin:0 0 14px">Cada productor se lleva sus bases y el neón cortado por color. El neón ya incluye el ${pct}% de desperdicio para no quedarte corto.${cargando ? ' · cargando…' : ''}</p>`;
   const vacio = (!paqs.length && !cargando) ? '<div style="padding:26px;text-align:center;color:var(--fg-mute);border:1px dashed var(--border);border-radius:10px">No hay bases de neón esperando a un productor ✨</div>' : '';
   return intro + vacio + paqs.map(card).join('') + entHtml;
@@ -5073,7 +5100,7 @@ function renderCorte() {
       // neón por color con el desperdicio); en Alumnos queda solo un acceso (Gaspar 19-oct).
       let neyenTab = STATE.corteNeyenTab;
       if (!neyenTab) { try { neyenTab = localStorage.getItem('corte_neyen_tab') || 'alumnos'; } catch (_) { neyenTab = 'alumnos'; } }
-      const nNeonPend = pedidos.filter(corteNeonPendienteEntrega).length;
+      const nNeonPend = corteNeonExpandirPartes(pedidos).filter(corteNeonPendienteEntrega).length;
       const neyenTabs = `<div style="display:flex;gap:8px;flex-wrap:wrap;margin:6px 0 14px">
           <button type="button" class="btn ${neyenTab !== 'productores' && neyenTab !== 'historial' ? 'btn-cyan' : 'ghost'}" data-corte-neyen-tab="alumnos" style="font-size:13px;padding:7px 14px">📦 Alumnos${totalCort ? ' · ' + totalCort : ''}</button>
           <button type="button" class="btn ${neyenTab === 'productores' ? 'btn-cyan' : 'ghost'}" data-corte-neyen-tab="productores" style="font-size:13px;padding:7px 14px">🔴 Productores · neón${nNeonPend ? ' · ' + nNeonPend : ''}</button>
@@ -7951,7 +7978,7 @@ async function nkbCargarUna(opts) {
   try {
     const j = await sfFetch('/admin/neon/tablero');
     if (gen !== (STATE._nkbGen || 0) || STATE.user !== user) return;
-    STATE.nkb = { carteles: j.carteles || [], otros: j.otros || null, productores: j.productores || [], rol: j.rol || '', yo: j.yo || '', despacha: !!j.despacha, at: Date.now(), user };
+    STATE.nkb = { carteles: j.carteles || [], otros: j.otros || null, productores: j.productores || [], partesOn: !!j.partes_on, rol: j.rol || '', yo: j.yo || '', despacha: !!j.despacha, at: Date.now(), user };
   } catch (e) {
     if (gen !== (STATE._nkbGen || 0) || STATE.user !== user) return;
     if (!silent || !STATE.nkb || STATE.nkb.error) STATE.nkb = { error: e.message || 'No se pudo cargar' };
@@ -7971,15 +7998,30 @@ function nkbPoll() {
 document.addEventListener('visibilitychange', () => { if (!document.hidden && STATE.view === 'neon' && STATE.nkb && !STATE.nkb.error && Date.now() - (STATE.nkb.at || 0) > 60000) nkbCargar({ silent: true }); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && !e.defaultPrevented && STATE.nkbAbierto && !document.querySelector('.modal-bg.open') && !document.querySelector('.sf-lightbox')) nkbCerrar(); });
 
+// ---------- Repartida entre productores (Gaspar 26-oct): UNA tarjeta con sus partes ----------
+// c.partes = [{id, productor, unidades, prod_estado, fotos, f:{asignado, prod, terminado, recibido}}] y c.libres (sin asignar). La
+// etapa es la de la línea entera (resumen): pasa a Terminado recién cuando terminaron todos y no quedan libres. Los botones van por
+// parte ("Marcar terminado (GONZALO ×4)", "Llegó lo de OCTAVIO").
+function nkbRep(c) { return !!c && c.productor_id === '*' && Array.isArray(c.partes); }
+const NKB_PROD_TXT = { pendiente: 'sin empezar', en_armado: 'armando', terminado: 'terminado' };
+function nkbParteTxt(p) { return p.productor + ' ×' + p.unidades; }
+// La primera parte terminada que todavía no llegó al taller.
+function nkbParteSinTraer(c) { return nkbRep(c) ? (c.partes.find(p => p.prod_estado === 'terminado' && !(p.f && p.f.recibido)) || null) : null; }
+// Columna donde la ve quien mira: Neyen (despachos) ve en Terminado la repartida que sigue en Montando pero ya tiene una parte
+// terminada por traer, para marcar "Llegó lo de X". Gaspar la sigue viendo en Montando.
+function nkbEtapaVista(c) { return (nkbEsDespacho() && c.etapa === 'montando' && nkbParteSinTraer(c)) ? 'terminado' : c.etapa; }
+
 // ---------- Qué toca en cada tarjeta ----------
 // La tarea de quien mira (UN botón). null = no le toca nada en esa tarjeta.
 function nkbAccion(c) {
-  const r = nkbRol(), yo = (STATE.nkb && STATE.nkb.yo) || '', adm = r === 'admin', ce = c.corte_estado;
+  const r = nkbRol(), yo = (STATE.nkb && STATE.nkb.yo) || '', adm = r === 'admin', ce = c.corte_estado, rep = nkbRep(c);
+  const llego = (p) => ({ t: 'Llegó lo de ' + nkbParteTxt(p), a: 'recibido:' + p.id, to: 'pago' });
   switch (c.etapa) {
     case 'confirmado':
       if (!c.corte_id) return adm ? { t: 'Ubicar a mano', a: 'ubicar', to: 'confirmado' } : null;
       return (adm || c.mio) ? { t: 'Subir la foto del diseño', a: 'foto', to: 'confirmado' } : null;
     case 'diseno':
+      if (adm && rep) return { t: c.libres ? 'Repartir las ' + c.libres + ' sin asignar' : 'Ver el reparto', a: 'repartir', to: 'montando' };
       if (adm) return { t: c.productor_id ? 'Cambiar productor' : 'Derivar a productor', a: 'derivar', to: 'montando' };
       if (yo === 'anibal' && ce === 'matriz_lista') return { t: 'Marcar cortado', a: 'cortado', to: 'diseno' };
       if (yo === 'neyen' && ce === 'cortado') return { t: 'Separar la base', a: 'separado', to: 'diseno' };
@@ -7988,10 +8030,24 @@ function nkbAccion(c) {
       // El productor arrancó con la base todavía en Corte: Aníbal y Neyen la terminan desde acá también.
       if (yo === 'anibal' && ce === 'matriz_lista') return { t: 'Marcar cortado', a: 'cortado', to: 'montando' };
       if (yo === 'neyen' && ce === 'cortado') return { t: 'Separar la base', a: 'separado', to: 'montando' };
+      if (rep) {
+        // Repartida: lo de Gonzalo puede llegar mientras Octavio sigue armando. A Gaspar primero le toca repartir las libres.
+        const st = nkbParteSinTraer(c);
+        if (yo === 'neyen' && !adm) return st ? llego(st) : null;
+        if (!adm) return null;
+        if (c.libres) return { t: 'Repartir las ' + c.libres + ' sin asignar', a: 'repartir', to: 'montando' };
+        if (st) return llego(st);
+        const arm = c.partes.find(p => p.prod_estado === 'en_armado'), pen = c.partes.find(p => p.prod_estado === 'pendiente');
+        if (arm) return { t: 'Marcar terminado (' + nkbParteTxt(arm) + ')', a: 'terminar:' + arm.id, to: 'terminado' };
+        if (pen) return { t: 'Marcar armando (' + nkbParteTxt(pen) + ')', a: 'armando:' + pen.id, to: 'montando' };
+        return { t: 'Ver el reparto', a: 'repartir', to: 'montando' };
+      }
       if (!adm) return null;
       if (!c.productor_id) return { t: 'Derivar a productor', a: 'derivar', to: 'montando' };   // ubicado a mano sin productor
       return c.prod_estado === 'en_armado' ? { t: 'Marcar terminado', a: 'terminar', to: 'terminado' } : { t: 'Marcar armando', a: 'armando', to: 'montando' };
-    case 'terminado': return ((adm || yo === 'neyen') && !c.f.recibido) ? { t: 'Llegó al taller', a: 'recibido', to: 'pago' } : null;
+    case 'terminado':
+      if (rep) { const st = nkbParteSinTraer(c); return ((adm || yo === 'neyen') && st) ? llego(st) : null; }
+      return ((adm || yo === 'neyen') && !c.f.recibido) ? { t: 'Llegó al taller', a: 'recibido', to: 'pago' } : null;
     case 'pago': return (adm || c.mio) ? { t: 'Registrar 2do pago', a: 'pago', to: 'enviar' } : null;
     case 'enviar':
       if (r === 'logistica' && ['Retira', 'Instalación', 'Sin Frontera'].includes(nkbEntrega(c))) return null;
@@ -8005,11 +8061,21 @@ function nkbSecundarios(c) {
   const add = (a, t) => { if (a !== prim && !out.some(x => x.a === a)) out.push({ a, t }); };
   if (adm && ['diseno', 'montando'].includes(c.etapa) && ce === 'matriz_lista') add('cortado', 'Marcar cortado');
   if (adm && ['diseno', 'montando'].includes(c.etapa) && ce === 'cortado') add('separado', 'Separar la base');
-  if (adm && c.etapa === 'montando') { add('derivar', c.productor_id ? 'Cambiar productor' : 'Derivar a productor'); if (c.productor_id) add('terminar', 'Marcar terminado'); }
-  // Ya está para cobrar / enviar / enviado (ubicado a mano o por el estado viejo) pero en la hoja del productor sigue sin terminar:
-  // Gaspar lo cierra acá (si no, el productor lo sigue viendo "para hacer" y su mano de obra no figura como deuda).
-  if (adm && c.productor_id && c.prod_estado !== 'terminado' && ['terminado', 'pago', 'enviar', 'enviado'].includes(c.etapa)) add('terminar', 'Marcar terminado (' + (c.productor || c.productor_id) + ')');
-  if ((adm || yo === 'neyen') && ['terminado', 'pago', 'enviar'].includes(c.etapa) && (c.prod_estado === 'terminado' || c.etapa === 'terminado')) add(c.f.recibido ? 'no_recibido' : 'recibido', c.f.recibido ? 'No llegó todavía' : 'Llegó al taller');
+  if (nkbRep(c)) {
+    // Repartida: el reparto, y el estado y la llegada al taller de CADA parte.
+    if (adm && !['enviado'].includes(c.etapa)) add('repartir', c.libres ? 'Repartir las ' + c.libres + ' sin asignar' : 'Cambiar el reparto');
+    if (adm) for (const p of c.partes) {
+      if (p.prod_estado === 'pendiente') add('armando:' + p.id, 'Marcar armando (' + nkbParteTxt(p) + ')');
+      if (p.prod_estado !== 'terminado') add('terminar:' + p.id, 'Marcar terminado (' + nkbParteTxt(p) + ')');
+    }
+    if ((adm || yo === 'neyen') && ['montando', 'terminado', 'pago', 'enviar'].includes(c.etapa)) for (const p of c.partes) if (p.prod_estado === 'terminado') add((p.f.recibido ? 'no_recibido:' : 'recibido:') + p.id, (p.f.recibido ? 'No llegó lo de ' : 'Llegó lo de ') + nkbParteTxt(p));
+  } else {
+    if (adm && c.etapa === 'montando') { add('derivar', c.productor_id ? 'Cambiar productor' : 'Derivar a productor'); if (c.productor_id) add('terminar', 'Marcar terminado'); }
+    // Ya está para cobrar / enviar / enviado (ubicado a mano o por el estado viejo) pero en la hoja del productor sigue sin terminar:
+    // Gaspar lo cierra acá (si no, el productor lo sigue viendo "para hacer" y su mano de obra no figura como deuda).
+    if (adm && c.productor_id && c.prod_estado !== 'terminado' && ['terminado', 'pago', 'enviar', 'enviado'].includes(c.etapa)) add('terminar', 'Marcar terminado (' + (c.productor || c.productor_id) + ')');
+    if ((adm || yo === 'neyen') && ['terminado', 'pago', 'enviar'].includes(c.etapa) && (c.prod_estado === 'terminado' || c.etapa === 'terminado')) add(c.f.recibido ? 'no_recibido' : 'recibido', c.f.recibido ? 'No llegó todavía' : 'Llegó al taller');
+  }
   const diaAR = t => new Date(new Date(t).getTime() - 3 * 3600e3).toISOString().slice(0, 10);
   if (STATE.nkb && STATE.nkb.despacha && c.etapa === 'enviado' && c.despacho && c.f.despachado && (adm || (diaAR(c.f.despachado) === diaAR(Date.now()) && (r !== 'logistica' || c.despacho.modo === 'envio')))) add('deshacer_envio', 'Deshacer el envío');
   if (adm && !['enviar', 'enviado'].includes(c.etapa)) add('despacho_forzar', 'Marcar enviado');
@@ -8036,22 +8102,26 @@ function nkbEntrega(c) {
   return 'Entrega sin definir';
 }
 function nkbChips(c, ficha) {
-  const ch = [], ce = c.corte_estado, pr = c.productor || '';
+  const ch = [], ce = c.corte_estado, pr = c.productor || '', rep = nkbRep(c);
   const P = (cls, t) => `<span class="logi-pill ${cls}">${escapeHtml(t)}</span>`;
+  // Repartida: un chip por parte ("GONZALO ×4 · armando", "OCTAVIO ×5 · terminado · falta traer") y las libres en rojo.
+  const PP = (p) => P(p.prod_estado === 'pendiente' ? 'a' : (p.prod_estado === 'terminado' && !p.f.recibido) ? 'a' : 'v', nkbParteTxt(p) + ' · ' + (p.prod_estado === 'terminado' ? (p.f.recibido ? 'en el taller' : 'terminado · falta traer') : NKB_PROD_TXT[p.prod_estado] || p.prod_estado));
+  const libres = () => { if (rep && c.libres) ch.push(P('r', 'Sin asignar: ' + c.libres)); };
   if (c.etapa === 'confirmado') ch.push(!c.corte_id ? P('g', 'Anterior al circuito de corte') : P('r', 'Falta la foto del diseño' + (c.vendedor ? ' · ' + c.vendedor : '')));
-  else if (c.etapa === 'diseno') { ch.push(!c.corte_id ? P('g', 'Sin pieza de corte') : ce === 'pedido' ? P('a', 'Emma: por diseñar') : ce === 'matriz_lista' ? P('a', 'Falta cortar') : ce === 'cortado' ? P('a', 'Cortado · falta separar') : P('v', 'Base lista' + (pr ? '' : ' · falta derivar'))); if (pr) ch.push(P('g', 'Derivado a ' + pr)); }
+  else if (c.etapa === 'diseno') { ch.push(!c.corte_id ? P('g', 'Sin pieza de corte') : ce === 'pedido' ? P('a', 'Emma: por diseñar') : ce === 'matriz_lista' ? P('a', 'Falta cortar') : ce === 'cortado' ? P('a', 'Cortado · falta separar') : P('v', 'Base lista' + (pr ? '' : ' · falta derivar'))); if (rep) { c.partes.forEach(p => ch.push(P('g', 'Derivado a ' + nkbParteTxt(p)))); libres(); } else if (pr) ch.push(P('g', 'Derivado a ' + pr)); }
   else if (c.etapa === 'montando') {
-    ch.push(pr ? P(c.prod_estado === 'en_armado' ? 'v' : 'a', pr + (c.prod_estado === 'en_armado' ? ' · armando' : ' · sin empezar')) : P('r', 'Sin productor'));
+    if (rep) { c.partes.forEach(p => ch.push(PP(p))); libres(); }
+    else ch.push(pr ? P(c.prod_estado === 'en_armado' ? 'v' : 'a', pr + (c.prod_estado === 'en_armado' ? ' · armando' : ' · sin empezar')) : P('r', 'Sin productor'));
     if (c.corte_id && ce === 'cortado') ch.push(P('a', 'Base cortada · falta separar'));
     else if (c.corte_id && !['embalado', 'cobrado', 'despachado', 'entregado'].includes(ce)) ch.push(P('r', 'Falta la base'));
   }
   else if (c.etapa === 'terminado' && c.grupo_n > c.grupo_term) { const f = c.grupo_n - c.grupo_term; ch.push(P('a', f === 1 ? 'Espera al otro cartel' : 'Espera a ' + f + ' carteles más')); }
-  if (['terminado', 'pago', 'enviar'].includes(c.etapa) && c.motivo !== 'estado' && (c.prod_estado === 'terminado' || c.etapa === 'terminado')) { if (c.f.recibido) ch.push(P('v', 'En el taller')); else ch.push(P('a', pr ? 'Falta traer de ' + pr : 'Falta traerlo al taller')); }
-  if (nkbRol() === 'admin' && pr && c.prod_estado !== 'terminado' && ['pago', 'enviar', 'enviado'].includes(c.etapa)) ch.push(P('a', pr + ' no lo marcó terminado'));
+  if (['terminado', 'pago', 'enviar'].includes(c.etapa) && c.motivo !== 'estado' && (c.prod_estado === 'terminado' || c.etapa === 'terminado')) { if (rep) c.partes.forEach(p => ch.push(PP(p))); else if (c.f.recibido) ch.push(P('v', 'En el taller')); else ch.push(P('a', pr ? 'Falta traer de ' + pr : 'Falta traerlo al taller')); }
+  if (!rep && nkbRol() === 'admin' && pr && c.prod_estado !== 'terminado' && ['pago', 'enviar', 'enviado'].includes(c.etapa)) ch.push(P('a', pr + ' no lo marcó terminado'));
   if (c.etapa === 'enviar') { const e = nkbEntrega(c); if (e && !c.sf) ch.push(P(e === 'Entrega sin definir' ? 'a' : 'g', e)); }
   if (c.etapa === 'enviado' && c.despacho) ch.push(P('g', NKB_DESPACHO[c.despacho.modo] || 'Salió'));
   if (c.sf) ch.push(P('g', 'Sin Frontera'));
-  if (c.cantidad > 1) ch.push(P('a', c.cantidad + ' unidades'));
+  if (c.cantidad > 1) ch.push(P('a', c.cantidad + ' unidades' + (rep ? ' · ' + c.partes.length + (c.partes.length === 1 ? ' productor' : ' productores') : '')));
   if (c.grupo_n > 1 && c.etapa !== 'terminado') ch.push(P('g', 'Pedido de ' + c.grupo_n + ' carteles'));
   if (ficha && nkbRol() === 'admin' && (c.motivo || c.piso)) ch.push(P('g', c.motivo === 'estado' ? 'Para enviar puesto a mano en Pedidos' : 'Ubicado a mano'));
   return ch;
@@ -8061,7 +8131,7 @@ function nkbChips(c, ficha) {
 function nkbCardSig(c) { return JSON.stringify(c); }
 function nkbFichaSig(c) { return JSON.stringify([c, nkbGrupo(c).map(x => [x.id, x.etapa])]); }
 function nkbDeColumna(cs, id) {
-  const l = cs.filter(c => c.etapa === id);
+  const l = cs.filter(c => nkbEtapaVista(c) === id);
   if (id === 'enviado') return l.sort((a, b) => String(b.desde || '').localeCompare(String(a.desde || '')));
   // Lo que más espera, arriba (y los carteles del mismo pedido juntos).
   return l.sort((a, b) => String(nkbDesde(a) || '9').localeCompare(String(nkbDesde(b) || '9')) || String(a.grupo).localeCompare(String(b.grupo)) || (a.id - b.id));
@@ -8073,6 +8143,13 @@ function nkbThumbHtml(c) {
   if (!srcs.length) return '';
   return `<div class="sfk-thumb"><img src="${escapeHtml(srcs[0])}" alt="" loading="lazy" data-sfk-alt="${escapeHtml(srcs.slice(1).join(' '))}" onerror="sfkImgError(this)">${c.fotos ? `<span class="sfk-thumb-n">${c.fotos > 1 ? c.fotos + ' fotos' : 'terminado'}</span>` : ''}</div>`;
 }
+// Aviso grande en la tarjeta de una repartida: quién arma cuántas y las libres. A Neyen, más grande todavía (Gaspar 26-oct: que no
+// se le pase que la matriz va a dos productores).
+function nkbRepBannerHtml(c) {
+  const neyen = nkbEsDespacho() || ((STATE.nkb && STATE.nkb.yo) === 'neyen');
+  const partes = c.partes.map(p => `<span style="white-space:nowrap">${escapeHtml(p.productor)} <b style="font-size:${neyen ? 20 : 16}px;color:#f59e0b">×${p.unidades}</b></span>`).join(' · ');
+  return `<div class="nkb-rep" style="margin:4px 0 2px;padding:6px 9px;border-radius:8px;border:2px solid #f59e0b;background:rgba(245,158,11,.12);font-size:${neyen ? 16 : 13.5}px;font-weight:800;line-height:1.35">✂ Repartido: ${partes}${c.libres ? ` · <span style="color:#ef4444;white-space:nowrap">sin asignar <b style="font-size:${neyen ? 20 : 16}px">×${c.libres}</b></span>` : ''}</div>`;
+}
 function nkbCardHtml(c) {
   const u = nkbUrg(c), acc = nkbAccion(c), chips = nkbChips(c);
   const desc = [c.colores, c.base, c.dimer ? 'Dimmer ' + c.dimer : ''].filter(Boolean).join(' · ');
@@ -8082,6 +8159,7 @@ function nkbCardHtml(c) {
     + `<div class="sfk-body">`
     + `<div class="sfk-top"><span class="sfk-num">#${escapeHtml(String(c.numero || ''))}</span><span class="sfk-etq" style="--c:${NKB_COLOR[c.etapa]}">${escapeHtml(NKB_CORTO[c.etapa] || '')}</span><span class="sfk-hace${u.demorado ? ' viejo' : ''}" title="${escapeHtml(c.desde ? 'En esta etapa desde ' + sfFechaHora(c.desde) : c.desde_aprox ? 'Sin fecha de la etapa: cuenta desde la fecha del pedido' : '')}">${escapeHtml(nkbHace(c))}</span></div>`
     + `<div class="sfk-nom">${escapeHtml(c.cartel || 'Sin nombre')}</div>`
+    + (nkbRep(c) ? nkbRepBannerHtml(c) : '')
     + (chips.length ? `<div class="sfk-chips">${chips.join('')}</div>` : '')
     + (c.medida ? `<div class="sfk-med">${escapeHtml(c.medida)}</div>` : '')
     + ((desc || quien) ? `<div class="sfk-tipo">${escapeHtml([desc, quien].filter(Boolean).join(' · '))}</div>` : '')
@@ -8118,10 +8196,10 @@ function nkbEtapaCel(cs) {
   let e = STATE.nkbEtapaCel;
   if (e == null) { try { e = localStorage.getItem(NKB_TAB_KEY); } catch (_) { e = null; } }
   const cols = nkbCols();
-  if (!e || !cols.includes(e)) { const mia = cs.find(c => nkbAccion(c) && cols.includes(c.etapa)); e = mia ? mia.etapa : (cols.find(k => cs.some(c => c.etapa === k)) || cols[0]); }
+  if (!e || !cols.includes(e)) { const mia = cs.find(c => nkbAccion(c) && cols.includes(nkbEtapaVista(c))); e = mia ? nkbEtapaVista(mia) : (cols.find(k => cs.some(c => nkbEtapaVista(c) === k)) || cols[0]); }
   return e;
 }
-function nkbTabsHtml(cs, cel) { const lim = Date.now() - NKB_DIAS_ENV * 86400000; return `<div class="sfk-tabs" data-nkb-tabs>${nkbCols().map(id => { const n = cs.filter(c => c.etapa === id && (id !== 'enviado' || (c.desde && new Date(c.desde).getTime() >= lim))).length; return `<button type="button" class="sfk-tab${id === cel ? ' on' : ''}${n ? '' : ' cero'}" data-nkb-tab="${id}" style="--c:${NKB_COLOR[id]}">${escapeHtml(NKB_CORTO[id])} <b>${n}</b></button>`; }).join('')}</div>`; }
+function nkbTabsHtml(cs, cel) { const lim = Date.now() - NKB_DIAS_ENV * 86400000; return `<div class="sfk-tabs" data-nkb-tabs>${nkbCols().map(id => { const n = cs.filter(c => nkbEtapaVista(c) === id && (id !== 'enviado' || (c.desde && new Date(c.desde).getTime() >= lim))).length; return `<button type="button" class="sfk-tab${id === cel ? ' on' : ''}${n ? '' : ' cero'}" data-nkb-tab="${id}" style="--c:${NKB_COLOR[id]}">${escapeHtml(NKB_CORTO[id])} <b>${n}</b></button>`; }).join('')}</div>`; }
 function nkbBoardHtml(cs, cel) { const cols = nkbCols(); return `<div class="sfk-board nkb-board n${cols.length}" data-nkb-board>${cols.map(id => nkbColHtml(id, cs, cel)).join('')}</div>`; }
 function nkbBoardSig(cs, cel) { return JSON.stringify([cel, new Date().toDateString(), cs.map(c => [c.id, nkbCardSig(c)]), (STATE.nkb && STATE.nkb.otros) || null]); }
 function renderNeonTablero() {
@@ -8129,7 +8207,7 @@ function renderNeonTablero() {
   const D = STATE.nkb;
   if (!D) { setTimeout(() => nkbCargar(), 0); return `<div class="logi-wrap nkb-wrap" style="padding:24px;color:var(--fg-mute)">Cargando el tablero…</div>`; }
   if (D.error) return `<div class="logi-wrap nkb-wrap" style="padding:24px"><div style="color:#ef4444;margin-bottom:10px">${escapeHtml(D.error)}</div><button class="btn" data-nkb-refresh>Reintentar</button></div>`;
-  const cs = D.carteles || [], cel = nkbEtapaCel(cs), _cols = nkbCols(), csVis = cs.filter(c => _cols.includes(c.etapa));
+  const cs = D.carteles || [], cel = nkbEtapaCel(cs), _cols = nkbCols(), csVis = cs.filter(c => _cols.includes(nkbEtapaVista(c)));
   const nDem = csVis.filter(c => nkbUrg(c).demorado).length, nMias = csVis.filter(c => nkbAccion(c)).length;
   const chip = (k, on, n, txt, tit) => `<button type="button" class="logi-chip${on ? ' on' : ''}${n ? '' : ' cero'}" data-nkb-${k} title="${escapeHtml(tit)}"${!n && !on ? ' disabled' : ''}>${txt}<b data-nkb-n${k}>${n}</b></button>`;
   const hay = cs.length || (D.otros && Object.keys(D.otros).length);
@@ -8205,7 +8283,9 @@ function nkbFiltrarDom() {
 // El fin de semana Gaspar reparte los carteles de neón que todavía no tienen productor (estén en diseño, cortados o no) entre
 // los que producen la semana siguiente. La sugerencia equilibra la mano de obra (lo que cobra cada uno) y respeta el tamaño
 // máximo de cartel que se lleva cada productor; se edita antes de repartir. Repartir = /admin/prod/asignar por productor, lo
-// mismo que "Derivar": log, mano de obra, tablero, pantalla del productor, paquete de Neyen y columna PRODUCTOR del Excel.
+// mismo que "Derivar": log, mano de obra, tablero, pantalla del productor, paquete de Neyen y columna PRODUCTOR del Excel. Las
+// unidades libres de una línea repartida entre productores van por /admin/prod/partes (se agrega o se agranda la parte de ese
+// productor; nunca se deriva la línea entera).
 const REP_ETAPAS = ['confirmado', 'diseno', 'montando'];
 function repLunesAR() { const d = new Date(Date.now() - 3 * 3600e3); d.setUTCDate(d.getUTCDate() - (d.getUTCDay() + 6) % 7); return d.toISOString().slice(0, 10); }
 function repM2(c) { return Number(c.alto) > 0 && Number(c.ancho) > 0 ? Number(c.alto) * Number(c.ancho) / 10000 : 0; }
@@ -8221,25 +8301,34 @@ async function repAbrir() {
     const cfg = (cf && cf.cfg) || {}, mo = {}, curso = {};
     for (const c of pt.carteles || []) {
       mo[c.id] = c;
+      // Repartidas entre productores: cada parte sin terminar ni pagar suma a SU productor (sus unidades de trabajo, su MO).
+      if (c.productor_id === '*' && Array.isArray(c.partes)) {
+        for (const p of c.partes) { if (p.pagado_at || !['pendiente', 'en_armado'].includes(String(p.prod_estado || ''))) continue; const x = curso[p.productor_id] || (curso[p.productor_id] = { n: 0, mo: 0 }); x.n++; x.mo += +p.mo_monto || 0; }
+        continue;
+      }
       if (!c.productor_id || c.prod_pagado_at || !['pendiente', 'en_armado'].includes(String(c.prod_estado || ''))) continue;
       const x = curso[c.productor_id] || (curso[c.productor_id] = { n: 0, mo: 0 });
       x.n++; x.mo += +c.mo_monto || 0;
     }
     const cards = (STATE.nkb && STATE.nkb.carteles) || [];
-    // Grupos (mismo pedido) que ya tienen un cartel derivado: el resto va con el mismo productor si está en el reparto.
+    // Grupos (mismo pedido) que ya tienen un cartel derivado: el resto va con el mismo productor si está en el reparto. Las
+    // repartidas ('*') no anclan el grupo a nadie.
     const grupoProd = {};
-    for (const c of cards) if (c.productor_id && c.grupo && !grupoProd[c.grupo]) grupoProd[c.grupo] = c.productor_id;
-    const tarjetas = cards.filter((c) => !c.productor_id && REP_ETAPAS.includes(c.etapa));
-    // Mano de obra de cada cartel (la que paga Gaspar). Sin mano de obra (faltan tramos o medidas) → la mediana, marcada "≈".
-    const conMo = tarjetas.map((c) => +((mo[c.id] || {}).mo_monto) || 0).filter((v) => v > 0).sort((a, b) => a - b);
+    for (const c of cards) if (c.productor_id && c.productor_id !== '*' && c.grupo && !grupoProd[c.grupo]) grupoProd[c.grupo] = c.productor_id;
+    // Sin productor, o repartidas con unidades libres: las libres también se reparten (se agrega o se agranda una parte).
+    const tarjetas = cards.filter((c) => (!c.productor_id || (c.productor_id === '*' && +c.libres > 0)) && REP_ETAPAS.includes(c.etapa));
+    // Mano de obra de cada cartel (la que paga Gaspar); de una repartida, la de sus libres. Sin mano de obra (faltan tramos o
+    // medidas) → la mediana, marcada "≈".
+    const moDe = (c) => { const t = +((mo[c.id] || {}).mo_monto) || 0; return c.productor_id === '*' ? Math.round(t * (+c.libres || 0) / Math.max(1, +c.cantidad || 1)) : t; };
+    const conMo = tarjetas.map(moDe).filter((v) => v > 0).sort((a, b) => a - b);
     const med = conMo.length ? conMo[Math.floor(conMo.length / 2)] : 0, lunes = repLunesAR();
     const carteles = tarjetas.map((c) => {
-      const m = +((mo[c.id] || {}).mo_monto) || 0;
-      return { id: c.id, numero: c.numero, cartel: c.cartel, alto: c.alto, ancho: c.ancho, cantidad: Math.max(1, +c.cantidad || 1), m2: repM2(c), mo: m || med, moEst: !m, etapa: c.etapa, fecha: c.fecha, grupo: c.grupo, grupo_n: c.grupo_n, semana: String(c.fecha || '') >= lunes, on: true };
+      const m = moDe(c), rep = c.productor_id === '*';
+      return { id: c.id, numero: c.numero, cartel: c.cartel, alto: c.alto, ancho: c.ancho, cantidad: rep ? +c.libres : Math.max(1, +c.cantidad || 1), total: Math.max(1, +c.cantidad || 1), repartida: rep, partes: rep ? c.partes : null, m2: repM2(c), mo: m || med, moEst: !m, etapa: c.etapa, fecha: c.fecha, grupo: c.grupo, grupo_n: c.grupo_n, semana: String(c.fecha || '') >= lunes, on: true };
     }).sort((a, b) => String(b.fecha).localeCompare(String(a.fecha)) || b.id - a.id);
     const act = Array.isArray(cfg.activos) ? new Set(cfg.activos) : null;
     const prods = (pt.productores || []).filter((p) => !p.baja).map((p) => ({ id: p.id, nombre: p.nombre, extra: !!p.extra, on: act ? act.has(p.id) : (!!+p.activo && !p.extra), max: (cfg.max_m2 || {})[p.id] || '', curso: curso[p.id] || { n: 0, mo: 0 } }));
-    STATE.rep = { carteles, prods, grupoProd, juntos: cfg.juntos !== false, curso: !!cfg.curso, lunes, asig: {}, fuera: [], sinLugar: [] };
+    STATE.rep = { carteles, prods, grupoProd, juntos: cfg.juntos !== false, curso: !!cfg.curso, lunes, asig: {}, fuera: [], sinLugar: [], partesOn: !!pt.partes_on };
     repSugerir();
   } catch (e) { STATE.rep = { error: e.message || 'No se pudo cargar' }; }
   repPintar();
@@ -8353,7 +8442,7 @@ function repPintar() {
     <span class="rep-curso">${p.curso.n ? `en curso: ${p.curso.n} · ${fmtMoney(p.curso.mo)}` : 'sin nada en curso'}</span></label>`).join('');
   const cartHtml = R.carteles.length ? R.carteles.map((c) => `<label class="rep-c${c.on ? '' : ' off'}"><input type="checkbox" data-rep-c="${c.id}"${c.on ? ' checked' : ''}>
     <span class="rep-cn" title="${escapeHtml(c.cartel || '')}">#${escapeHtml(String(c.numero))} ${escapeHtml(c.cartel || '')}</span>
-    <span>${c.alto && c.ancho ? `${c.alto}×${c.ancho} cm` : 'sin medidas'}${c.cantidad > 1 ? ' ×' + c.cantidad : ''} · ${repFmtM2(c.m2)}</span>
+    <span>${c.alto && c.ancho ? `${c.alto}×${c.ancho} cm` : 'sin medidas'}${c.repartida ? ` · <b style="color:#f59e0b">${c.cantidad} sin asignar de ${c.total}</b>` : c.cantidad > 1 ? ' ×' + c.cantidad : ''} · ${repFmtM2(c.m2)}${R.partesOn && c.total > 1 ? ` <button type="button" class="btn btn-ghost" data-rep-repartir="${c.id}" style="padding:1px 7px;font-size:11.5px" title="Repartir las unidades de este cartel entre varios productores">Repartir unidades…</button>` : ''}</span>
     <span style="font-variant-numeric:tabular-nums" title="${c.moEst ? 'Sin mano de obra cargada (faltan tramos o medidas): se usa la mediana para repartir' : 'Mano de obra'}">${c.moEst ? '≈ ' : ''}${fmtMoney(c.mo)}</span>
     <span class="rep-chips"><span class="rep-chip">${escapeHtml(NKB_CORTO[c.etapa] || c.etapa)}</span>${c.semana ? '' : '<span class="rep-chip">de antes</span>'}${c.grupo_n > 1 ? `<span class="rep-chip">pedido de ${c.grupo_n}</span>` : ''}</span></label>`).join('')
     : '<div class="rep-vacio" style="padding:12px">No hay carteles de neón sin productor.</div>';
@@ -8410,9 +8499,19 @@ function repMover(key, destino) {
 }
 function repClick(e) {
   const el = e.target;
+  const rp = el.closest('[data-rep-repartir]');
+  if (rp) { e.preventDefault(); e.stopPropagation(); repRepartirUno(+rp.getAttribute('data-rep-repartir')); return; }
   if (el.closest('[data-rep-cerrar]')) { repCerrar(); return; }
   if (el.closest('[data-rep-sugerir]')) { repSugerir(); repPintar(); return; }
   if (el.closest('[data-rep-aplicar]')) { repAplicar(); }
+}
+// "Repartir unidades…" de un cartel de la lista: el modal de partes y, al guardar, el reparto se vuelve a armar.
+async function repRepartirUno(id) {
+  const R = STATE.rep; if (!R || !R.carteles) return;
+  const c = R.carteles.find((x) => x.id === id); if (!c) return;
+  const card = nkbCartel(id) || {};
+  const j = await prodRepartirModal(id, { cantidad: c.total, cartel: '#' + c.numero + ' ' + (c.cartel || ''), partes: (card.partes || c.partes || []).map((p) => ({ productorId: p.productor_id, unidades: p.unidades })), productorId: card.productor_id || '' });
+  if (j) repAbrir();
 }
 async function repAplicar() {
   const R = STATE.rep; if (!R || R.aplicando) return;
@@ -8425,18 +8524,32 @@ async function repAplicar() {
   try {
     // Lo que mientras tanto ya derivó alguien no se pisa.
     const pt = await fetch(CONFIG.trackerUrl + '/admin/prod/tablero', { headers: authHeaders() }).then((r) => r.json());
+    const fresco = {}; for (const c of pt.carteles || []) fresco[c.id] = c;
     const ya = new Set((pt.carteles || []).filter((c) => c.productor_id).map((c) => c.id));
+    const esRep = (id) => !!(R.carteles.find((c) => c.id === id) || {}).repartida;
     for (const x of plan) {
-      const ids = x.ids.filter((id) => !ya.has(id));
-      saltados.push(...x.ids.filter((id) => ya.has(id)));
-      if (!ids.length) continue;
-      const r = await fetch(CONFIG.trackerUrl + '/admin/prod/asignar', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ pedido_ids: ids, productor_id: x.p.id }) });
-      const j = await r.json().catch(() => ({}));
-      if (!r.ok || !j.ok) throw new Error((j && j.error) || 'error ' + r.status);
-      hechos += +j.cambiados || 0;
-      for (const s of j.saltados || []) saltados.push(s.id);
+      const ids = x.ids.filter((id) => !esRep(id) && !ya.has(id));
+      saltados.push(...x.ids.filter((id) => !esRep(id) && ya.has(id)));
+      if (ids.length) {
+        const r = await fetch(CONFIG.trackerUrl + '/admin/prod/asignar', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ pedido_ids: ids, productor_id: x.p.id }) });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !j.ok) throw new Error((j && j.error) || 'error ' + r.status);
+        hechos += +j.cambiados || 0;
+        for (const s of j.saltados || []) saltados.push(s.id);
+      }
+      // Repartidas con unidades libres: las libres van a ESTE productor (se le agrega una parte o se agranda la que ya tiene). No la
+      // deriva entera. Si mientras tanto cambiaron las libres, no se toca.
+      for (const id of x.ids.filter(esRep)) {
+        const f = fresco[id], cR = R.carteles.find((c) => c.id === id);
+        if (!f || f.productor_id !== '*' || !(+f.libres > 0) || +f.libres !== cR.cantidad) { saltados.push(id); continue; }
+        const partes = (f.partes || []).map((p) => ({ productor_id: p.productor_id, unidades: p.unidades + (p.productor_id === x.p.id ? +f.libres : 0) }));
+        if (!partes.some((p) => p.productor_id === x.p.id)) partes.push({ productor_id: x.p.id, unidades: +f.libres });
+        const r2 = await nkbPost('/admin/prod/partes', { pedido_id: id, partes, forzar: true });
+        if (!r2.ok) { if (r2.status === 409) { saltados.push(id); continue; } throw new Error(nkbErr(r2)); }
+        hechos++;
+      }
     }
-    toast(`Listo: ${hechos} cartel${hechos === 1 ? '' : 'es'} repartido${hechos === 1 ? '' : 's'}${saltados.length ? ` · ${saltados.length} ya tenía${saltados.length === 1 ? '' : 'n'} productor y no se tocaron` : ''}`);
+    toast(`Listo: ${hechos} cartel${hechos === 1 ? '' : 'es'} repartido${hechos === 1 ? '' : 's'}${saltados.length ? ` · ${saltados.length} ya tenía${saltados.length === 1 ? '' : 'n'} productor (o cambiaron mientras tanto) y no se tocaron` : ''}`);
     repCerrar();
     nkbCargar();
   } catch (e) {
@@ -8478,23 +8591,29 @@ function nkbFichaHtml(c) {
   const dis = (c.diseno && r !== 'logistica') ? `<button type="button" class="sfd-diseno" data-sf-ver="${escapeHtml(nkbUrl('p=' + c.id + '&k=d'))}" title="Ver grande"><img src="${escapeHtml(nkbUrl('p=' + c.id + '&k=d&w=900'))}" alt="Diseño" onerror="sfkImgError(this)"></button>` : '';
   const media = (fotos ? `<div class="lb-tit" style="margin-top:0">Terminado</div><div class="sf-fotos">${fotos}</div>` : '') + (dis ? `<div class="lb-tit"${fotos ? '' : ' style="margin-top:0"'}>Diseño</div>${dis}` : '');
   const corteTxt = { pedido: c.diseno ? 'Emma: por diseñar la matriz' : 'Falta la foto del diseño', matriz_lista: 'Matriz lista · falta cortar', cortado: 'Cortado · falta separar', embalado: 'Base lista (separada)' }[c.corte_estado] || (c.corte_id ? String(c.corte_estado || '') : 'Sin pieza de corte');
-  const prodTxt = c.productor ? c.productor + ' · ' + ({ pendiente: 'sin empezar', en_armado: 'armando', terminado: 'terminado' }[c.prod_estado] || c.prod_estado || '') : '';
+  const rep = nkbRep(c);
+  const prodTxt = rep
+    ? c.partes.map(p => nkbParteTxt(p) + ' · ' + (NKB_PROD_TXT[p.prod_estado] || p.prod_estado) + (p.prod_estado === 'terminado' ? (p.f.recibido ? ', en el taller' : ', falta traer') : '')).join(' / ') + (c.libres ? ' / SIN ASIGNAR ×' + c.libres : '')
+    : c.productor ? c.productor + ' · ' + ({ pendiente: 'sin empezar', en_armado: 'armando', terminado: 'terminado' }[c.prod_estado] || c.prod_estado || '') : '';
   const salida = c.despacho ? (NKB_DESPACHO[c.despacho.modo] || 'Salió') + (c.despacho.transporte ? ' · ' + c.despacho.transporte : '') + (c.despacho.seguimiento ? ' · ' + c.despacho.seguimiento : '') : '';
   const datos = [fila('Medida', c.medida), fila('Cantidad', c.cantidad > 1 ? c.cantidad + ' unidades' : '1'), fila('Colores', c.colores), fila('Base', c.base), fila('Dimmer', c.dimer), fila('Tipo', c.tipo),
-    fila('Aclaración', c.aclaracion), fila('Vendedor', c.vendedor), r === 'logistica' ? '' : fila('Acrílico', corteTxt), fila('Productor', prodTxt), fila('Envío', c.envio), fila('Salida', salida),
+    fila('Aclaración', c.aclaracion), fila('Vendedor', c.vendedor), r === 'logistica' ? '' : fila('Acrílico', corteTxt), fila(rep ? 'Productores' : 'Productor', prodTxt), fila('Envío', c.envio), fila('Salida', salida),
     (adm && c.piso) ? fila('Ubicado a mano', (NKB_LARGO[c.piso.etapa] || c.piso.etapa) + (c.piso.motivo ? ' · ' + c.piso.motivo : '') + (c.piso.por ? ' · ' + c.piso.por : '')) : ''].join('');
   const herm = nkbGrupo(c).filter(x => x.id !== c.id);
   const hermHtml = herm.length ? `<div class="lb-tit">Otros carteles del pedido</div><div class="sfk-ent-lista">${herm.map(x => `<button type="button" class="sfk-ent" data-nkb-ir="${x.id}"><span class="n">${escapeHtml(x.cartel || 'Sin nombre')}</span><span class="f" style="color:${NKB_COLOR[x.etapa]}">${escapeHtml(NKB_CORTO[x.etapa])}</span></button>`).join('')}</div>` : '';
+  // Repartida: el recorrido de cada parte (derivado, armando, terminado, llegó) en lugar del de la línea.
+  const evProd = rep
+    ? [].concat(...c.partes.map(p => [['Derivado a ' + nkbParteTxt(p), p.f.asignado], [p.prod_estado === 'en_armado' ? 'Armando ' + p.productor : '', p.prod_estado === 'en_armado' ? p.f.prod : ''], ['Terminado ' + nkbParteTxt(p), p.f.terminado], ['Llegó lo de ' + p.productor, p.f.recibido, p.recibido_por ? nkbNom(p.recibido_por) : '']]))
+    : [['Derivado' + (c.productor ? ' a ' + c.productor : ''), c.f.asignado], [c.prod_estado === 'en_armado' ? 'Armando' : '', c.prod_estado === 'en_armado' ? c.f.prod : ''], ['Terminado', c.f.terminado], ['Llegó al taller', c.f.recibido, c.recibido_por ? nkbNom(c.recibido_por) : '']];
   const ev = [['Cargado', c.f.creado], ['Emma bajó el diseño', c.f.tomado], ['Matriz lista', c.f.matriz], ['Cortado', c.f.cortado], ['Base separada', c.f.separado],
-    ['Derivado' + (c.productor ? ' a ' + c.productor : ''), c.f.asignado], [c.prod_estado === 'en_armado' ? 'Armando' : '', c.prod_estado === 'en_armado' ? c.f.prod : ''], ['Terminado', c.f.terminado],
-    ['Llegó al taller', c.f.recibido, c.recibido_por ? nkbNom(c.recibido_por) : ''], ['Salió', c.f.despachado, c.despacho ? (NKB_DESPACHO[c.despacho.modo] || '') + (c.despacho.por ? ' · ' + nkbNom(c.despacho.por) : '') : '']]
+    ...evProd, ['Salió', c.f.despachado, c.despacho ? (NKB_DESPACHO[c.despacho.modo] || '') + (c.despacho.por ? ' · ' + nkbNom(c.despacho.por) : '') : '']]
     .filter(x => x[0] && x[1]).sort((a, b) => String(a[1]).localeCompare(String(b[1])));
   const rec = ev.map((x, i) => { const prev = ev[i - 1], dur = prev ? new Date(x[1]) - new Date(prev[1]) : NaN; return `<div class="sf-hist"><b>${escapeHtml(x[0])}</b> · ${escapeHtml(sfFechaHora(x[1]))}${x[2] ? ' · ' + escapeHtml(x[2]) : ''}${isNaN(dur) || dur < 0 ? '' : ` <span class="muted">(${sfkDuracion(dur)} después)</span>`}</div>`; }).join('');
   const pasos = NKB_KEYS.map((id, i) => {
     const cls = `sfd-step${i < idx ? ' hecho' : i === idx ? ' actual' : ''}`, txt = (i < idx ? '✓ ' : '') + escapeHtml(NKB_CORTO[id]);
     return (adm && id !== 'enviado' && (i >= idx || c.motivo === 'piso')) ? `<button type="button" class="${cls}" data-nkb-paso="${id}" style="--c:${NKB_COLOR[id]}"${i === idx ? ' aria-current="step"' : ''} title="Ubicar a mano en ${escapeHtml(NKB_LARGO[id])}">${txt}</button>` : `<span class="${cls} nkb-step-fijo" style="--c:${NKB_COLOR[id]}">${txt}</span>`;
   }).join('');
-  const col = nkbDeColumna((STATE.nkb || {}).carteles || [], c.etapa), pos = col.findIndex(x => x.id === c.id);
+  const col = nkbDeColumna((STATE.nkb || {}).carteles || [], nkbEtapaVista(c)), pos = col.findIndex(x => x.id === c.id);
   const prevT = pos > 0 ? col[pos - 1] : null, sigT = pos >= 0 && pos < col.length - 1 ? col[pos + 1] : null;
   const sec = nkbSecundarios(c);
   return `<div class="sfd-h">
@@ -8507,6 +8626,7 @@ function nkbFichaHtml(c) {
     </div>
     <div class="sfd-body">
       <div class="sfd-steps nkb-steps">${pasos}</div>
+      ${rep ? nkbRepBannerHtml(c) : ''}
       ${chips.length ? `<div class="sfk-chips sfd-avisos">${chips.join('')}</div>` : ''}
       ${media ? `<div class="sfd-media">${media}</div>` : '<div class="muted" style="font-size:12.5px">Sin diseño ni fotos todavía.</div>'}
       <div class="sfd-sec">${datos}</div>
@@ -8624,8 +8744,17 @@ async function nkbHacer(id, a) {
   const mov = (STATE._nkbMov = STATE._nkbMov || {});
   if (mov[id]) return; // doble click
   mov[id] = true;
+  // Acción sobre UNA parte de una repartida: 'terminar:<parte>', 'armando:<parte>', 'recibido:<parte>', 'no_recibido:<parte>'.
+  const [base, sub] = String(a || '').split(':'), parteId = Number(sub) || 0;
   try {
-    if (a === 'tomar') await nkbGuardar(c, () => nkbPost('/admin/neon/accion', { accion: 'tomar', ids: [c.id] }), nkbTit(c) + ' pasó a Diseño y corte', () => nkbHacer(id, 'soltar'));
+    if (parteId) {
+      const p = (c.partes || []).find(x => x.id === parteId) || {}, nom = p.productor ? nkbParteTxt(p) : 'esa parte';
+      if (base === 'armando' || base === 'terminar') await nkbProdEstado(c, base === 'armando' ? 'en_armado' : 'terminado', parteId);
+      else if (base === 'recibido' || base === 'no_recibido') await nkbGuardar(c, () => nkbPost('/admin/neon/accion', { accion: base, ids: [c.id], parte_ids: [parteId] }), nkbTit(c) + (base === 'recibido' ? ': llegó lo de ' + nom : ': lo de ' + nom + ' no llegó todavía'));
+      return;
+    }
+    if (a === 'repartir') await nkbRepartir(c);
+    else if (a === 'tomar') await nkbGuardar(c, () => nkbPost('/admin/neon/accion', { accion: 'tomar', ids: [c.id] }), nkbTit(c) + ' pasó a Diseño y corte', () => nkbHacer(id, 'soltar'));
     else if (a === 'soltar') await nkbGuardar(c, () => nkbPost('/admin/neon/accion', { accion: 'soltar', ids: [c.id] }), nkbTit(c) + ' volvió a Confirmado');
     else if (a === 'matriz') await nkbMatriz(c);
     else if (a === 'cortado') await nkbCorte(c, 'cortado');
@@ -8665,17 +8794,26 @@ async function nkbCorteVolver(c, estado) {
   const x = nkbCartel(c.id) || c;
   await nkbGuardar(x, () => nkbPost('/admin/corte/pedido', { action: 'avanzar_bulk', ids: [x.corte_id], estado }), nkbTit(x) + ' volvió atrás');
 }
+// Repartir las unidades de la tarjeta entre productores (el modal de Pedidos) y recargar el tablero.
+async function nkbRepartir(c) {
+  const plan = await prodRepartirElegir(c.id, { cantidad: c.cantidad, cartel: nkbTit(c), partes: (c.partes || []).map(p => ({ productorId: p.productor_id, unidades: p.unidades })), productorId: c.productor_id });
+  if (!plan) return;
+  await nkbGuardar(c, async () => { const r = await prodRepartirEnviar(c.id, plan.partes, plan.confirmado); return r.cancelado ? { ok: true, j: {}, cancelado: true } : r; }, nkbTit(c) + ': reparto guardado');
+}
 async function nkbDerivar(c, forzar) {
+  if (nkbRep(c)) { await nkbRepartir(c); return; }   // repartida: se cambia desde el reparto
   const ps = (STATE.nkb && STATE.nkb.productores) || [];
   if (!ps.length) { niToast('No hay productores cargados.', { error: true }); return; }
   const base = ['cortado', 'embalado', 'cobrado', 'despachado', 'entregado'].includes(c.corte_estado);
+  const puedeRepartir = c.cantidad > 1 && !!(STATE.nkb && STATE.nkb.partesOn);
   const v = await nkbModal({
     titulo: (c.productor_id ? 'Cambiar productor · ' : 'Derivar · ') + nkbTit(c),
-    cuerpo: `<div style="font-size:13px;color:var(--fg-mute);margin-bottom:10px">${!base && c.corte_id ? '<b style="color:#f59e0b">Ojo: la base todavía no está cortada.</b> ' : ''}Le aparece en su hoja.</div>
+    cuerpo: `<div style="font-size:13px;color:var(--fg-mute);margin-bottom:10px">${!base && c.corte_id ? '<b style="color:#f59e0b">Ojo: la base todavía no está cortada.</b> ' : ''}Le aparece en su hoja.${puedeRepartir ? ` Son ${c.cantidad} iguales: con "Repartir unidades" se las dividís entre varios.` : ''}</div>
       <label class="nc-field"><span class="nc-label">Productor</span><select class="nc-input" data-f="p">${ps.map(p => `<option value="${escapeHtml(p.id)}"${p.id === c.productor_id ? ' selected' : ''}>${escapeHtml(p.nombre || p.id)}${p.activo ? '' : ' (sin usuario)'}</option>`).join('')}</select></label>`,
-    botones: [{ v: 'ok', t: c.productor_id ? 'Cambiar' : 'Derivar' }, ...(c.productor_id ? [{ v: 'sacar', t: 'Sacarle el productor' }] : []), { v: '__no', t: 'Cancelar' }],
+    botones: [{ v: 'ok', t: c.productor_id ? 'Cambiar' : 'Derivar' }, ...(puedeRepartir ? [{ v: 'repartir', t: 'Repartir unidades' }] : []), ...(c.productor_id ? [{ v: 'sacar', t: 'Sacarle el productor' }] : []), { v: '__no', t: 'Cancelar' }],
   });
   if (!v) return;
+  if (v.b === 'repartir') { await nkbRepartir(c); return; }
   const pid = v.b === 'sacar' ? '' : v.f.p, nom = pid ? ((ps.find(p => p.id === pid) || {}).nombre || pid) : '';
   const asignar = (fz) => nkbPost('/admin/prod/asignar', { pedido_ids: [c.id], productor_id: pid, ...(fz ? { forzar: true } : {}) });
   await nkbGuardar(c, async () => {
@@ -8689,14 +8827,17 @@ async function nkbDerivar(c, forzar) {
     return r;
   }, pid ? nkbTit(c) + ' derivado a ' + nom : nkbTit(c) + ' quedó sin productor');
 }
-async function nkbProdEstado(c, est) {
-  const req = Math.min(5, Math.max(1, Number(c.cantidad) || 1)), nf = Number(c.fotos) || 0;
-  if (est === 'terminado' && nf < req && !(await showConfirm(nf ? `${nkbTit(c)} tiene ${nf} de ${req} fotos del cartel terminado. ¿Marcarlo terminado igual?` : `${nkbTit(c)} no tiene foto del cartel terminado. ¿Marcarlo terminado igual?`, { title: 'Marcar terminado', confirmLabel: 'Sí, terminado', cancelLabel: 'No' }))) return;
+// parteId: la parte de una repartida (fotos pedidas = mín(5, sus unidades), contra SUS fotos).
+async function nkbProdEstado(c, est, parteId) {
+  const x = parteId ? (c.partes || []).find(p => p.id === parteId) : null;
+  const req = Math.min(5, Math.max(1, Number(x ? x.unidades : c.cantidad) || 1)), nf = Number(x ? x.fotos : c.fotos) || 0;
+  const tit = nkbTit(c) + (x ? ' (' + nkbParteTxt(x) + ')' : '');
+  if (est === 'terminado' && nf < req && !(await showConfirm(nf ? `${tit} tiene ${nf} de ${req} fotos del cartel terminado. ¿Marcarlo terminado igual?` : `${tit} no tiene foto del cartel terminado. ¿Marcarlo terminado igual?`, { title: 'Marcar terminado', confirmLabel: 'Sí, terminado', cancelLabel: 'No' }))) return;
   await nkbGuardar(c, async () => {
-    const r = await nkbPost('/admin/prod/estado', { pedido_id: c.id, estado: est, forzar: true });
+    const r = await nkbPost('/admin/prod/estado', { pedido_id: c.id, estado: est, forzar: true, ...(x ? { parte_id: x.id } : {}) });
     if (r.ok && r.j && r.j.carteles && typeof prodAplicarAPedidos === 'function') prodAplicarAPedidos(r.j.carteles);
     return r;
-  }, nkbTit(c) + (est === 'terminado' ? ' quedó terminado' : ' quedó armando'));
+  }, tit + (est === 'terminado' ? ' quedó terminado' : ' quedó armando'));
 }
 function nkbPago(c) {
   if (typeof abrirSegundoPago !== 'function' || !(STATE.pedidos || []).some(x => x.idx === c.id)) { niToast('Registralo desde Pedidos (no encuentro el pedido acá).', { error: true }); return; }
@@ -10377,12 +10518,14 @@ async function bindCorte() {
       const nSep = parseInt(b.getAttribute('data-corte-prod-sinsep'), 10) || 0, nCol = parseInt(b.getAttribute('data-corte-prod-sincol'), 10) || 0;
       const msg = '¿' + nom + ' se llevó ' + (ids.length === 1 ? 'la base' : 'las ' + ids.length + ' bases') + ' y el neón?'
         + (nSep ? '\n\n' + (nSep === 1 ? '1 base no estaba separada' : nSep + ' bases no estaban separadas') + ': quedan separadas y entregadas.' : '')
-        + (nCol ? '\n\n⚠ ' + (nCol === 1 ? '1 base no tiene' : nCol + ' bases no tienen') + ' los colores cargados: ese neón no estaba en la cuenta.' : '');
+        + (nCol ? '\n\n⚠ ' + (nCol === 1 ? '1 base no tiene' : nCol + ' bases no tienen') + ' los colores cargados: ese neón no estaba en la cuenta.' : '')
+        + (String(b.getAttribute('data-corte-prod-partes') || '') ? '\n\n✂ De una matriz repartida se lleva SOLO su parte (lo que dice el paquete).' : '');
       if (!await showConfirm(msg, { title: 'Entregar paquete', confirmLabel: 'Sí, se lo llevó', cancelLabel: 'Todavía no' }).catch(() => false)) return;
-      corteBulk('entregado_prod', { ids });
+      const parte_ids = String(b.getAttribute('data-corte-prod-partes') || '').split(',').map(Number).filter(Boolean);
+      corteBulk('entregado_prod', parte_ids.length ? { ids, parte_ids } : { ids });
     };
   });
-  document.querySelectorAll('[data-corte-prod-desentregar]').forEach(b => { b.onclick = () => corteBulk('desentregar_prod', { ids: String(b.getAttribute('data-corte-prod-desentregar') || '').split(',').map(Number).filter(Boolean) }); });
+  document.querySelectorAll('[data-corte-prod-desentregar]').forEach(b => { b.onclick = () => { const parte_ids = String(b.getAttribute('data-corte-prod-partes') || '').split(',').map(Number).filter(Boolean); corteBulk('desentregar_prod', { ids: String(b.getAttribute('data-corte-prod-desentregar') || '').split(',').map(Number).filter(Boolean), ...(parte_ids.length ? { parte_ids } : {}) }); }; });
   // Navegador de semanas del board admin: ‹ / › cambian la tanda seleccionada.
   document.querySelectorAll('[data-corte-week-to]').forEach(b => { b.onclick = () => { const t = b.getAttribute('data-corte-week-to'); if (t) { STATE.corteTandaSel = parseInt(t, 10); render(); } }; });
   // Aprendizaje del corte: buscar mejoras (síntesis) + aprobar/descartar propuestas al KB.
@@ -26504,7 +26647,7 @@ async function prodCargarProductores(forzar) {
   if (!forzar && a.falloAt && Date.now() - a.falloAt < 60000) return;   // falló hace poco: no reintentar en cada repintado
   a.cargando = true;
   let ok = false;
-  try { a.prods = (await prodFetch('/admin/prod/productores')).productores || []; ok = true; a.falloAt = 0; swProdsGuardar(a.prods); } catch (_) { a.falloAt = Date.now(); }
+  try { const j = await prodFetch('/admin/prod/productores'); a.prods = j.productores || []; a.partesOn = !!j.partes_on; ok = true; a.falloAt = 0; swProdsGuardar(a.prods); } catch (_) { a.falloAt = Date.now(); }
   a.cargando = false;
   if (!ok) return;
   if (STATE.view === 'pedidos') {
@@ -26582,15 +26725,42 @@ function prodPillPedido(p) {
   const col = PROD_ESTADO_COLOR[est] || '#9aa0b4';
   return ` <span class="prod-mini" style="color:${col};border-color:${col}66">${escapeHtml(PROD_ESTADO_LBL[est] || 'Asignado')}${p.productorNombre ? ' · ' + escapeHtml(p.productorNombre) : ''}</span>`;
 }
-// Celda de la columna Productor (admin): desplegable para asignar + estado + mano de obra + pagar.
+// ---------- Partes de producción (Gaspar 26-oct-2026) ----------
+// Una línea de neón con varias unidades se reparte entre productores sin partir la venta ("GONZALO ×4 · OCTAVIO ×5"): cada parte
+// con su estado, sus fotos, su mano de obra y su pago. Se pueden dejar unidades libres ("sin asignar"). La línea repartida tiene
+// productor_id '*'. Ver prodRepartir en el worker; se prende con kv prod_partes_on (partes_on en /productores y el tablero).
+function prodParteDeFila(x) {
+  return { id: +x.id, productorId: x.productor_id || '', nombre: x.nombre || x.productor || x.productor_id || '', unidades: +x.unidades || 0, estado: x.prod_estado || 'pendiente',
+    terminadoAt: x.terminado_at || '', recibidoAt: x.recibido_at || '', pagadoAt: x.pagado_at || '', moMonto: (x.mo_monto == null || x.mo_monto === '') ? null : Number(x.mo_monto),
+    fotos: Array.isArray(x.fotos) ? x.fotos.map(f => (f && typeof f === 'object') ? f.key : f).filter(Boolean) : [] };
+}
+function prodEsRepartido(p) { return !!p && p.productorId === '*'; }
+function prodPartesOnFront() { return !!(prodAdmState().partesOn || (STATE.nkb && STATE.nkb.partesOn)); }
+// Unidades de TRABAJO de una fila de Pedidos: sus partes si está repartida; si no, la línea entera (como siempre).
+function prodUnidadesDe(p) {
+  if (prodEsRepartido(p)) return (p.prodPartes || []).map(x => ({ parteId: x.id, productorId: x.productorId, nombre: x.nombre, unidades: x.unidades, prodEstado: x.estado, prodPagadoAt: x.pagadoAt, moMonto: x.moMonto, p }));
+  return [{ parteId: null, productorId: p.productorId || '', nombre: p.productorNombre || '', unidades: Math.max(1, Math.round(+p.cantidad || 1)), prodEstado: p.prodEstado || '', prodPagadoAt: p.prodPagadoAt || '', moMonto: p.moMonto, p }];
+}
+// Celda de la columna Productor (admin): desplegable para asignar + estado + mano de obra + pagar. Repartida: un renglón por
+// parte (su estado, su MO y su Pagar), las libres y "Repartir".
 function prodCeldaPedido(p) {
   if (p.esCorporeo) return '<span class="muted" style="font-size:11px">—</span>';
   const a = prodAdmState(), est = p.prodEstado || '', col = PROD_ESTADO_COLOR[est] || '#9aa0b4';
+  const cant = Math.max(1, Math.round(+p.cantidad || 1));
+  if (prodEsRepartido(p)) {
+    const filas = (p.prodPartes || []).map(x => {
+      const c = PROD_ESTADO_COLOR[x.estado] || '#9aa0b4';
+      const pago = x.pagadoAt ? ' · <span style="color:#2ECC71">pagado ✓</span>' : (x.estado === 'terminado' ? (x.moMonto != null ? ` · <button class="prod-pagar" data-ped-prod-pagar-parte="${x.id}" data-ped-idx="${p.idx}">Pagar</button>` : ' · <span style="color:#FFB020" title="Faltan tramos o medidas para calcular la mano de obra">falta la mano de obra</span>') : '');
+      return `<div class="prod-celda-linea"><b>${escapeHtml(x.nombre)} ×${x.unidades}</b> · <span style="color:${c}">${escapeHtml(PROD_ESTADO_LBL[x.estado] || x.estado)}</span>${x.moMonto != null ? ' · ' + fmtMoney(x.moMonto) : ''}${pago}</div>`;
+    }).join('');
+    return `<div class="prod-partes-celda">${filas}${p.prodLibres ? `<div class="prod-celda-linea" style="color:#f59e0b;font-weight:700">sin asignar: ${p.prodLibres}</div>` : ''}${prodPartesOnFront() ? `<button class="prod-pagar" data-ped-prod-repartir="${p.idx}" style="margin-top:3px">Repartir</button>` : ''}</div>`;
+  }
   const sel = `<select class="prod-sel" data-ped-prod="${p.idx}" ${p.prodPagadoAt ? 'disabled title="Ya está pagado"' : ''}>${a.prods ? prodAdmOpts(p.productorId || '', true) : `<option>${escapeHtml(p.productorNombre || '—')}</option>`}</select>`;
-  if (!p.productorId) return sel;
+  const rep = (cant >= 2 && prodPartesOnFront() && !p.prodPagadoAt) ? ` <button class="prod-pagar" data-ped-prod-repartir="${p.idx}" title="Repartir las ${cant} unidades entre productores">Repartir…</button>` : '';
+  if (!p.productorId) return sel + rep;
   const mo = p.moMonto != null ? fmtMoney(p.moMonto) : '';
   const pago = p.prodPagadoAt ? ' · <span style="color:#2ECC71">pagado ✓</span>' : (est === 'terminado' ? (p.moMonto != null ? ` · <button class="prod-pagar" data-ped-prod-pagar="${p.idx}">Pagar</button>` : ' · <span style="color:#FFB020" title="Faltan tramos o medidas para calcular la mano de obra">falta la mano de obra</span>') : '');
-  return sel + `<div class="prod-celda-linea"><span style="color:${col}">${escapeHtml(PROD_ESTADO_LBL[est] || 'Asignado')}</span>${mo ? ' · ' + mo : ''}${pago}</div>`;
+  return sel + rep + `<div class="prod-celda-linea"><span style="color:${col}">${escapeHtml(PROD_ESTADO_LBL[est] || 'Asignado')}</span>${mo ? ' · ' + mo : ''}${pago}</div>`;
 }
 // Filtros de producción del toolbar (admin): productor y estado de producción.
 function prodFiltrosHtml() {
@@ -26600,44 +26770,57 @@ function prodFiltrosHtml() {
   return `<select data-pf="prod"><option value="">Productor: todos</option><option value="__sin" ${f.prod === '__sin' ? 'selected' : ''}>Sin productor</option>${opts}</select>
         <select data-pf="prodEstado"><option value="">Producción: todas</option>${[['pendiente', 'Pendiente'], ['en_armado', 'En armado'], ['sin_pagar', 'Terminado sin pagar'], ['pagado', 'Pagado']].map(([k, l]) => `<option value="${k}" ${f.prodEstado === k ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
 }
+// Pasa si ALGUNA unidad de trabajo (la línea, o una parte de una repartida) cumple a la vez el productor y el estado elegidos: con
+// el filtro en Gonzalo, la repartida aparece por SU parte. "Sin productor" también trae las repartidas con unidades libres.
 function prodFiltroPasa(p) {
   if (!isAdmin()) return true;
   const f = pedidoFilter;
   if (!f.prod && !f.prodEstado) return true;
   if (p.esCorporeo) return false;
-  if (f.prod === '__sin') { if (p.productorId) return false; }
-  else if (f.prod && p.productorId !== f.prod) return false;
-  if (f.prodEstado) {
-    const est = p.prodEstado || '';
-    if (f.prodEstado === 'sin_pagar') return est === 'terminado' && !p.prodPagadoAt;
-    if (f.prodEstado === 'pagado') return !!p.prodPagadoAt;
-    return est === f.prodEstado && !p.prodPagadoAt;
-  }
-  return true;
+  return prodUnidadesFiltradas(p).length > 0 || (f.prod === '__sin' && !f.prodEstado && prodEsRepartido(p) && p.prodLibres > 0);
 }
-// Resumen de plata de lo filtrado (admin, con un filtro de producción puesto): lo que debés y lo pagado.
+function prodUnidadesFiltradas(p) {
+  const f = pedidoFilter;
+  return prodUnidadesDe(p).filter(u => {
+    if (f.prod === '__sin') { if (u.productorId) return false; }
+    else if (f.prod && u.productorId !== f.prod) return false;
+    if (f.prodEstado) {
+      const est = u.prodEstado || '';
+      if (f.prodEstado === 'sin_pagar') return est === 'terminado' && !u.prodPagadoAt;
+      if (f.prodEstado === 'pagado') return !!u.prodPagadoAt;
+      return est === f.prodEstado && !u.prodPagadoAt;
+    }
+    return true;
+  });
+}
+// Resumen de plata de lo filtrado (admin, con un filtro de producción puesto): lo que debés y lo pagado. Suma sobre las unidades
+// de trabajo que pasan el filtro (con el filtro en Gonzalo, SOLO su parte de una repartida, nunca la línea entera).
 function prodResumenFiltro(lista) {
   const el = document.getElementById('prod-resumen-filtro'); if (!el) return;
   if (!isAdmin() || (!pedidoFilter.prod && !pedidoFilter.prodEstado)) { el.innerHTML = ''; return; }
-  const suma = arr => arr.reduce((s, p) => s + (Number(p.moMonto) || 0), 0);
-  const debe = lista.filter(p => p.productorId && p.prodEstado === 'terminado' && !p.prodPagadoAt);
-  const debePagable = debe.filter(p => p.moMonto != null);
-  const curso = lista.filter(p => p.productorId && p.prodEstado !== 'terminado' && !p.prodPagadoAt);
-  const pag = lista.filter(p => p.prodPagadoAt);
+  const us = [].concat(...lista.map(prodUnidadesFiltradas));
+  const suma = arr => arr.reduce((s, u) => s + (Number(u.moMonto) || 0), 0);
+  const debe = us.filter(u => u.productorId && u.prodEstado === 'terminado' && !u.prodPagadoAt);
+  const debePagable = debe.filter(u => u.moMonto != null);
+  const curso = us.filter(u => u.productorId && u.prodEstado !== 'terminado' && !u.prodPagadoAt);
+  const pag = us.filter(u => u.prodPagadoAt);
   const unProd = pedidoFilter.prod && pedidoFilter.prod !== '__sin';
   el.innerHTML = `<div class="prod-resumen-filtro">Terminados sin pagar: <b>${debe.length} · ${fmtMoney(suma(debe))}</b>${unProd && debePagable.length > 1 ? ` <button class="btn btn-cyan" data-ped-prod-pagar-todos style="padding:3px 10px;font-size:12px;margin-left:6px">Marcar los ${debePagable.length} como pagados</button>` : ''}${debe.length > debePagable.length ? ` <span style="color:#FFB020;font-size:12px">· ${debe.length - debePagable.length} sin mano de obra (faltan tramos o medidas)</span>` : ''}
     <span class="muted">· En curso: ${curso.length} · ${fmtMoney(suma(curso))} · Pagados: ${pag.length} · ${fmtMoney(suma(pag))}</span></div>`;
   const bt = el.querySelector('[data-ped-prod-pagar-todos]');
-  if (bt) bt.onclick = () => prodPagarPedidos(debePagable.map(p => p.idx), true);
+  if (bt) bt.onclick = () => prodPagarUnidades(debePagable, true);
 }
-// Pasa a STATE.pedidos lo que devolvió el worker de producción (asignar / pagar).
+// Pasa a STATE.pedidos lo que devolvió el worker de producción (asignar / pagar / estado / repartir).
 function prodAplicarAPedidos(carteles) {
   for (const c of (carteles || [])) {
-    const x = STATE.pedidos.find(y => y.idx === c.id); if (!x) continue;
+    const x = (STATE.pedidos || []).find(y => y.idx === c.id); if (!x) continue;
     x.productorId = c.productor_id || ''; x.productorNombre = c.productor_id ? (c.productor || c.productor_id) : '';
     x.prodEstado = c.prod_estado || ''; x.prodTerminadoAt = c.prod_terminado_at || ''; x.prodPagadoAt = c.prod_pagado_at || '';
     x.moMonto = (c.mo_monto == null || c.mo_monto === '') ? null : Number(c.mo_monto); x.moRegla = c.mo_regla || '';
     if (Array.isArray(c.fotos)) x.prodFotos = c.fotos.map(f => f.key);
+    x.prodPartes = Array.isArray(c.partes) ? c.partes.map(prodParteDeFila) : [];
+    x.prodLibres = +c.libres || 0;
+    if ('cantidad' in c && c.cantidad != null) x.cantidad = c.cantidad;
   }
 }
 async function prodAsignarPedido(idx, pid) {
@@ -26659,12 +26842,18 @@ async function prodAsignarPedido(idx, pid) {
 }
 async function prodPagarPedidos(ids, si) {
   ids = (ids || []).filter(Boolean); if (!ids.length) return;
-  const sel = STATE.pedidos.filter(p => ids.includes(p.idx));
-  const tot = sel.reduce((s, p) => s + (Number(p.moMonto) || 0), 0);
-  const quien = uniq(sel.map(p => p.productorNombre).filter(Boolean)).join(', ');
-  if (si && !(await showConfirm(`¿Marcar ${ids.length === 1 ? '"' + (sel[0] || {}).cartel + '"' : ids.length + ' carteles'} como pagado${ids.length > 1 ? 's' : ''}${quien ? ' a ' + quien : ''}? ${fmtMoney(tot)}.`, { title: 'Pago de producción', confirmLabel: 'Sí, pagado', cancelLabel: 'Cancelar' }))) return;
+  return prodPagarUnidades(STATE.pedidos.filter(p => ids.includes(p.idx) && !prodEsRepartido(p)).map(p => prodUnidadesDe(p)[0]), si);
+}
+// Paga (o deshace) unidades de trabajo: líneas normales por pedido_ids y partes de las repartidas por parte_ids (se puede pagar la
+// parte de Gonzalo aunque Octavio siga armando). El aviso suma la MO de lo elegido y dice a quién: "a GONZALO, 4 u.".
+async function prodPagarUnidades(us, si) {
+  us = (us || []).filter(Boolean); if (!us.length) return;
+  const tot = us.reduce((s, u) => s + (Number(u.moMonto) || 0), 0);
+  const quien = uniq(us.map(u => u.nombre ? u.nombre + (u.parteId ? ', ' + u.unidades + ' u.' : '') : '').filter(Boolean)).join(' · ');
+  const n = us.length;
+  if (si && !(await showConfirm(`¿Marcar ${n === 1 ? '"' + ((us[0].p || {}).cartel || '') + '"' : n + ' carteles'} como pagado${n > 1 ? 's' : ''}${quien ? ' a ' + quien : ''}? ${fmtMoney(tot)}.`, { title: 'Pago de producción', confirmLabel: 'Sí, pagado', cancelLabel: 'Cancelar' }))) return;
   try {
-    const j = await prodFetch('/admin/prod/pagar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pedido_ids: ids, pagado: !!si }) });
+    const j = await prodFetch('/admin/prod/pagar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pedido_ids: us.filter(u => !u.parteId).map(u => u.p.idx), parte_ids: us.filter(u => u.parteId).map(u => u.parteId), pagado: !!si }) });
     prodAplicarAPedidos(j.carteles);
     const _salt = (j.saltados || []).length;
     toast(_salt ? `${j.cambiados || 0} marcado${(j.cambiados || 0) === 1 ? '' : 's'} · ${_salt} sin mano de obra (faltan tramos o medidas): no se pagaron` : (si ? 'Pago de producción marcado' : 'Pago deshecho'));
@@ -26679,12 +26868,126 @@ function bindProdTabla(filtered) {
   const wrap = document.getElementById('table-pedidos'); if (!wrap) return;
   wrap.querySelectorAll('[data-ped-prod]').forEach(s => { s.onclick = (e) => e.stopPropagation(); s.onchange = () => prodAsignarPedido(Number(s.dataset.pedProd), s.value); });
   wrap.querySelectorAll('[data-ped-prod-pagar]').forEach(b => b.onclick = (e) => { e.stopPropagation(); prodPagarPedidos([Number(b.dataset.pedProdPagar)], true); });
+  wrap.querySelectorAll('[data-ped-prod-pagar-parte]').forEach(b => b.onclick = (e) => {
+    e.stopPropagation();
+    const p = STATE.pedidos.find(x => x.idx === Number(b.dataset.pedIdx)), u = p && prodUnidadesDe(p).find(x => x.parteId === Number(b.dataset.pedProdPagarParte));
+    if (u) prodPagarUnidades([u], true);
+  });
+  wrap.querySelectorAll('[data-ped-prod-repartir]').forEach(b => b.onclick = async (e) => { e.stopPropagation(); await prodRepartirPedido(Number(b.dataset.pedProdRepartir)); });
+}
+// Repartir desde Pedidos (tabla o detalle): el modal, y al guardar se repinta.
+async function prodRepartirPedido(idx) {
+  const p = STATE.pedidos.find(x => x.idx === idx); if (!p) return null;
+  const j = await prodRepartirModal(idx, { cantidad: p.cantidad, cartel: '#' + (p.numero || '') + ' ' + (p.cartel || ''), partes: (p.prodPartes || []).map(x => ({ productorId: x.productorId, unidades: x.unidades })), productorId: p.productorId });
+  if (STATE.view === 'pedidos') renderTablePedidos();
+  return j;
+}
+// Modal "Repartir entre productores" (Pedidos, tablero y reparto semanal): un casillero de unidades por productor, precargado con
+// el reparto actual. Se pueden dejar unidades libres. Primero muestra cómo queda (dry_run: MO de cada uno y avisos) y recién con el
+// OK guarda; si a alguien que ya arrancó le cambian las unidades, pregunta otra vez. Devuelve la respuesta del worker o null.
+async function prodRepartirModal(pedidoId, o) {
+  const plan = await prodRepartirElegir(pedidoId, o);
+  if (!plan) return null;
+  const r = await prodRepartirEnviar(pedidoId, plan.partes, plan.confirmado);
+  if (!r.ok) { if (!r.cancelado) toast('No se repartió: ' + ((r.j && r.j.error) || 'error ' + r.status)); return null; }
+  toast(r.j.sin_cambios ? 'El reparto ya estaba así' : 'Reparto guardado');
+  return r.j;
+}
+async function prodRepartirElegir(pedidoId, o) {
+  o = o || {};
+  const N = Math.max(1, Math.round(+o.cantidad || 1));
+  const a = prodAdmState();
+  if (!a.prods) { try { await prodCargarProductores(true); } catch (_) {} }
+  let prods = (a.prods || []).filter(p => !+p.baja).map(p => ({ id: p.id, nombre: p.nombre, activo: !!+p.activo }));
+  if (!prods.length) prods = ((STATE.nkb && STATE.nkb.productores) || []).map(p => ({ id: p.id, nombre: p.nombre || p.id, activo: !!p.activo }));
+  if (!prods.length) { toast('No hay productores cargados'); return null; }
+  const actual = {};
+  for (const x of (o.partes || [])) actual[x.productorId] = x.unidades;
+  if (!(o.partes || []).length && o.productorId && o.productorId !== '*') actual[o.productorId] = N;
+  // Los que tienen unidades ahora, aunque estén de baja, se muestran (para poder sacárselas).
+  for (const id of Object.keys(actual)) if (!prods.some(p => p.id === id)) prods.push({ id, nombre: id, activo: false });
+  const filas = prods.map(p => `<label class="nc-field" style="display:flex;align-items:center;gap:10px;margin:0 0 6px"><span style="flex:1;font-weight:700">${escapeHtml(p.nombre)}${p.activo ? '' : ' <span class="muted" style="font-weight:400;font-size:11px">(sin usuario)</span>'}</span>
+      <input class="nc-input" type="number" min="0" max="${N}" step="1" inputmode="numeric" data-f="u:${escapeHtml(p.id)}" value="${actual[p.id] || ''}" placeholder="0" style="width:84px;text-align:center"></label>`).join('');
+  const leer = (f) => prods.map(p => ({ productor_id: p.id, nombre: p.nombre, unidades: f['u:' + p.id] === '' || f['u:' + p.id] == null ? 0 : Number(f['u:' + p.id]) }));
+  const prom = nkbModal({
+    titulo: 'Repartir · ' + (o.cartel || ''),
+    cuerpo: `<div style="font-size:13px;color:var(--fg-mute);margin-bottom:10px">Son <b>${N}</b> carteles iguales. Poné cuántos arma cada uno; los que no repartas quedan <b>sin asignar</b> para después. Cada uno ve solo lo suyo y cobra su parte de la mano de obra.</div>${filas}
+      <div data-rep-cuenta style="font-size:14px;font-weight:700;margin-top:8px"></div>`,
+    botones: [{ v: 'ok', t: 'Ver cómo queda' }, { v: '__no', t: 'Cancelar' }],
+    validar: (b, f) => {
+      const us = leer(f);
+      if (us.some(u => !Number.isInteger(u.unidades) || u.unidades < 0)) return 'Las unidades tienen que ser números enteros';
+      const s = us.reduce((t, u) => t + u.unidades, 0);
+      return s > N ? `Son ${N} y repartiste ${s}` : '';
+    },
+  });
+  // Cuenta en vivo: "Repartidas X de N · sin asignar Y".
+  const bg = [...document.querySelectorAll('.modal-bg')].pop();
+  const cuenta = () => {
+    if (!bg) return;
+    const f = {}; bg.querySelectorAll('[data-f]').forEach(x => { f[x.getAttribute('data-f')] = x.value; });
+    const s = leer(f).reduce((t, u) => t + (Number.isFinite(u.unidades) ? u.unidades : 0), 0), el = bg.querySelector('[data-rep-cuenta]');
+    if (el) { el.textContent = `Repartidas ${s} de ${N}` + (s < N ? ` · sin asignar ${N - s}` : s > N ? ' · ¡te pasaste!' : ''); el.style.color = s > N ? '#ef4444' : s < N ? '#f59e0b' : '#22c55e'; }
+  };
+  if (bg) { bg.addEventListener('input', cuenta); cuenta(); }
+  const v = await prom;
+  if (!v) return null;
+  const partes = leer(v.f).filter(u => u.unidades > 0).map(u => ({ productor_id: u.productor_id, unidades: u.unidades }));
+  // Cómo queda (sin escribir nada): MO de cada uno, las libres y los avisos.
+  const d = await nkbPost('/admin/prod/partes', { pedido_id: pedidoId, partes, dry_run: true });
+  if (!d.ok) { toast('No se pudo calcular: ' + nkbErr(d)); return null; }
+  if (d.j.sin_cambios) { toast('El reparto ya estaba así'); return null; }
+  const pl = d.j.plan || {};
+  const lin = (pl.partes || []).map(x => `${x.nombre} ×${x.unidades}${x.mo != null ? ' · MO ' + fmtMoney(x.mo) : ''}${x.hereda ? ' (sigue con lo que ya hizo)' : x.estado_resultante !== 'pendiente' ? ' (' + (PROD_ESTADO_LBL[x.estado_resultante] || x.estado_resultante) + ')' : ''}`);
+  if (pl.libres > 0 && pl.tipo === 'rep') lin.push(`Sin asignar ×${pl.libres}${pl.mo_libre != null ? ' · MO ' + fmtMoney(pl.mo_libre) + ' (no se le paga a nadie hasta asignarlas)' : ''}`);
+  const txt = (pl.tipo === 'vacia' ? 'Queda sin productor.' : pl.tipo === 'normal' ? `Queda entero para ${(pl.partes[0] || {}).nombre || ''}.` : 'Queda así:') + '\n\n' + lin.join('\n')
+    + (pl.mo_linea != null ? '\n\nMano de obra del cartel entero: ' + fmtMoney(pl.mo_linea) : '')
+    + ((pl.avisos || []).length ? '\n\n⚠ ' + pl.avisos.join('\n⚠ ') : '')
+    + ((pl.confirmar || []).length ? '\n\n' + pl.confirmar.map(c => `${c.nombre} ya lo ${c.estado === 'terminado' ? 'TERMINÓ' : 'está armando'} (${c.unidades}): ${c.a ? 'le quedan ' + c.a : 'se lo sacás'}. Su estado y sus fotos se quedan con él.`).join('\n') : '');
+  if (!(await showConfirm(txt, { title: 'Repartir · ' + (o.cartel || ''), confirmLabel: 'Repartir así', cancelLabel: 'Volver', variant: (pl.confirmar || []).length ? 'warn' : undefined }).catch(() => false))) return null;
+  return { partes, confirmado: (pl.confirmar || []).length > 0 };
+}
+// POST real (con forzar si ya se confirmó en "cómo queda"). Si mientras tanto alguien arrancó (409 confirmar), pregunta y reenvía. Devuelve {ok, status, j}
+// (como nkbPost) o {cancelado: true}.
+async function prodRepartirEnviar(pedidoId, partes, forzar) {
+  let r = await nkbPost('/admin/prod/partes', { pedido_id: pedidoId, partes, ...(forzar ? { forzar: true } : {}) });
+  if (r.status === 409 && r.j && r.j.confirmar) {
+    const txt = (r.j.partes || []).map(c => `${c.nombre} ya lo ${c.estado === 'terminado' ? 'TERMINÓ' : 'está armando'} (${c.unidades}): ${c.a ? 'le quedan ' + c.a : 'se lo sacás'}.`).join('\n');
+    if (!(await showConfirm(txt + '\n\nSu estado y sus fotos se quedan con él. ¿Repartir igual?', { title: 'Cambiar el reparto', confirmLabel: 'Sí, repartir', cancelLabel: 'No', variant: 'warn' }).catch(() => false))) return { ok: false, cancelado: true, j: {} };
+    r = await nkbPost('/admin/prod/partes', { pedido_id: pedidoId, partes, forzar: true });
+  }
+  if (r.ok && r.j && r.j.carteles) prodAplicarAPedidos(r.j.carteles);
+  return r;
 }
 // Sección Producción del detalle del pedido (todos ven estado y fotos; asignar y pagar solo el admin).
 function prodDrawerSection(p) {
   if (!p || p.esCorporeo) return '';
   const est = p.prodEstado || '', fotos = p.prodFotos || [], adm = isAdmin(), a = prodAdmState();
   if (adm && !a.prods) prodCargarProductores();
+  const lbl = 'font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em';
+  const sel = 'width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)';
+  const fotosHtml = (ks) => ks.length ? `<div style="display:flex;gap:6px;flex-wrap:wrap">${ks.map(k => `<img src="${escapeHtml(mediaUrl(k))}" data-ped-prod-zoom="${escapeHtml(mediaUrl(k))}" style="width:64px;height:64px;object-fit:cover;border-radius:8px;cursor:zoom-in">`).join('')}</div>` : '';
+  const cant = Math.max(1, Math.round(+p.cantidad || 1));
+  // Repartida entre productores: un bloque por parte (su estado, su MO, su pago y sus fotos) + las libres + "Repartir".
+  if (prodEsRepartido(p)) {
+    const enParte = new Set([].concat(...(p.prodPartes || []).map(x => x.fotos)));
+    const sueltas = fotos.filter(k => !enParte.has(k));
+    const bloques = (p.prodPartes || []).map(x => `<div style="border:1px solid var(--border);border-radius:10px;padding:9px 10px;display:flex;flex-direction:column;gap:6px">
+        <div><b>${escapeHtml(x.nombre)} ×${x.unidades}</b> <span style="color:${PROD_ESTADO_COLOR[x.estado] || 'var(--fg)'}">· ${escapeHtml(PROD_ESTADO_LBL[x.estado] || x.estado)}</span>${x.terminadoAt && x.estado === 'terminado' ? ` <span class="muted" style="font-size:12px">· ${prodFechaHora(x.terminadoAt)}</span>` : ''}${x.recibidoAt ? ' <span style="color:#2ECC71;font-size:12px">· en el taller</span>' : ''}</div>
+        ${adm ? `<div>Mano de obra: <b>${x.moMonto != null ? fmtMoney(x.moMonto) : '—'}</b> · ${x.pagadoAt ? `<span style="color:#2ECC71">pagada el ${prodFechaCorta(x.pagadoAt)}</span> <button class="btn btn-ghost" data-ped-parte-pagar="${x.id}|0" style="padding:3px 9px;font-size:12px">Deshacer</button>` : `<span style="color:#FFB020">sin pagar</span> <button class="btn btn-cyan" data-ped-parte-pagar="${x.id}|1" style="padding:3px 10px;font-size:12px">Marcar pagado</button>`}</div>
+          ${x.pagadoAt ? '' : `<select data-ped-parte-estado="${x.id}" style="${sel}">${['pendiente', 'en_armado', 'terminado'].map(k => `<option value="${k}" ${x.estado === k ? 'selected' : ''}>${PROD_ESTADO_LBL[k]}</option>`).join('')}</select>`}` : ''}
+        ${fotosHtml(x.fotos)}
+      </div>`).join('');
+    return `<div class="drawer-section"><h4>Producción</h4>
+      <div style="display:flex;flex-direction:column;gap:8px;font-size:13px">
+        <div><label style="${lbl}">Repartido entre productores</label><div style="font-weight:700">${escapeHtml(p.productorNombre || '')}</div></div>
+        ${adm ? `<div>Mano de obra del cartel entero: <b>${p.moMonto != null ? fmtMoney(p.moMonto) : '—'}</b></div>` : ''}
+        ${bloques}
+        ${p.prodLibres ? `<div style="color:#f59e0b;font-weight:800">Sin asignar: ${p.prodLibres} de ${cant}</div>` : ''}
+        ${sueltas.length ? `<div><div style="font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Otras fotos del cartel</div>${fotosHtml(sueltas)}</div>` : ''}
+        ${adm && prodPartesOnFront() ? `<div><button class="btn btn-cyan" data-ped-prod-repartir-d="${p.idx}" style="padding:5px 12px;font-size:12.5px">Repartir entre productores</button></div>` : ''}
+      </div></div>`;
+  }
   return `<div class="drawer-section"><h4>Producción</h4>
     <div style="display:flex;flex-direction:column;gap:8px;font-size:13px">
       ${adm ? `<div><label style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em">Productor</label>
@@ -26697,9 +27000,35 @@ function prodDrawerSection(p) {
         ? `<div><label style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em">Estado de producción</label><select data-ped-prod-estado="${p.idx}" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)">${['pendiente', 'en_armado', 'terminado'].map(k => `<option value="${k}" ${(est || 'pendiente') === k ? 'selected' : ''}>${PROD_ESTADO_LBL[k]}</option>`).join('')}</select>${p.prodTerminadoAt && est === 'terminado' ? `<div class="muted" style="font-size:12px;margin-top:3px">Terminado el ${prodFechaHora(p.prodTerminadoAt)}</div>` : ''}</div>`
         : `<div>Estado: <b style="color:${PROD_ESTADO_COLOR[est] || 'var(--fg)'}">${escapeHtml(PROD_ESTADO_LBL[est] || (p.productorId ? 'Asignado' : 'Sin asignar'))}</b>${p.prodTerminadoAt && est === 'terminado' ? ` <span class="muted" style="font-size:12px">· ${prodFechaHora(p.prodTerminadoAt)}</span>` : ''}</div>`}
       ${fotos.length ? `<div><div style="font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Fotos del cartel terminado</div><div style="display:flex;gap:6px;flex-wrap:wrap">${fotos.map(k => `<img src="${escapeHtml(mediaUrl(k))}" data-ped-prod-zoom="${escapeHtml(mediaUrl(k))}" style="width:74px;height:74px;object-fit:cover;border-radius:8px;cursor:zoom-in">`).join('')}</div></div>` : ''}
+      ${adm && cant >= 2 && prodPartesOnFront() && !p.prodPagadoAt ? `<div><button class="btn btn-ghost" data-ped-prod-repartir-d="${p.idx}" style="padding:5px 12px;font-size:12.5px">Repartir las ${cant} entre productores</button></div>` : ''}
     </div></div>`;
 }
 function bindProdDrawer(p) {
+  // Repartida: estado y pago POR PARTE; "Repartir" abre el modal (también en una línea normal de 2 o más).
+  document.querySelectorAll('[data-ped-parte-estado]').forEach(se => se.onchange = async () => {
+    const parteId = Number(se.dataset.pedParteEstado), x = (p.prodPartes || []).find(y => y.id === parteId) || {}, est = se.value;
+    let forzar = false;
+    if (est === 'terminado' && (x.fotos || []).length < Math.min(5, Math.max(1, x.unidades || 1))) {
+      if (!(await showConfirm(`${x.nombre || 'Esta parte'} tiene ${(x.fotos || []).length} de ${Math.min(5, x.unidades || 1)} fotos del cartel terminado. ¿Marcarla terminada igual?`, { title: 'Sin fotos', confirmLabel: 'Marcar igual', cancelLabel: 'Cancelar', variant: 'warn' }))) { openDrawerPedido(p.idx); return; }
+      forzar = true;
+    }
+    try {
+      const j = await prodFetch('/admin/prod/estado', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pedido_id: p.idx, parte_id: parteId, estado: est, forzar }) });
+      if (j.carteles) prodAplicarAPedidos(j.carteles);
+      toast((x.nombre ? x.nombre + ': ' : '') + PROD_ESTADO_LBL[est]);
+    } catch (e) { toast(e.message); }
+    if (STATE.view === 'pedidos') renderTablePedidos();
+    openDrawerPedido(p.idx);
+  });
+  document.querySelectorAll('[data-ped-parte-pagar]').forEach(b => b.onclick = async () => {
+    const [idS, si] = String(b.dataset.pedPartePagar).split('|'), u = prodUnidadesDe(p).find(x => x.parteId === Number(idS));
+    if (!u) return;
+    if (si === '1' && u.moMonto == null) { toast('Falta la mano de obra: completá tramos y medidas del cartel antes de pagarlo'); return; }
+    if (si === '1' && u.prodEstado !== 'terminado' && !(await showConfirm(`${u.nombre} todavía no marcó terminada su parte. ¿Marcarla pagada igual?`, { title: 'Pago de producción', confirmLabel: 'Seguir', cancelLabel: 'Cancelar', variant: 'warn' }))) return;
+    await prodPagarUnidades([u], si === '1'); openDrawerPedido(p.idx);
+  });
+  const rd = document.querySelector('[data-ped-prod-repartir-d]');
+  if (rd) rd.onclick = async () => { await prodRepartirPedido(p.idx); openDrawerPedido(p.idx); };
   const se = document.querySelector('[data-ped-prod-estado]');
   if (se) se.onchange = async () => {
     const est = se.value;
@@ -31866,7 +32195,7 @@ function pedidosSignature() {
   // + foto del diseño / estado del corte: si la foto se sube desde otro dispositivo (o Emma avanza la
   // matriz), el poll tiene que redibujar la tabla (badge "SIN FOTO").
   // + caja / 2do pago / comprobantes: el chip de caja de la tabla tiene que reflejar un cobro cargado desde otro lado.
-  return (STATE.pedidos || []).map(p => `${p.idx}:${p.estadoPago}:${p.estadoPedido}:${p.precio}:${p.precioDimmer}:${p.restante}:${p.disenoKey || ''}:${p.corteEstado || ''}:${p.caja || ''}:${p.caja2 || ''}:${p.cobro2 || 0}:${p.comprobanteKey || ''}:${p.comprobante2Key || ''}:${p.productorId || ''}:${p.prodEstado || ''}:${p.prodPagadoAt || ''}:${p.moMonto == null ? '' : p.moMonto}:${(p.prodFotos || []).length}:${p.origenEstado || ''}:${p.origenCanal || ''}:${p.canalAd || ''}`).join('|');
+  return (STATE.pedidos || []).map(p => `${p.idx}:${p.estadoPago}:${p.estadoPedido}:${p.precio}:${p.precioDimmer}:${p.restante}:${p.disenoKey || ''}:${p.corteEstado || ''}:${p.caja || ''}:${p.caja2 || ''}:${p.cobro2 || 0}:${p.comprobanteKey || ''}:${p.comprobante2Key || ''}:${p.productorId || ''}:${p.prodEstado || ''}:${p.prodPagadoAt || ''}:${p.moMonto == null ? '' : p.moMonto}:${(p.prodFotos || []).length}:${p.origenEstado || ''}:${p.origenCanal || ''}:${p.canalAd || ''}:${p.prodLibres || 0}:${(p.prodPartes || []).map(x => [x.id, x.unidades, x.estado, x.pagadoAt, x.moMonto, x.fotos.length, x.recibidoAt].join(',')).join(';')}`).join('|');
 }
 function startPedidosPolling() {
   if (STATE.pedidosPollTimer) return;
