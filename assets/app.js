@@ -2290,6 +2290,7 @@ function mapPedidoFromD1(row) {
     dimmer: row.dimer || 'NO',
     precioDimmer: row.precio_dimmer || 0,
     envio: row.envio || '',
+    entregaModo: row.entrega_modo || '',   // cómo se entrega (neón): retira | uber | encomienda | instalacion | '' (de antes)
     aclaracion: row.aclaracion || '',
     productor: row.productor || '',
     plataforma: row.plataforma || '',
@@ -6959,7 +6960,7 @@ function renderLogistica() {
 // despacho del tablero (POST /admin/neon/despacho): sale el pedido entero y el server lo frena si no está saldado.
 const LOGI_TAB_KEY = 'niventas.logiTab';
 const LOGI_NEON_DIAS_ENV = 14;   // enviados que se siguen viendo (como la columna Enviado del tablero)
-const LOGI_NEON_NO_ENVIO = ['Retira', 'Instalación', 'Sin Frontera'];   // no van por envío: no son de logística
+const LOGI_NEON_NO_ENVIO = ['Retira', 'Uber', 'Instalación', 'Sin Frontera'];   // no van por encomienda: no son de logística (retira y Uber los saca Neyen)
 function logiTabAct() {
   if (!STATE.logiTab) STATE.logiTab = logiLsGet(LOGI_TAB_KEY) || 'alumnos';
   return STATE.logiTab === 'neon' ? 'neon' : 'alumnos';
@@ -7024,7 +7025,7 @@ function logiNeonGrupos() {
     const viejo = enviar.slice().sort((a, b) => String(nkbDesde(a) || '9').localeCompare(String(nkbDesde(b) || '9')))[0] || null;
     return {
       id, numero: cs[0].numero, cs, envio, enviar: enviar.length > 0,
-      entrega: nkbEntrega({ sf: cs.some(c => c.sf), envio }),
+      entrega: nkbEntrega({ sf: cs.some(c => c.sf), envio, entrega_modo: (cs.find(c => c.entrega_modo) || {}).entrega_modo || '' }),
       // Carteles del pedido que todavía no están para enviar (en producción o esperando el pago): el pedido sale entero.
       faltan: Math.max(0, (Math.max(...cs.map(c => +c.grupo_n || 0)) || cs.length) - cs.length),
       // Igual que el chip del tablero: terminado por el productor pero sin "Llegó al taller".
@@ -7071,7 +7072,7 @@ function logiNeonHtml() {
   const pend = logiNeonPend(), env = logiNeonEnviados();
   const otros = logiNeonGrupos().filter(g => g.enviar && LOGI_NEON_NO_ENVIO.includes(g.entrega)).length;
   const pl = (n, s, p) => n + ' ' + (n === 1 ? s : p);
-  const tot = [pl(pend.length, 'pedido para enviar', 'pedidos para enviar'), otros ? pl(otros, 'retira o se instala (no va por envío)', 'retiran o se instalan (no van por envío)') : '',
+  const tot = [pl(pend.length, 'pedido para enviar', 'pedidos para enviar'), otros ? pl(otros, 'retira, va en Uber o se instala (no va por encomienda)', 'retiran, van en Uber o se instalan (no van por encomienda)') : '',
     pl(env.length, 'enviado', 'enviados') + ' en los últimos ' + LOGI_NEON_DIAS_ENV + ' días'].filter(Boolean).join(' · ');
   return `<div class="logi-wrap">${top}
     <div class="logi-tot">${escapeHtml(tot)}</div>
@@ -7962,7 +7963,9 @@ const NKB_COLOR = { confirmado: '#94a3b8', diseno: '#c4a0ff', montando: '#f59e0b
 const NKB_CORTO = { confirmado: 'Confirmado', diseno: 'Diseño y corte', montando: 'Montando', terminado: 'Terminado', pago: 'Esperando pago', enviar: 'Para enviar', enviado: 'Enviado' };
 const NKB_LARGO = { confirmado: 'Confirmado', diseno: 'En diseño y corte', montando: 'Montando neón', terminado: 'Terminado', pago: 'Esperando pago', enviar: 'Para enviar', enviado: 'Enviado' };
 const NKB_ROJO_DIAS = { confirmado: 2, diseno: 7, montando: 10, pago: 5, enviar: 3 };   // demorado después de N días en la etapa
-const NKB_DESPACHO = { envio: 'Salió por envío', retira: 'Retiró en el taller', instalacion: 'Instalado', sinfrontera: 'Entregado a Sin Frontera' };
+const NKB_DESPACHO = { envio: 'Salió por envío', retira: 'Retiró en el taller', uber: 'Salió en Uber', instalacion: 'Instalado', sinfrontera: 'Entregado a Sin Frontera' };
+// Chip de la entrega en Para enviar (lo que eligió el vendedor; en los de antes, lo que dice el texto de Envío).
+const NKB_ENTREGA_CHIP = { Retira: '🏠 Retira en el taller', Uber: '🚗 Uber', 'Envío': '📦 Encomienda', 'Instalación': '🔧 Instalación' };
 const NKB_TAB_KEY = 'niventas.nkbEtapaCel';
 const NKB_DIAS_ENV = 14;
 // Emma no: trabaja en Corte como siempre (Gaspar 16-oct). Lo que hace ahí mueve las tarjetas.
@@ -8078,7 +8081,7 @@ function nkbAccion(c) {
       return ((adm || yo === 'neyen') && !c.f.recibido) ? { t: 'Llegó al taller', a: 'recibido', to: 'pago' } : null;
     case 'pago': return (adm || c.mio) ? { t: 'Registrar 2do pago', a: 'pago', to: 'enviar' } : null;
     case 'enviar':
-      if (r === 'logistica' && ['Retira', 'Instalación', 'Sin Frontera'].includes(nkbEntrega(c))) return null;
+      if (r === 'logistica' && LOGI_NEON_NO_ENVIO.includes(nkbEntrega(c))) return null;
       return STATE.nkb && STATE.nkb.despacha ? { t: 'Marcar enviado', a: 'despacho', to: 'enviado' } : null;
     default: return null;
   }
@@ -8122,6 +8125,9 @@ function nkbUrg(c) {
 // Cómo sale (adivinado del texto de envío; lo define al final el botón de Neyen). '' = no ve la dirección.
 function nkbEntrega(c) {
   if (c.sf) return 'Sin Frontera';
+  // La que eligió el vendedor al registrar el 2do pago (Gaspar 26-oct). Si no hay (los de antes), sale del texto de Envío.
+  const EM = { retira: 'Retira', uber: 'Uber', encomienda: 'Envío', instalacion: 'Instalación' }, k = String(c.entrega_modo || '');
+  if (Object.prototype.hasOwnProperty.call(EM, k)) return EM[k];
   if (c.envio == null) return '';
   const e = String(c.envio || '').toUpperCase();
   if (/RETIR|BUSCA|TALLER|LOCAL/.test(e)) return 'Retira';
@@ -8145,7 +8151,7 @@ function nkbChips(c, ficha) {
   else if (c.etapa === 'terminado' && c.grupo_n > c.grupo_term) { const f = c.grupo_n - c.grupo_term; ch.push(P('a', f === 1 ? 'Espera al otro cartel' : 'Espera a ' + f + ' carteles más')); }
   if (['terminado', 'pago', 'enviar'].includes(c.etapa) && c.motivo !== 'estado' && (c.prod_estado === 'terminado' || c.etapa === 'terminado')) { if (rep) c.partes.forEach(p => ch.push(PP(p))); else if (c.f.recibido) ch.push(P('v', 'En el taller')); else ch.push(P('a', pr ? 'Falta traer de ' + pr : 'Falta traerlo al taller')); }
   if (!rep && nkbRol() === 'admin' && pr && c.prod_estado !== 'terminado' && ['pago', 'enviar', 'enviado'].includes(c.etapa)) ch.push(P('a', pr + ' no lo marcó terminado'));
-  if (c.etapa === 'enviar') { const e = nkbEntrega(c); if (e && !c.sf) ch.push(P(e === 'Entrega sin definir' ? 'a' : 'g', e)); }
+  if (c.etapa === 'enviar') { const e = nkbEntrega(c); if (e && !c.sf) ch.push(P(e === 'Entrega sin definir' ? 'a' : 'g', (c.entrega_modo && NKB_ENTREGA_CHIP[e]) || e)); }
   if (c.etapa === 'enviado' && c.despacho) ch.push(P('g', NKB_DESPACHO[c.despacho.modo] || 'Salió'));
   if (c.sf) ch.push(P('g', 'Sin Frontera'));
   if (c.cantidad > 1) ch.push(P('a', c.cantidad + ' unidades' + (rep ? ' · ' + c.partes.length + (c.partes.length === 1 ? ' productor' : ' productores') : '')));
@@ -8650,7 +8656,7 @@ function nkbFichaHtml(c) {
     : c.productor ? c.productor + ' · ' + ({ pendiente: 'sin empezar', en_armado: 'armando', terminado: 'terminado' }[c.prod_estado] || c.prod_estado || '') : '';
   const salida = c.despacho ? (NKB_DESPACHO[c.despacho.modo] || 'Salió') + (c.despacho.transporte ? ' · ' + c.despacho.transporte : '') + (c.despacho.seguimiento ? ' · ' + c.despacho.seguimiento : '') : '';
   const datos = [fila('Medida', c.medida), fila('Cantidad', c.cantidad > 1 ? c.cantidad + ' unidades' : '1'), fila('Colores', c.colores), fila('Base', c.base), fila('Dimmer', c.dimer), fila('Tipo', c.tipo),
-    fila('Aclaración', c.aclaracion), fila('Vendedor', c.vendedor), r === 'logistica' ? '' : fila('Acrílico', corteTxt), fila(rep ? 'Productores' : 'Productor', prodTxt), fila('Envío', c.envio), fila('Salida', salida),
+    fila('Aclaración', c.aclaracion), fila('Vendedor', c.vendedor), r === 'logistica' ? '' : fila('Acrílico', corteTxt), fila(rep ? 'Productores' : 'Productor', prodTxt), fila('Entrega', c.entrega_modo ? entregaTxt(c.entrega_modo) : ''), fila('Envío', c.envio), fila('Salida', salida),
     (adm && c.piso) ? fila('Ubicado a mano', (NKB_LARGO[c.piso.etapa] || c.piso.etapa) + (c.piso.motivo ? ' · ' + c.piso.motivo : '') + (c.piso.por ? ' · ' + c.piso.por : '')) : ''].join('');
   const herm = nkbGrupo(c).filter(x => x.id !== c.id);
   const hermHtml = herm.length ? `<div class="lb-tit">Otros carteles del pedido</div><div class="sfk-ent-lista">${herm.map(x => `<button type="button" class="sfk-ent" data-nkb-ir="${x.id}"><span class="n">${escapeHtml(x.cartel || 'Sin nombre')}</span><span class="f" style="color:${NKB_COLOR[x.etapa]}">${escapeHtml(NKB_CORTO[x.etapa])}</span></button>`).join('')}</div>` : '';
@@ -8909,10 +8915,13 @@ function nkbAbrirPedido(c) {
 async function nkbDespacho(c, forzar) {
   const logi = nkbRol() === 'logistica';
   if (forzar && !(await showConfirm(`${nkbTit(c)} está en ${NKB_LARGO[c.etapa]}, no en Para enviar. ¿Marcarlo enviado igual? (Si no está saldado no sale igual.)`, { title: 'Marcar enviado', confirmLabel: 'Sí', cancelLabel: 'No' }))) return;
-  const modos = logi ? ['envio'] : (c.sf ? ['sinfrontera', 'envio', 'retira', 'instalacion'] : ['envio', 'retira', 'instalacion']);
+  const base = logi ? ['envio'] : (c.sf ? ['sinfrontera', 'envio', 'retira', 'uber', 'instalacion'] : ['envio', 'retira', 'uber', 'instalacion']);
+  // Primero la salida que corresponde a la entrega que eligió el vendedor.
+  const PREF = { encomienda: 'envio', retira: 'retira', uber: 'uber', instalacion: 'instalacion' }, pref = Object.prototype.hasOwnProperty.call(PREF, String(c.entrega_modo || '')) ? PREF[c.entrega_modo] : '';
+  const modos = (pref && base.includes(pref)) ? [pref, ...base.filter(x => x !== pref)] : base;
   const v = await nkbModal({
     titulo: '¿Cómo salió ' + nkbTit(c) + '?',
-    cuerpo: `${c.envio ? `<div class="sf-dato" style="margin-bottom:8px"><span>Envío</span><b>${escapeHtml(c.envio)}</b></div>` : ''}${c.grupo_n > 1 ? `<div style="font-size:12.5px;color:var(--fg-mute);margin-bottom:8px">Sale el pedido entero (${c.grupo_n} carteles).</div>` : ''}
+    cuerpo: `${c.entrega_modo ? `<div class="sf-dato" style="margin-bottom:8px"><span>Entrega</span><b>${escapeHtml(entregaTxt(c.entrega_modo))}</b></div>` : ''}${c.envio ? `<div class="sf-dato" style="margin-bottom:8px"><span>Envío</span><b>${escapeHtml(c.envio)}</b></div>` : ''}${c.grupo_n > 1 ? `<div style="font-size:12.5px;color:var(--fg-mute);margin-bottom:8px">Sale el pedido entero (${c.grupo_n} carteles).</div>` : ''}
       <label class="nc-field"><span class="nc-label">Transporte (si salió por envío)</span><input class="nc-input" data-f="transporte" maxlength="80" placeholder="Andreani, Vía Cargo, moto…"></label>
       <label class="nc-field" style="margin-top:8px"><span class="nc-label">Seguimiento (opcional)</span><input class="nc-input" data-f="seguimiento" maxlength="120"></label>`,
     botones: [...modos.map(m => ({ v: m, t: NKB_DESPACHO[m], cls: 'btn-cyan' })), { v: '__no', t: 'Cancelar' }],
@@ -14821,6 +14830,12 @@ function pmValidate() {
     const _tot = (m.carteles || []).reduce((s, c) => s + (Number(c.precio) || 0) + (Number(c.precioDimmer) || 0), 0);
     if (_tot > 0 && Number(m.pagado) < _tot - 1) invalid.push({ id:'pm-estadopago', msg:'"2do pago" es si pagó el total. Si dejó seña, poné "1er pago" y el saldo se registra después' });
   }
+  // Pagó todo de una: también cómo se entrega (Uber y encomienda, con la dirección completa en el Envío de un cartel de neón).
+  if (m.estadoPago === '2do pago' && pmHayNeon(m)) {
+    const neon = named.filter(x => !x.c.es_corporeo);
+    if (!entregaValida(m.entregaModo)) invalid.push({ sel:'[data-pmc-entrega-row]', msg:'Pagó todo: elegí cómo se entrega' });
+    else if (ENTREGA_CON_DIR.includes(m.entregaModo) && neon.length && !neon.some(x => entregaDatosOk(x.c.envio))) invalid.push({ id:`pm-envio-${neon[0].i}`, msg:'Para Uber o encomienda poné la dirección completa en "Envío"' });
+  }
   return invalid;
 }
 function pmInvalidEl(it) { return it.id ? document.getElementById(it.id) : document.querySelector('#pm-backdrop ' + it.sel); }
@@ -14840,6 +14855,7 @@ async function confirmCargarPedido() {
   if (STATE.pedidoModalSaving) return;
   readPedidoModalDOM();
   const m = STATE.pedidoModal;
+  pmEntregaRefresh(m);
   // El origen se calcula con teléfono + carteles + medidas: si cambió algo (o sigue buscando), esperar el resultado.
   try { await pmTraceAd(); } catch (_) {}
   if (STATE.pedidoModal !== m) return;
@@ -14876,6 +14892,8 @@ async function confirmCargarPedido() {
       // UTC, que de noche en ART ya es el día siguiente → el pedido quedaba fechado un día después.
       fecha: localDateKey(new Date()),
       plataforma: m.plataforma, telefono: m.telefono, estado_pago: m.estadoPago, pagado: m.pagado, ad: '',
+      // Pagó todo de una: cómo se entrega el neón (el server la guarda solo si queda en '2do pago').
+      entrega_modo: (m.estadoPago === '2do pago' && pmHayNeon(m) && entregaValida(m.entregaModo)) ? m.entregaModo : '',
       // ORIGEN: lo calcula el worker al guardar (resolverOrigenPedido). Solo viaja lo que se eligió a mano cuando no había
       // prueba (o Gaspar lo cambió): el vendedor → queda a confirmar; Gaspar → confirmado (+ campaña si es un anuncio).
       origen_canal: (m.origen && (m.origen.estado !== 'auto' || m.origenCambiar)) ? (m.origenElegido || '') : '',
@@ -14922,6 +14940,7 @@ async function confirmCargarPedido() {
     STATE.pedidoModalSaving = false;
     render();
     toast(`Pedido #${j.numero} cargado ✓ (${nuevos.length} cartel${nuevos.length>1?'es':''})`);
+    if (j.aviso_entrega) niToast(j.aviso_entrega, { error: true, ms: 9000 });
     if (m.pagoMetodo === 'pendiente' && isAdmin() && nuevos[0] && nuevos[0].cobrarEl) niToast(`Cargado sin pago: te recuerdo cobrarlo el ${nuevos[0].cobrarEl.slice(8, 10)}/${nuevos[0].cobrarEl.slice(5, 7)} por WhatsApp`);
     // Cliente Sin Frontera (solo admin): lo ven en su usuario, "Mis pedidos". El server ya lo vinculó en el alta
     // (sf_vinculado); si no (worker viejo o falló), se reintenta como antes.
@@ -15282,6 +15301,7 @@ function pmPagoBlockHtml(m) {
         <div style="flex:1;min-width:110px"><label style="${PM_LBL}">Restante (auto)</label><div style="${PM_INP};opacity:.7;display:flex;align-items:center;min-height:36px"><span id="pm-restante">${fmtMoney(restante)}</span></div></div>
       </div>
       <div data-pmc-pagado-hint style="font-size:11px;margin-top:5px">${pmPagadoHintHtml(m)}</div>
+      ${pmEntregaWrapHtml(m)}
     </div>`;
 }
 // Pedido SIN PAGO (solo admin, Gaspar 16-oct: "un cliente frecuente que me paga en unos días pero quiero cargarlo
@@ -15358,6 +15378,12 @@ function bindPmPagoBlock(root, parcial) {
   deRoot('[data-pmc-caja]').forEach(b => b.onclick = () => pmSetCaja(b.getAttribute('data-pmc-caja')));
   deRoot('#pm-cobrar-el').forEach(el => { const h = () => { const m = STATE.pedidoModal; if (!m) return; m.cobrarEl = el.value; if (m._validated) pmApplyMarks(pmValidate()); }; el.addEventListener('input', h); el.addEventListener('change', h); });
   deRoot('[data-pmc-usar-monto]').forEach(b => b.onclick = pmUsarMontoOcr);
+  deRoot('[data-pmc-entrega-opc]').forEach(b => b.onclick = () => {
+    const m = STATE.pedidoModal; if (!m) return;
+    m.entregaModo = b.getAttribute('data-pmc-entrega-opc');
+    pmEntregaRefresh(m);
+    if (m._validated) { readPedidoModalDOM(); pmApplyMarks(pmValidate()); }
+  });
   bindCompPicker(root, 'pmc', {
     archivo: (f) => pmCompSetArchivo(f),
     sugerida: (k) => pmCompUsarSugerida(k),
@@ -15372,7 +15398,7 @@ function bindPmPagoBlock(root, parcial) {
   const pag = deRoot('#pm-pagado')[0];
   if (pag) { if (parcial) pag.addEventListener('input', pmRecalc); pag.addEventListener('input', pmPagadoInput); }
   const est = deRoot('#pm-estadopago')[0];
-  if (est) est.addEventListener('change', () => { const m = STATE.pedidoModal; if (!m) return; m._estadoManual = true; readPedidoModalDOM(); pmPagoHintRefresh(m); });
+  if (est) est.addEventListener('change', () => { const m = STATE.pedidoModal; if (!m) return; m._estadoManual = true; readPedidoModalDOM(); pmPagoHintRefresh(m); pmEntregaRefresh(m); });
   if (parcial) deRoot('input, select').forEach(el => {
     const h = () => { const m = STATE.pedidoModal; if (!m || !m._validated) return; readPedidoModalDOM(); pmApplyMarks(pmValidate()); };
     el.addEventListener('input', h); el.addEventListener('change', h);
@@ -15388,6 +15414,14 @@ function pmPagoReemplazar(m, sel, html) {
   bindPmPagoBlock(nuevo, true);
   return nuevo;
 }
+// Entrega en Cargar pedido: solo si pagó todo de una ('2do pago') y hay algún cartel de neón. Uber y encomienda llevan la
+// dirección completa en el Envío de un cartel.
+function pmHayNeon(m) { return (m.carteles || []).some(c => !c.es_corporeo && String(c.cartel || '').trim()); }
+function pmEntregaWrapHtml(m) {
+  const ver = m.estadoPago === '2do pago' && pmHayNeon(m);
+  return `<div data-pmc-entrega>${ver ? `<div style="margin-top:10px"><label style="${PM_LBL}">¿Cómo se entrega? * <span style="opacity:.6;text-transform:none;letter-spacing:0">— pagó todo${ENTREGA_CON_DIR.includes(m.entregaModo) ? ': la dirección completa va en "Envío"' : ''}</span></label><div data-pmc-entrega-row style="border:1px solid var(--border);border-radius:var(--r-sm);padding:4px">${entregaBotonesHtml(m.entregaModo, 'data-pmc-entrega-opc')}</div></div>` : ''}</div>`;
+}
+function pmEntregaRefresh(m) { if (m && pmModalVivo(m)) pmPagoReemplazar(m, '[data-pmc-entrega]', pmEntregaWrapHtml(m)); }
 function pmPagoHintRefresh(m) {
   if (!m || !pmModalVivo(m)) return;
   const h = document.querySelector('#pm-backdrop [data-pmc-pagado-hint]'); if (!h) return;
@@ -15427,6 +15461,7 @@ function pmPagoAutoEstado(m) {
   if (m.estadoPago === want) return;
   m.estadoPago = want;
   if (pmModalVivo(m)) { const sel = document.getElementById('pm-estadopago'); if (sel) sel.value = want; }
+  pmEntregaRefresh(m);
 }
 function pmSetMetodo(v) {
   const m = STATE.pedidoModal; if (!m) return;
@@ -15725,6 +15760,63 @@ async function pedPagoSelectChange(idx, sel) {
   }
 }
 
+// ----- Cómo se entrega un pedido de NEÓN (Gaspar 26-oct) -----
+// Lo elige el vendedor al registrar el 2do pago (o al cargar un pedido que pagó todo). Retira y Uber los saca Neyen del taller
+// (logística no los ve); la encomienda la despacha Siempre a Tiempo (pestaña Producción neón de logística); instalación, nosotros.
+// Los corpóreos todavía no lo usan.
+const ENTREGA_OPC = [
+  ['retira', '🏠', 'Retira en el taller', 'Lo entrega Neyen'],
+  ['uber', '🚗', 'Uber / auto de aplicación', 'Capital y alrededores · lo manda Neyen'],
+  ['encomienda', '📦', 'Encomienda al interior', 'La despacha Siempre a Tiempo'],
+  ['instalacion', '🔧', 'Instalación', 'Lo instalamos nosotros'],
+];
+const ENTREGA_CON_DIR = ['uber', 'encomienda'];   // llevan la dirección completa
+function entregaValida(v) { return ENTREGA_OPC.some(o => o[0] === v); }
+function entregaTxt(v) { const o = ENTREGA_OPC.find(x => x[0] === v); return o ? o[1] + ' ' + o[2] : ''; }
+function entregaDatosOk(s) {
+  const t = String(s || '');
+  return t.replace(/\s+/g, '').length >= 10 && /\d/.test(t) && !/\bretir|\bbusca\b|\btaller\b|\blocal\b|coordin/i.test(t);
+}
+// Los cuatro botones (modal del 2do pago y Cargar pedido). attr = el data-* de cada botón.
+function entregaBotonesHtml(sel, attr) {
+  return `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:6px">${ENTREGA_OPC.map(([v, ic, t, sub]) => `<button type="button" ${attr}="${v}" style="text-align:left;padding:8px 10px;border:1px solid;border-radius:var(--r-sm);cursor:pointer;${pmOBtn(sel === v)}"><div style="font-size:13px;font-weight:600">${ic} ${escapeHtml(t)}</div><div style="font-size:11px;opacity:.75;margin-top:2px">${escapeHtml(sub)}</div></button>`).join('')}</div>`;
+}
+// Ficha del pedido: cómo se entrega, con "Cambiar" (vendedor del pedido o Gaspar) hasta que sale.
+function entregaDrawerSection(p) {
+  if (!p || p.esCorporeo || /^cuenta corriente$/i.test(String(p.estadoPago || ''))) return '';
+  const hs = (pedidoHermanos(p) || []).filter(x => !x.esCorporeo), herm = hs.length ? hs : [p];
+  const modo = (herm.find(x => x.entregaModo) || {}).entregaModo || '';
+  const salio = herm.some(x => /^entregad/i.test(String(x.estadoPedido || '')));
+  const txt = modo ? `<b>${escapeHtml(entregaTxt(modo))}</b>` : `<span style="color:var(--fg-subtle)">Sin elegir${p.estadoPago === '2do pago' ? '' : ' · se elige al registrar el 2do pago'}</span>`;
+  return `<div class="drawer-section" data-ped-entrega-idx="${p.idx}"><h4>🚚 Entrega</h4><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:13px">${txt}${canCotizar() && !salio ? `<button class="btn btn-ghost" style="font-size:12px;padding:4px 10px" onclick="pedEntregaCambiar(${p.idx})">${modo ? 'Cambiar' : 'Elegir'}</button>` : ''}</div></div>`;
+}
+async function pedEntregaCambiar(idx) {
+  const p = (STATE.pedidos || []).find(x => x.idx === idx); if (!p) return;
+  const hs = (pedidoHermanos(p) || []).filter(x => !x.esCorporeo), herm = hs.length ? hs : [p];
+  const actual = (herm.find(x => x.entregaModo) || {}).entregaModo || '';
+  const envio0 = herm.map(x => String(x.envio || '').trim()).filter(entregaDatosOk).sort((a, b) => b.length - a.length)[0] || '';
+  const v = await nkbModal({
+    titulo: 'Cómo se entrega · #' + (p.numero || ''),
+    cuerpo: `<div style="font-size:12.5px;color:var(--fg-mute);margin-bottom:10px">Retira y Uber le aparecen a Neyen. La encomienda, a logística (Siempre a Tiempo).</div>
+      <label class="nc-field"><span class="nc-label">Datos de envío (para Uber o encomienda)</span><textarea class="nc-input" data-f="datos" rows="3" placeholder="Quién recibe, DNI, calle y número, localidad, provincia, CP y teléfono">${escapeHtml(envio0)}</textarea></label>`,
+    botones: [...ENTREGA_OPC.map(([v0, ic, t]) => ({ v: v0, t: ic + ' ' + t, cls: v0 === actual ? 'btn-cyan' : 'btn-ghost' })), { v: '__no', t: 'Cancelar' }],
+    validar: (b, fx) => (ENTREGA_CON_DIR.includes(b) && !entregaDatosOk(fx.datos)) ? 'Para Uber o encomienda poné la dirección completa' : '',
+  });
+  if (!v) return;
+  const datos = String(v.f.datos || '').trim();
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/pedidos/' + idx + '/entrega', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ entrega: v.b, datos_envio: (ENTREGA_CON_DIR.includes(v.b) && datos !== envio0) ? datos : '' }) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
+    const upd = (j.pedidos || []).map(mapPedidoFromD1);
+    if (upd.length) { const ids = new Set(upd.map(x => x.idx)); STATE.pedidos = STATE.pedidos.filter(x => !ids.has(x.idx)).concat(upd); }
+    if (document.getElementById('table-pedidos')) renderTablePedidos();
+    openDrawerPedido(idx);
+    niToast('Entrega: ' + entregaTxt(v.b) + ' ✓');
+  } catch (e) { niToast('No se pudo cambiar la entrega: ' + e.message, { error: true }); }
+}
+
 // ----- Modal "Registrar 2do pago" -----
 // Autónomo (colgado del body como los .modal-bg, z 300): anda con el drawer abierto desde Pedidos, el Dashboard o
 // Rendimiento, y desde el chat ("Usar como comprobante"). El 2do pago es UNO por pedido (todas las filas-cartel del
@@ -15761,8 +15853,13 @@ function abrirSegundoPago(idx, opts) {
     modo: opts.modo === 'sena' ? 'sena' : 'saldo',
     importe: (opts.modo !== 'sena' && saldo > 0) ? String(Math.round(saldo)) : '', importeFuente: (opts.modo !== 'sena' && saldo > 0) ? 'saldo' : '',
     extras: [], extraAbierto: false, extraSubiendo: false, extraTok: 0,
+    // Entrega (neón): se elige acá mismo. Viene puesta si el pedido ya la tenía; los datos de envío, del texto de Envío.
+    conEntrega: herm.some(x => !x.esCorporeo),
+    entrega: (() => { const ms = [...new Set(herm.filter(x => !x.esCorporeo).map(x => x.entregaModo || ''))]; return (ms.length === 1 && entregaValida(ms[0])) ? ms[0] : ''; })(),
+    datosEnvio: herm.filter(x => !x.esCorporeo).map(x => String(x.envio || '').trim()).filter(entregaDatosOk).sort((a, b) => b.length - a.length)[0] || '',
     validado: false, enviando: false, err: '', errTipo: '', cerrado: false, bg: null, cerrar: null
   };
+  st.datosEnvio0 = st.datosEnvio;   // para mandar los datos de envío solo si los cambió
   if (opts.comp && opts.comp.key) st.comp = { key: String(opts.comp.key), wamid: String(opts.comp.wamid || ''), tipo: opts.comp.tipo || compTipoDeKey(opts.comp.key) || 'image', nombre: opts.comp.nombre || '', preview: '', ocr: null };
   const bg = document.createElement('div');
   bg.className = 'modal-bg'; bg.id = 'sp2-modal';
@@ -15894,6 +15991,20 @@ function sp2AvisosHtml(st) {
   if (imp > 0 && !(st.saldo > 0)) out.push({ c: '#FFB020', t: '⚠ Según el sistema este pedido ya no tiene saldo pendiente' });
   return out.map(a => `<div style="font-size:12px;color:${a.c};margin-top:4px">${escapeHtml(a.t)}</div>`).join('');
 }
+function sp2PideEntrega(st) {
+  if (!st.conEntrega) return false;
+  if (st.modo !== 'sena') return true;
+  const imp = Number(st.importe) || 0;
+  return imp > 0 && st.total - (st.sena + imp) - (st.cobro2Prev || 0) <= 1;
+}
+function sp2EntregaHtml(st) {
+  const dir = ENTREGA_CON_DIR.includes(st.entrega);
+  return `<div style="margin-top:14px;padding-top:12px;border-top:1px dashed var(--border)">
+      <label style="${PM_LBL}">¿Cómo se entrega? *</label>
+      <div data-sp2-entrega-row style="border:1px solid var(--border);border-radius:var(--r-sm);padding:4px">${entregaBotonesHtml(st.entrega, 'data-sp2-entrega-opc')}</div>
+      ${dir ? `<div style="margin-top:10px"><label style="${PM_LBL}">Datos de envío *</label><textarea data-sp2-datos rows="3" placeholder="${st.entrega === 'uber' ? 'Dirección completa y teléfono de quien recibe' : 'Quién recibe, DNI, calle y número, localidad, provincia, CP y teléfono'}" style="${PM_INP};resize:vertical;min-height:64px">${escapeHtml(st.datosEnvio)}</textarea></div>` : ''}
+    </div>`;
+}
 function sp2Html(st) {
   const ef = st.metodo === 'efectivo';
   const cajaSena = (st.p && st.p.caja) || '';
@@ -15920,6 +16031,7 @@ function sp2Html(st) {
     <div style="margin-bottom:4px"><label style="${PM_LBL}">${st.modo === 'sena' ? (ef ? 'Importe en efectivo que se suma a la seña *' : 'Importe que se suma a la seña *') : (ef ? 'Importe en efectivo *' : (st.sinPago ? 'Importe pagado *' : 'Importe del 2do pago *'))}</label><input data-sp2-importe type="number" inputmode="numeric" value="${escapeHtml(String(st.importe || ''))}" placeholder="$" style="${PM_INP}"></div>
     <div data-sp2-hint style="font-size:11px">${sp2HintHtml(st)}</div>
     <div data-sp2-avisos>${sp2AvisosHtml(st)}</div>
+    ${sp2PideEntrega(st) ? sp2EntregaHtml(st) : ''}
     ${st.origen === 'chat' && st.modo !== 'sena' ? '<button type="button" data-sp2-nuevo style="background:none;border:0;padding:6px 0 0;color:var(--accent-cyan,#8FD4DE);text-decoration:underline;cursor:pointer;font-size:12px">¿No es el saldo de este pedido? Cargarlo como pedido nuevo →</button>' : ''}
     ${st.err ? `<div style="margin-top:10px;font-size:12px;color:#FF5566;font-weight:600">${escapeHtml(st.err)}</div>` : ''}`;
 }
@@ -15930,11 +16042,14 @@ function sp2Pintar(st) {
   if (st.errTipo === 'val') { st.err = sp2Validar(st).map(x => x.msg).join(' · '); if (!st.err) st.errTipo = ''; }
   const ae = document.activeElement;
   const enImporte = !!(ae && body.contains(ae) && ae.hasAttribute && ae.hasAttribute('data-sp2-importe'));
+  const enDatos = !!(ae && body.contains(ae) && ae.hasAttribute && ae.hasAttribute('data-sp2-datos'));
+  const selDatos = enDatos ? [ae.selectionStart, ae.selectionEnd] : null;
   const top = body.scrollTop;
   body.innerHTML = sp2Html(st);
   body.scrollTop = top;
   sp2Bind(st, body);
   if (enImporte) { const ni = body.querySelector('[data-sp2-importe]'); if (ni) { try { ni.focus({ preventScroll: true }); } catch (_) { ni.focus(); } } }
+  if (enDatos) { const nd = body.querySelector('[data-sp2-datos]'); if (nd) { try { nd.focus({ preventScroll: true }); nd.setSelectionRange(selDatos[0], selDatos[1]); } catch (_) {} } }
   sp2Marcas(st);
   const ok = st.bg.querySelector('[data-sp2-ok]');
   if (ok) { ok.disabled = !!st.enviando; ok.textContent = st.enviando ? 'Guardando…' : '✓ ' + sp2Titulo(st); }
@@ -15949,7 +16064,9 @@ function sp2Bind(st, body) {
   body.querySelectorAll('[data-sp2-caja]').forEach(b => b.onclick = () => { st.caja = b.getAttribute('data-sp2-caja'); st.cajaManual = true; st.cajaDeOcr = false; sp2Pintar(st); });
   const imp = body.querySelector('[data-sp2-importe]');
   if (imp) imp.addEventListener('input', () => {
+    const pedia = sp2PideEntrega(st);
     st.importe = imp.value; st.importeFuente = String(imp.value || '').trim() ? 'manual' : '';
+    if (sp2PideEntrega(st) !== pedia) { sp2Pintar(st); return; }
     sp2AvisosRefresh(st);
     if (st.validado) sp2Marcas(st);
   });
@@ -15971,6 +16088,14 @@ function sp2Bind(st, body) {
     buscar: () => sp2CargarSug(st, true)
   });
   sp2BindExtras(st, body);
+  body.querySelectorAll('[data-sp2-entrega-opc]').forEach(b => b.onclick = () => {
+    st.entrega = b.getAttribute('data-sp2-entrega-opc');
+    sp2Pintar(st);
+    const ta = ENTREGA_CON_DIR.includes(st.entrega) ? st.bg.querySelector('[data-sp2-datos]') : null;
+    if (ta && !entregaDatosOk(ta.value)) { try { ta.focus(); } catch (_) {} }
+  });
+  const datos = body.querySelector('[data-sp2-datos]');
+  if (datos) datos.addEventListener('input', () => { st.datosEnvio = datos.value; if (st.validado) sp2Marcas(st); });
 }
 function sp2AvisosRefresh(st) {
   if (!sp2Vivo(st)) return;
@@ -15997,6 +16122,10 @@ function sp2Validar(st) {
   if (!(Number(st.importe) > 0)) out.push({ sel: '[data-sp2-importe]', msg: st.modo === 'sena' ? 'Poné el importe que se suma a la seña' : 'Poné el importe del 2do pago' });
   // Sumar a la seña: el comprobante de arriba lleva lo que falta para llegar al importe (no puede quedar en cero).
   else if (st.modo === 'sena' && st.metodo !== 'efectivo' && st.extras.length && Math.round(Number(st.importe)) - compExtrasSuma(st.extras) <= 0) out.push({ sel: '[data-sp2-importe]', msg: 'El importe tiene que ser la suma de los comprobantes' });
+  if (sp2PideEntrega(st)) {
+    if (!entregaValida(st.entrega)) out.push({ sel: '[data-sp2-entrega-row]', msg: 'Elegí cómo se entrega' });
+    else if (ENTREGA_CON_DIR.includes(st.entrega) && !entregaDatosOk(st.datosEnvio)) out.push({ sel: '[data-sp2-datos]', msg: 'Faltan los datos de envío (dirección completa)' });
+  }
   return out;
 }
 function sp2Marcas(st) {
@@ -16114,7 +16243,9 @@ async function sp2Confirmar(st) {
     comprobante_key: ef ? '' : st.comp.key,
     comprobante_wamid: ef ? '' : (st.comp.wamid || ''),
     // Pedido cargado sin pago: este es el 1er cobro (el server no lo registra dos veces si se reintenta).
-    ...(st.sinPago ? { primer_cobro: true } : {})
+    ...(st.sinPago ? { primer_cobro: true } : {}),
+    // Entrega (neón): los datos de envío viajan solo si los cambió (reemplazan el texto de Envío del pedido).
+    ...(sp2PideEntrega(st) ? { entrega: st.entrega, datos_envio: (ENTREGA_CON_DIR.includes(st.entrega) && String(st.datosEnvio || '').trim() !== st.datosEnvio0) ? String(st.datosEnvio || '').trim() : '' } : {})
   };
   // Pagó con varias transferencias: los comprobantes de más (el importe ya es la suma).
   if (!ef) body.comprobantes_extra = st.extras.map(e => ({ key: e.key, wamid: e.wamid || '', monto: Math.round(Number(e.monto) || 0) }));
@@ -16145,7 +16276,7 @@ async function sp2Confirmar(st) {
   const enDrawer = secP ? parseInt(secP.getAttribute('data-ped-pagos-idx'), 10) : NaN;
   if (secP && (enDrawer === st.idx || updated.some(x => x.idx === enDrawer))) openDrawerPedido(enDrawer);
   const avisos = Array.isArray(j.avisos) ? j.avisos.filter(Boolean) : [];
-  niToast(`${st.modo === 'sena' ? 'Seña actualizada' : ((st.sinPago || j.primer_cobro) ? 'Pago registrado' : '2do pago registrado')} ✓ · #${j.numero || st.numero}` + (avisos.length ? ' — ' + avisos.join(' · ') : ''), { ms: avisos.length ? 9000 : 3000 });
+  niToast(`${st.modo === 'sena' ? 'Seña actualizada' : ((st.sinPago || j.primer_cobro) ? 'Pago registrado' : '2do pago registrado')} ✓ · #${j.numero || st.numero}` + ((sp2PideEntrega(st) && st.entrega) ? ' · ' + entregaTxt(st.entrega) : '') + (avisos.length ? ' — ' + avisos.join(' · ') : ''), { ms: avisos.length ? 9000 : 3000 });
 }
 
 // ----- Agilidad desde el chat -----
@@ -17951,6 +18082,7 @@ function openDrawerPedido(idx) {
       ${disenoDrawerSection(p)}
       ${prodDrawerSection(p)}${sfDrawerSection(p)}
       ${pagosDrawerSection(p)}
+      ${entregaDrawerSection(p)}
       <div class="drawer-section">
         <h4>Estado, pago y productor ${hermanos.length>1?`<span style="font-size:11px;color:var(--fg-subtle);font-weight:400">· aplica a los ${hermanos.length} carteles</span>`:''}</h4>
         <div style="display:flex;flex-direction:column;gap:10px">
