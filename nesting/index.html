@@ -843,7 +843,8 @@ function prepararNest() {
       it.huecos.push(pz.simpleHuecos[k]);
     });
   }
-  return { cfg: { ...cfg }, nest, grandes, recs, conDibujo };
+  S.huecosConDibujo = conDibujo;
+  return { cfg: { ...cfg }, nest, grandes, recs };
 }
 // Material de la pieza: el contorno menos sus cortes de adentro (con piezas metidas en huecos, contar el contorno entero las
 // sumaría dos veces).
@@ -869,7 +870,7 @@ function crearWorkers(nest, cfgW) {
   }
 }
 function iniciar(seguir) {
-  const { cfg, nest, grandes, recs, conDibujo } = prepararNest();
+  const { cfg, nest, grandes, recs } = prepararNest();
   S.grandes = grandes;
   $('sec-resultado').hidden = false;
   if (!nest.length) { S.mejor = null; pintarResultado(); return; }
@@ -884,7 +885,8 @@ function iniciar(seguir) {
   S.workers.forEach((w, i) => w.postMessage({ tipo: 'correr', semilla: S.ronda * 100 + i + 1, segundos: cfg.seg, base, nuevo: !seguir }));
   if (S.timer) clearInterval(S.timer);
   S.timer = setInterval(pintarEstado, 250);
-  $('cfg-nota').textContent = conDibujo ? `${conDibujo === 1 ? 'Un hueco tiene' : conDibujo + ' huecos tienen'} calados, agujeros o líneas dibujados adentro: no se ${conDibujo === 1 ? 'usa' : 'usan'} para meter piezas (la fresa las cortaría).` : '';
+  const nd = S.huecosConDibujo; // huecos que no se usan por tener dibujos adentro (prepararNest)
+  $('cfg-nota').textContent = nd ? `${nd === 1 ? 'Un hueco tiene' : nd + ' huecos tienen'} calados, agujeros o líneas dibujados adentro: no se ${nd === 1 ? 'usa' : 'usan'} para meter piezas (la fresa las cortaría).` : '';
   pintarResultado();
 }
 function alMensaje(m) {
