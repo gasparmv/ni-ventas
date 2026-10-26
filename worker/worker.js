@@ -21608,15 +21608,24 @@ async function ensureSinFronteraSchema(env) {
   // Edición (22-oct, migración 063): quién y cuándo lo cambió por última vez.
   try { await env.DB.prepare('SELECT editado_at, editado_por FROM sf_cortes LIMIT 0').all(); }
   catch (_) { for (const c of ['editado_at TEXT', 'editado_por TEXT']) { try { await env.DB.prepare('ALTER TABLE sf_cortes ADD COLUMN ' + c).run(); } catch (_) {} } }
+  // Nombre del pedido o del cartel (26-oct, migración 071): el título de cada pedido en la lista.
+  try { await env.DB.prepare('SELECT nombre FROM sf_cortes LIMIT 0').all(); }
+  catch (_) { try { await env.DB.prepare('ALTER TABLE sf_cortes ADD COLUMN nombre TEXT').run(); } catch (_) {} }
   _sfSchemaOk = true;
 }
 // ----- Pedidos de corte de Sin Frontera (Gaspar 21-oct-2026) -----
 // "Que los chicos de Sin Frontera me puedan encargar cortes de acrílico": el archivo en cualquier formato, material (acrílico o
 // PVC), color, espesor, para cuándo lo necesitan y aclaraciones. Sin precios (tienen cuenta corriente aparte). Gaspar los mueve
-// (Pedido → En corte → Listo → Entregado, o Cancelado); Sin Frontera solo cancela uno que todavía no se empezó.
+// (Pedido → En corte → Listo → Entregado, o Cancelado); Sin Frontera solo cancela uno que todavía no se empezó y edita los que
+// todavía no están cortados (SF_CORTE_EDITA_SF; Gaspar 26-oct), con aviso a Gaspar de lo que cambió.
 const SF_CORTE_MATERIALES = { acrilico: 'Acrílico', pvc: 'PVC' };
 const SF_CORTE_COLORES = { blanco_opalino: 'Blanco opalino', transparente: 'Transparente', negro: 'Negro' };
 const SF_CORTE_ESTADOS = ['pedido', 'en_corte', 'listo', 'entregado', 'cancelado'];
+// Lo que Sin Frontera puede editar: lo que todavía no está cortado (listo), entregado ni cancelado. En corte, solo el nombre
+// (SF_CORTE_SF_SOLO_NOMBRE): Fran ya bajó los archivos, y cambiarle archivos, material, color, espesor, fecha o aclaraciones es
+// como cancelarlo, que en ese estado tampoco puede ("Ya se empezó a cortar: hablalo con Gaspar").
+const SF_CORTE_EDITA_SF = ['pedido', 'en_corte'];
+const SF_CORTE_SF_SOLO_NOMBRE = ['en_corte'];
 const SF_CORTE_PREFIX = 'sf-cortes/';
 const SF_CORTE_MAX_BYTES = 95 * 1024 * 1024;
 // Se guardan con su tipo solo las imágenes y los PDF (se pueden ver en el navegador); el resto (DXF, AI, CDR, SVG, HTML…) va
@@ -21653,14 +21662,56 @@ async function sfCorteColorGuardar(env, nombre, hex) {
   const prev = await sfCorteColoresPropios(env);
   await kvSet(env, 'sf_corte_colores', JSON.stringify([{ nombre, hex: hex || '' }].concat(prev.filter(x => sfCorteNorm(x.nombre) !== sfCorteNorm(nombre))).slice(0, 12)));
 }
-// Lo que ve el front (sin las claves de R2: los archivos se bajan por /admin/sinfrontera/archivo?c=&i=).
+// Nombre del pedido o del cartel (Gaspar 26-oct: "que le tengan que poner un nombre al pedido"): es el título de cada pedido.
+// Había pedidos que solo se reconocían por el archivo, y el archivo se llamaba "acrilicos.dxf". '' si no sirve.
+function sfCorteNombre(v) {
+  const s = String(v == null ? '' : v).replace(/\s+/g, ' ').trim().slice(0, 80);
+  return s.length >= 2 && /[0-9a-záéíóúñü]/i.test(s) ? s : '';
+}
+function sfCorteNombreMotivo(v) {
+  return String(v == null ? '' : v).trim() ? 'Poné un nombre más largo: el del cartel o el del pedido.'
+    : 'Poné el nombre del pedido o del cartel (por ejemplo: Molino). Si no ves dónde, recargá la página.';
+}
+// Lo que cambió en una edición, un renglón por campo, para el aviso a Gaspar cuando edita Sin Frontera. prev = la fila de
+// sf_cortes; nue = { nombre, material, color, color_hex, espesor, fecha_necesita, aclaraciones, archivos: [{key, nombre}] }.
+function sfCorteCambios(prev, nue) {
+  const out = [], q = (s, n) => '"' + String(s || '').replace(/\s+/g, ' ').trim().slice(0, n || 120) + '"';
+  const colorTxt = c => String(SF_CORTE_COLORES[c] || c || '').toLowerCase();
+  const fechaTxt = f => /^\d{4}-\d{2}-\d{2}$/.test(String(f || '')) ? f.slice(8, 10) + '/' + f.slice(5, 7) : String(f || '');
+  const nomA = String(prev.nombre || '').trim(), nomB = String(nue.nombre || '').trim();
+  if (nomA !== nomB) out.push(nomA ? 'nombre ' + q(nomA, 60) + ' → ' + q(nomB, 60) : 'le puso nombre');
+  if (prev.material !== nue.material) out.push('material ' + (SF_CORTE_MATERIALES[prev.material] || prev.material) + ' → ' + (SF_CORTE_MATERIALES[nue.material] || nue.material));
+  if (prev.color !== nue.color) out.push('color ' + colorTxt(prev.color) + ' → ' + colorTxt(nue.color));
+  else if (String(prev.color_hex || '') !== String(nue.color_hex || '')) out.push('otro tono de ' + colorTxt(nue.color));
+  if (String(prev.espesor) !== String(nue.espesor)) out.push('espesor ' + prev.espesor + ' → ' + nue.espesor + ' mm');
+  if (prev.fecha_necesita !== nue.fecha_necesita) out.push('para el ' + fechaTxt(nue.fecha_necesita) + ' (era el ' + fechaTxt(prev.fecha_necesita) + ')');
+  const aclA = String(prev.aclaraciones || '').trim(), aclB = String(nue.aclaraciones || '').trim();
+  if (aclA !== aclB) out.push(!aclB ? 'sacó la aclaración' : aclA ? 'aclaración ' + q(aclA) + ' → ' + q(aclB) : 'aclaración ' + q(aclB));
+  let pa = []; try { pa = JSON.parse(prev.archivos || '[]'); } catch (_) {}
+  if (!Array.isArray(pa)) pa = [];
+  const na = Array.isArray(nue.archivos) ? nue.archivos : [], ka = new Set(pa.map(x => x && x.key)), kb = new Set(na.map(x => x && x.key));
+  const lista = xs => xs.slice(0, 3).map(x => String((x && x.nombre) || 'archivo')).join(', ') + (xs.length > 3 ? ' y ' + (xs.length - 3) + ' más' : '');
+  const suma = na.filter(x => x && !ka.has(x.key)), saca = pa.filter(x => x && !kb.has(x.key));
+  if (suma.length) out.push('sumó ' + (suma.length === 1 ? 'el archivo ' : suma.length + ' archivos: ') + lista(suma));
+  if (saca.length) out.push('sacó ' + (saca.length === 1 ? 'el archivo ' : saca.length + ' archivos: ') + lista(saca));
+  return out;
+}
+// Versión corta de un archivo de un pedido de corte (hash FNV-1a de su clave de R2, que no sale al front). Va en el link de
+// descarga (&v=): cuando una edición saca o reemplaza archivos, el link cambia (el navegador guarda la descarga 24 h y, con el
+// mismo link, daba el archivo VIEJO) y baja ESE archivo aunque la lista se haya renumerado (o 404 si ya no está en el pedido).
+function sfCorteArchV(key) {
+  let h = 0x811c9dc5; const s = String(key || '');
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+  return (h >>> 0).toString(36);
+}
+// Lo que ve el front (sin las claves de R2: los archivos se bajan por /admin/sinfrontera/archivo?c=&i=&v=).
 function sfCorteFila(r) {
   let a = []; try { a = JSON.parse(r.archivos || '[]'); } catch (_) {}
   return {
-    id: r.id, created_at: r.created_at, creado_por: r.creado_por || '', material: r.material, color: r.color, color_hex: r.color_hex || '', espesor: r.espesor,
+    id: r.id, created_at: r.created_at, creado_por: r.creado_por || '', nombre: r.nombre || '', material: r.material, color: r.color, color_hex: r.color_hex || '', espesor: r.espesor,
     fecha: r.fecha_necesita, aclaraciones: r.aclaraciones || '', estado: r.estado, estado_at: r.estado_at || '', estado_por: r.estado_por || '',
     editado_at: r.editado_at || '', editado_por: r.editado_por || '',
-    archivos: (Array.isArray(a) ? a : []).map(x => ({ nombre: String(x.nombre || ''), bytes: +x.bytes || 0, tipo: String(x.tipo || '') })),
+    archivos: (Array.isArray(a) ? a : []).map(x => ({ nombre: String(x.nombre || ''), bytes: +x.bytes || 0, tipo: String(x.tipo || ''), v: sfCorteArchV(x.key) })),
   };
 }
 // Números con los que compra Sin Frontera (kv sinfrontera_tels, JSON): celular normalizado (549…) o @usuario de Instagram
@@ -21834,12 +21885,14 @@ async function sfPlanillaPedidos(env) {
 async function sfArchivoKey(env, qs) {
   const t = parseInt(qs.get('t'), 10) || 0, i = parseInt(qs.get('i'), 10), p = parseInt(qs.get('p'), 10) || 0, fi = parseInt(qs.get('f'), 10);
   try {
-    // Archivo de un pedido de corte (c = id del pedido, i = cuál; sin i, el primero).
+    // Archivo de un pedido de corte (c = id del pedido, i = cuál; sin i, el primero). Con v (sfCorteArchV, el front desde el
+    // 26-oct) manda la versión: el archivo con esa clave esté donde esté, y si una edición lo sacó del pedido, ninguno.
     const c = parseInt(qs.get('c'), 10) || 0;
     if (c) {
       const r = await env.DB.prepare('SELECT archivos FROM sf_cortes WHERE id = ?').bind(c).first();
       let a = []; try { a = JSON.parse((r && r.archivos) || '[]'); } catch (_) {}
-      const x = Array.isArray(a) ? a[i >= 0 ? i : 0] : null, k = x ? String(x.key || '') : '';
+      const arr = Array.isArray(a) ? a : [], v = String(qs.get('v') || '');
+      const x = v ? arr.find(y => y && sfCorteArchV(y.key) === v) : arr[i >= 0 ? i : 0], k = x ? String(x.key || '') : '';
       return k.startsWith(SF_CORTE_PREFIX) ? k : '';
     }
     if (t) {
@@ -32725,13 +32778,16 @@ const handler = {
           catch (_) { return json({ error: 'r2', motivo: 'No se pudo guardar el archivo. Probá de nuevo.' }, 500); }
           return json({ ok: true, key, nombre, bytes: len });
         }
-        // POST /admin/sinfrontera/corte {material, color, espesor, fecha (AAAA-MM-DD), aclaraciones?, archivos: [{key, nombre}], quien?}
-        // → el pedido. Si lo encarga Sin Frontera, le avisa a Gaspar por WhatsApp.
+        // POST /admin/sinfrontera/corte {nombre, material, color, espesor, fecha (AAAA-MM-DD), aclaraciones?, archivos: [{key, nombre}],
+        // quien?} → el pedido. El nombre (del pedido o del cartel) es obligatorio desde el 26-oct. Si lo encarga Sin Frontera, le
+        // avisa a Gaspar por WhatsApp.
         if (request.method === 'POST' && path === '/admin/sinfrontera/corte') {
           let body; try { body = await request.json(); } catch { body = {}; }
+          const nombre = sfCorteNombre(body.nombre);
           const material = String(body.material || ''), col = sfCorteColor(body.color, body.color_hex), espesor = sfCorteEspesor(body.espesor);
           const fecha = String(body.fecha || '').trim();
           const acl = String(body.aclaraciones || '').replace(/\r\n?/g, '\n').trim().slice(0, 2000);
+          if (!nombre) return json({ error: 'datos', motivo: sfCorteNombreMotivo(body.nombre) }, 400);
           if (!SF_CORTE_MATERIALES[material]) return json({ error: 'datos', motivo: 'Elegí el material: acrílico o PVC.' }, 400);
           if (!col) return json({ error: 'datos', motivo: 'Elegí el color (o escribí el nombre del color nuevo).' }, 400);
           if (!espesor) return json({ error: 'datos', motivo: 'Poné el espesor en milímetros (por ejemplo 3).' }, 400);
@@ -32751,8 +32807,8 @@ const handler = {
           const nowIso = new Date().toISOString();
           let id = 0;
           try {
-            const r = await env.DB.prepare('INSERT INTO sf_cortes (created_at, creado_por, material, color, color_hex, espesor, fecha_necesita, aclaraciones, archivos, estado, estado_at, estado_por) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-              .bind(nowIso, por, material, col.color, col.hex || null, espesor, fecha, acl, JSON.stringify(arch), 'pedido', nowIso, por).run();
+            const r = await env.DB.prepare('INSERT INTO sf_cortes (created_at, creado_por, nombre, material, color, color_hex, espesor, fecha_necesita, aclaraciones, archivos, estado, estado_at, estado_por) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+              .bind(nowIso, por, nombre, material, col.color, col.hex || null, espesor, fecha, acl, JSON.stringify(arch), 'pedido', nowIso, por).run();
             id = (r && r.meta && r.meta.last_row_id) || 0;
           } catch (_) { return json({ error: 'db', motivo: 'No se pudo guardar el pedido. Probá de nuevo.' }, 500); }
           const propio = !SF_CORTE_COLORES[col.color];
@@ -32761,10 +32817,10 @@ const handler = {
             const det = SF_CORTE_MATERIALES[material] + ' ' + col.nombre.toLowerCase() + (propio ? ' (color nuevo)' : '')
               + ' de ' + espesor + ' mm, para el ' + fecha.slice(8, 10) + '/' + fecha.slice(5, 7) + ', ' + arch.length + (arch.length === 1 ? ' archivo' : ' archivos')
               + (acl ? '. Aclaración: ' + acl.replace(/\s+/g, ' ').slice(0, 300) : '');
-            const txt = fran ? 'Fran cargó un pedido de corte de Sin Frontera (#' + id + '): ' + det + '. Lo ves en el CRM: Sin Frontera > Cortes.'
-              : 'Sin Frontera te encargó un corte (#' + id + (quien ? ', lo pidió ' + quien : '') + '): ' + det + '. Lo ves en el CRM: Sin Frontera > Cortes.';
+            const txt = fran ? 'Fran cargó el pedido de corte "' + nombre + '" de Sin Frontera (#' + id + '): ' + det + '. Lo ves en el CRM: Sin Frontera > Cortes.'
+              : 'Sin Frontera te encargó el corte "' + nombre + '" (#' + id + (quien ? ', lo pidió ' + quien : '') + '): ' + det + '. Lo ves en el CRM: Sin Frontera > Cortes.';
             const pr = avisoGasparServicio(env, txt, { tipo: 'sinfrontera_corte', prioridad: 'P2', clave: 'sfc:' + id }).catch(() => {});
-            const pf = fran ? Promise.resolve() : sfCorteAvisoFran(env, 'Nuevo pedido de corte de Sin Frontera (#' + id + '): ' + det + '. Lo ves en el CRM, en Cortes de Sin Frontera.');
+            const pf = fran ? Promise.resolve() : sfCorteAvisoFran(env, 'Nuevo pedido de corte de Sin Frontera: "' + nombre + '" (#' + id + '): ' + det + '. Lo ves en el CRM, en Cortes de Sin Frontera.');
             try { ctx.waitUntil(Promise.all([pr, pf])); } catch (_) { await Promise.all([pr, pf]); }
           }
           let row = null; try { row = await env.DB.prepare('SELECT * FROM sf_cortes WHERE id = ?').bind(id).first(); } catch (_) {}
@@ -32795,7 +32851,7 @@ const handler = {
           catch (_) { return json({ error: 'db', motivo: 'No se pudo guardar. Probá de nuevo.' }, 500); }
           if (!ch) return json({ error: 'cambio', motivo: 'Alguien lo cambió recién. Actualizá la lista y probá de nuevo.' }, 409);
           if (sfExt) {
-            const txt = 'Sin Frontera canceló el pedido de corte #' + id + (quien ? ' (' + quien + ')' : '') + ': ' + (SF_CORTE_MATERIALES[row.material] || row.material) + ' '
+            const txt = 'Sin Frontera canceló el pedido de corte #' + id + (row.nombre ? ' "' + row.nombre + '"' : '') + (quien ? ' (' + quien + ')' : '') + ': ' + (SF_CORTE_MATERIALES[row.material] || row.material) + ' '
               + String(SF_CORTE_COLORES[row.color] || row.color).toLowerCase() + ' de ' + row.espesor + ' mm.';
             const pr = avisoGasparServicio(env, txt, { tipo: 'sinfrontera_corte', prioridad: 'P2', clave: 'sfc:' + id + ':cancelado' }).catch(() => {});
             const pf = sfCorteAvisoFran(env, txt);
@@ -32803,19 +32859,31 @@ const handler = {
           }
           return json({ ok: true, corte: sfCorteFila(Object.assign({}, row, { estado, estado_at: nowIso, estado_por: por })) });
         }
-        // POST /admin/sinfrontera/corte/editar {id, material, color, color_hex?, espesor, fecha, aclaraciones?, archivos: [{idx} | {key, nombre}]}
-        // → Gaspar o Fran corrigen un pedido de corte (Gaspar 22-oct: "permitime editar los pedidos"). En archivos, {idx} = uno que
-        // ya tenía (su posición en el pedido) y {key, nombre} = uno nuevo subido con corte/archivo; los que no vienen se sacan del
-        // pedido (el archivo queda en R2). El estado no se toca. Sin Frontera no edita.
+        // POST /admin/sinfrontera/corte/editar {id, nombre, material, color, color_hex?, espesor, fecha, aclaraciones?,
+        // archivos: [{idx} | {key, nombre}], editado_at?, quien?} → corregir un pedido de corte (Gaspar 22-oct: "permitime editar los
+        // pedidos"; 26-oct: también Sin Frontera, mientras no esté cortado: SF_CORTE_EDITA_SF, y en corte solo el nombre). En
+        // archivos, {idx} = uno que ya tenía (su posición en el pedido) y {key, nombre} = uno nuevo subido con corte/archivo; los que
+        // no vienen se sacan del pedido (el archivo queda en R2). El estado no se toca. nombre vacío = el que ya tenía (si no tenía,
+        // es obligatorio). editado_at = la última edición que vio el que edita: si alguien lo editó en el medio, 409 con el pedido
+        // como quedó (las {idx} serían de otra lista de archivos). Cuando edita Sin Frontera algo más que el nombre, a Gaspar (y a
+        // Fran) les llega lo que cambió.
         if (request.method === 'POST' && path === '/admin/sinfrontera/corte/editar') {
-          if (sfExt) return json({ error: 'forbidden', motivo: 'Para cambiar un pedido, hablalo con Gaspar.' }, 403);
           let body; try { body = await request.json(); } catch { body = {}; }
           const id = parseInt(body.id, 10) || 0;
           let row = null; try { row = id ? await env.DB.prepare('SELECT * FROM sf_cortes WHERE id = ?').bind(id).first() : null; } catch (_) {}
           if (!row) return json({ error: 'nada', motivo: 'Ese pedido no existe.' }, 404);
+          if (sfExt && !SF_CORTE_EDITA_SF.includes(row.estado)) {
+            return json({ error: 'forbidden', motivo: row.estado === 'cancelado' ? 'Ese pedido está cancelado: si lo necesitan, cargá uno nuevo.'
+              : (row.estado === 'entregado' ? 'Ese pedido ya se entregó' : 'Ese pedido ya está cortado') + ': para cambiarlo, hablalo con Gaspar.', corte: sfCorteFila(row) }, 403);
+          }
+          const baseEd = typeof body.editado_at === 'string' ? body.editado_at : null;
+          if (baseEd !== null && baseEd !== String(row.editado_at || '')) return json({ error: 'cambio', motivo: 'Alguien lo editó recién. Tocá Actualizar y volvé a abrirlo para ver cómo quedó.', corte: sfCorteFila(row) }, 409);
+          const nomIn = String(body.nombre == null ? '' : body.nombre).trim();
+          const nombre = nomIn ? sfCorteNombre(nomIn) : String(row.nombre || '').trim();
           const material = String(body.material || ''), col = sfCorteColor(body.color, body.color_hex), espesor = sfCorteEspesor(body.espesor);
           const fecha = String(body.fecha || '').trim();
           const acl = String(body.aclaraciones || '').replace(/\r\n?/g, '\n').trim().slice(0, 2000);
+          if (!nombre) return json({ error: 'datos', motivo: sfCorteNombreMotivo(nomIn) }, 400);
           if (!SF_CORTE_MATERIALES[material]) return json({ error: 'datos', motivo: 'Elegí el material: acrílico o PVC.' }, 400);
           if (!col) return json({ error: 'datos', motivo: 'Elegí el color (o escribí el nombre del color nuevo).' }, 400);
           if (!espesor) return json({ error: 'datos', motivo: 'Poné el espesor en milímetros (por ejemplo 3).' }, 400);
@@ -32834,14 +32902,42 @@ const handler = {
             arch.push({ key, nombre: String((a && a.nombre) || '').replace(/\s+/g, ' ').trim().slice(0, 150) || key.split('/').pop(), bytes: +h.size || 0, tipo: (h.httpMetadata && h.httpMetadata.contentType) || '' });
           }
           if (!arch.length) return json({ error: 'datos', motivo: 'El pedido tiene que tener al menos un archivo.' }, 400);
-          const por = fran ? 'Fran' : String(session.user || '');
+          const nue = { nombre, material, color: col.color, color_hex: col.hex || '', espesor, fecha_necesita: fecha, aclaraciones: acl, archivos: arch };
+          const cambios = sfCorteCambios(row, nue);
+          if (!cambios.length) return json({ ok: true, corte: sfCorteFila(row), cambios, sin_cambios: true, avisado: false });
+          // Lo que cambió fuera del nombre: en corte, Sin Frontera no lo puede cambiar (como no lo puede cancelar), y si es solo el
+          // nombre no se avisa (ver abajo).
+          const cambiosSinNombre = sfCorteCambios(row, Object.assign({}, nue, { nombre: row.nombre }));
+          if (sfExt && SF_CORTE_SF_SOLO_NOMBRE.includes(row.estado) && cambiosSinNombre.length) {
+            return json({ error: 'cortando', motivo: 'Ya se empezó a cortar: ahora solo le podés cambiar el nombre. Para cambiar lo demás, hablalo con Gaspar.', corte: sfCorteFila(row) }, 403);
+          }
+          const quien = String(body.quien || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+          const por = sfExt ? (quien ? quien + ' · Sin Frontera' : 'Sin Frontera') : (fran ? 'Fran' : String(session.user || ''));
+          const nowIso = new Date().toISOString();
+          // Con el estado y la última edición que se leyeron: si Gaspar lo pasó a Listo o alguien lo editó en el medio, no se pisa.
+          let ch = 0;
           try {
-            await env.DB.prepare('UPDATE sf_cortes SET material = ?, color = ?, color_hex = ?, espesor = ?, fecha_necesita = ?, aclaraciones = ?, archivos = ?, editado_at = ?, editado_por = ? WHERE id = ?')
-              .bind(material, col.color, col.hex || null, espesor, fecha, acl, JSON.stringify(arch), new Date().toISOString(), por, id).run();
+            const u = await env.DB.prepare("UPDATE sf_cortes SET nombre = ?, material = ?, color = ?, color_hex = ?, espesor = ?, fecha_necesita = ?, aclaraciones = ?, archivos = ?, editado_at = ?, editado_por = ? WHERE id = ? AND estado = ? AND IFNULL(editado_at, '') = ?")
+              .bind(nombre, material, col.color, col.hex || null, espesor, fecha, acl, JSON.stringify(arch), nowIso, por, id, row.estado, String(row.editado_at || '')).run();
+            ch = (u && u.meta && u.meta.changes) || 0;
           } catch (_) { return json({ error: 'db', motivo: 'No se pudo guardar. Probá de nuevo.' }, 500); }
+          if (!ch) {
+            let r3 = null; try { r3 = await env.DB.prepare('SELECT * FROM sf_cortes WHERE id = ?').bind(id).first(); } catch (_) {}
+            return json({ error: 'cambio', motivo: 'Alguien lo cambió recién. Tocá Actualizar y volvé a abrirlo para ver cómo quedó.', corte: r3 ? sfCorteFila(r3) : null }, 409);
+          }
           if (!SF_CORTE_COLORES[col.color]) { try { await sfCorteColorGuardar(env, col.color, col.hex); } catch (_) {} }
+          // Edita Sin Frontera → aviso a Gaspar con lo que cambió, por el mismo camino que el alta (y a Fran, que es quien corta).
+          // Si cambió solo el nombre (ponerles nombre a los viejos, corregirlo), no: no cambia qué se corta, y de a un pedido por vez
+          // eran dos WhatsApp por cada uno (plantillas pagas con la ventana cerrada). Queda en la lista: "editado … (quién)".
+          const avisar = sfExt && cambiosSinNombre.length > 0;
+          if (avisar) {
+            const txt = 'Sin Frontera editó el pedido de corte "' + nombre + '" (#' + id + (quien ? ', lo cambió ' + quien : '') + '): ' + cambios.join('; ') + '.';
+            const pr = avisoGasparServicio(env, txt + ' Lo ves en el CRM: Sin Frontera > Cortes.', { tipo: 'sinfrontera_corte', prioridad: 'P2', clave: 'sfc:' + id + ':ed:' + nowIso }).catch(() => {});
+            const pf = sfCorteAvisoFran(env, txt + ' Lo ves en el CRM, en Cortes de Sin Frontera.');
+            try { ctx.waitUntil(Promise.all([pr, pf])); } catch (_) { await Promise.all([pr, pf]); }
+          }
           let r2 = null; try { r2 = await env.DB.prepare('SELECT * FROM sf_cortes WHERE id = ?').bind(id).first(); } catch (_) {}
-          return json({ ok: true, corte: r2 ? sfCorteFila(r2) : null });
+          return json({ ok: true, corte: r2 ? sfCorteFila(r2) : null, cambios, avisado: avisar });
         }
         // ---- De acá para abajo, solo Gaspar ----
         if (sfExt || fran) return json({ error: 'forbidden' }, 403);
