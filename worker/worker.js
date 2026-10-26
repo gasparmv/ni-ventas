@@ -22356,6 +22356,10 @@ async function prodCarteles(env, whereSql, args, paraProductor, prodId) {
         // Su parte como si fuera la línea. Nunca r.partes, la cantidad total ni la MO de la línea.
         const p = prodId ? ps.find(x => x.productor_id === prodId) : null;
         if (!p) continue;
+        // El nombre del cartel suele decir la cantidad de la venta ("del norte 9 unidades"): al productor le llega con la suya.
+        const N = prodUnidadesLinea(r);
+        const conSuyas = t => String(t || '').replace(new RegExp('\\b' + N + '(\\s*(?:unidades?|unid\\.?|carteles?|neones?|u\\.?)(?![a-záéíóúñ]))', 'gi'), p.unidades + '$1').replace(new RegExp('([x×]\\s*)' + N + '\\b', 'gi'), '$1' + p.unidades);
+        if (N !== p.unidades) { r.cartel = conSuyas(r.cartel); r.aclaracion = conSuyas(r.aclaracion); }
         Object.assign(r, { cantidad: p.unidades, productor_id: prodId, prod_estado: p.prod_estado, prod_estado_at: p.prod_estado_at, prod_asignado_at: p.asignado_at,
           prod_terminado_at: p.terminado_at, prod_pagado_at: p.pagado_at, mo_monto: p.mo_monto, fotos: fotosParte[p.id] || [], fotos_requeridas: prodFotosRequeridas({ cantidad: p.unidades }) });
         out.push(r); continue;
