@@ -4814,9 +4814,10 @@ function renderCorteCobros() {
       ${cs.map(c => `
         <div style="border-top:1px solid var(--border);padding:10px 0">
           <label style="display:flex;gap:8px;align-items:flex-start;cursor:${c.telefono ? 'pointer' : 'not-allowed'}">
-            <input type="checkbox" class="corte-cobro-chk" data-tel="${escapeHtml(c.telefono)}" ${c.telefono ? 'checked' : 'disabled'} style="margin-top:3px">
+            <input type="checkbox" class="corte-cobro-chk" data-tel="${escapeHtml(c.telefono)}" ${c.telefono ? ((c.frenos || []).length ? '' : 'checked') : 'disabled'} style="margin-top:3px">
             <div style="flex:1">
               <div style="font-weight:700">${escapeHtml(c.cliente_nombre || c.telefono || 'cliente')} <span style="color:#22c55e">$${Number(c.total).toLocaleString('es-AR')}</span>${c.telefono ? (c.ventana_abierta ? '' : ' <span style="color:#FFA726;font-size:11px">· por plantilla</span>') : ' <span style="color:#f87171;font-size:11px">· sin teléfono</span>'}</div>
+              ${(c.frenos || []).length ? `<div style="color:#ef4444;font-size:12px;font-weight:700;margin-top:3px">⚠ ${escapeHtml(c.frenos.map(x => x.corto).join(' · '))}: resolvelo antes en Para resolver (lo dejé sin tildar)</div>` : ''}
               <div style="font-size:12px;color:var(--fg-mute);white-space:pre-wrap;margin-top:4px">${escapeHtml(c.mensaje || '')}</div>
             </div>
           </label>
@@ -4994,13 +4995,15 @@ function corteHybridBoard(pedidos) {
     if ((Number(p.precio) || 0) > 0 && ['pendiente', 'cobrando', 'parcial'].includes(p.estado_pago) && p.estado && p.estado !== 'pedido' && p.estado !== 'matriz_lista') debeOtra[corteClaveClienteFront(p.telefono, p.cliente_nombre)] = true;
   });
   groups.forEach(g => { g.debeOtra = !g.deuda && !!debeOtra[corteClaveClienteFront(g.tel, g.nombre)]; });
+  // Frenos del corte: pidió sumar algo o hay una diferencia de plata. 'Frenado' = traba el paquete; los de prueba no se muestran.
+  groups.forEach(g => { g.frenos = g.tel ? (STATE.corteFrenos || []).filter(f => f.estado === 'abierto' && !+f.prueba && String(f.telefono) === String(g.tel)) : []; g.frenado = g.frenos.some(f => +f.frena); });
   const seg = STATE.corteSeg || 'todo';
   const sinMedir = groups.filter(g => !g.priced).length;
   const parciales = groups.filter(g => g.pago === 'parcial').length;
   const porCobrar = groups.filter(g => g.priced && g.pago !== 'pagado');
   let list;
   if (seg === 'cobrar') list = porCobrar.slice().sort((a, b) => b.total - a.total);
-  else if (seg === 'trab') list = groups.filter(g => !g.priced || g.pago === 'parcial' || g.mixed);
+  else if (seg === 'trab') list = groups.filter(g => !g.priced || g.pago === 'parcial' || g.mixed || g.frenado);
   else list = groups.slice().sort((a, b) => b.total - a.total);
   const matrizN = pedidos.filter(p => p.estado === 'matriz_lista').length;
   const segBtn = (v, l, n) => `<button data-corte-seg="${v}" class="btn ${seg === v ? '' : 'ghost'}" style="padding:6px 12px;font-size:12px">${l}${n != null ? ` <span style="opacity:.65">${n}</span>` : ''}</button>`;
@@ -5019,7 +5022,7 @@ function corteHybridBoard(pedidos) {
           <span style="width:42px;height:6px;border-radius:9px;background:var(--border);overflow:hidden;display:inline-block"><span style="display:block;height:100%;width:${frac}%;background:${sm.c}"></span></span>
           ${corteChip(corteEstadoTxt(g.stage, g.items) + (g.mixed ? ' +' : ''), sm.c)}
         </span>
-        ${corteChip(pm.l, pm.c)}${g.debeOtra ? corteChip('Debe otra semana', '#f87171') : ''}${corteLogiChip(g)}
+        ${corteChip(pm.l, pm.c)}${g.frenado ? corteChip('Frenado', '#ef4444') : (g.frenos.length ? corteChip('Para resolver', '#f59e0b') : '')}${g.debeOtra ? corteChip('Debe otra semana', '#f87171') : ''}${corteLogiChip(g)}
       </div>`;
     const compKey = (g.items.find(p => p.comprobante_key && (p.estado_pago === 'pagado' || p.estado_pago === 'parcial')) || {}).comprobante_key || '';
     const compHtml = compKey ? (!/\.(jpe?g|png|webp|gif)($|\?)/i.test(compKey)
@@ -5035,7 +5038,8 @@ function corteHybridBoard(pedidos) {
         ${compHtml}
         ${!compKey && g.items.some(p => p.estado_pago === 'pagado' && p.pago_metodo) ? `<div style="margin-top:10px;padding-top:8px;border-top:1px dashed var(--border);font-size:12px;color:#22c55e;font-weight:600">💵 Pagado a mano (${escapeHtml((g.items.find(p => p.estado_pago === 'pagado' && p.pago_metodo) || {}).pago_metodo || '')})</div>` : ''}
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
-          ${g.items.some(p => p.estado === 'cortado') ? `<button class="btn ghost" ${g.tel ? `data-corte-embalar-tel="${escapeHtml(g.tel)}"` : `data-corte-embalar-ids="${g.items.filter(p => p.estado === 'cortado').map(p => p.id).join(',')}"`} data-corte-entrega="${escapeHtml(g.entrega || '')}" style="font-size:11px;padding:4px 10px">📦 Embalar paquete (${g.entrega === 'envio' ? 'envío' : (g.entrega === 'retira' ? 'retira' : '⚠ entrega sin definir')})</button>` : ''}
+          ${g.frenado ? `<button class="btn ghost" data-corte-ir-frenos style="font-size:11px;padding:4px 10px;color:#ef4444;border-color:#ef4444">🛑 Frenado: ${escapeHtml(g.frenos.map(corteFrenoCortoFront).join(' · '))} · resolvelo en Para resolver</button>` : ''}
+          ${!g.frenado && g.items.some(p => p.estado === 'cortado') ? `<button class="btn ghost" ${g.tel ? `data-corte-embalar-tel="${escapeHtml(g.tel)}"` : `data-corte-embalar-ids="${g.items.filter(p => p.estado === 'cortado').map(p => p.id).join(',')}"`} data-corte-entrega="${escapeHtml(g.entrega || '')}" style="font-size:11px;padding:4px 10px">📦 Embalar paquete (${g.entrega === 'envio' ? 'envío' : (g.entrega === 'retira' ? 'retira' : '⚠ entrega sin definir')})</button>` : ''}
           ${g.deuda || g.debeOtra ? `<button class="btn" data-corte-pagar data-corte-pagar-tel="${escapeHtml(g.tel || '')}" data-corte-pagar-nombre="${escapeHtml(g.nombre || '')}" style="font-size:11px;padding:4px 10px">💵 Marcar pagado${g.debeOtra ? ' (debe de otra semana)' : ''}</button>` : ''}
           ${isAdmin() && g.items.some(p => p.estado_pago === 'pagado') ? `<button class="btn btn-ghost" data-corte-despagar="${g.items.filter(p => p.estado_pago === 'pagado').map(p => p.id).join(',')}" data-corte-despagar-nombre="${escapeHtml(g.nombre || '')}" title="Si lo marcaste pagado por error: vuelve a cobrando o pendiente, también en la planilla" style="font-size:11px;padding:4px 10px">↩ Deshacer pago</button>` : ''}
           <button class="btn btn-ghost" ${corteEtiquetaAttrs(g, corteClaveClienteFront(g.tel, g.nombre))} title="Imprimir la etiqueta de este cliente" style="font-size:11px;padding:4px 10px">🏷 Etiqueta</button>
@@ -5078,7 +5082,7 @@ function corteHybridBoard(pedidos) {
     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
       ${segBtn('todo', 'Toda la tanda', groups.length)}
       ${segBtn('cobrar', 'Por cobrar', porCobrar.length)}
-      ${segBtn('trab', 'Trabados', sinMedir + parciales)}
+      ${segBtn('trab', 'Trabados', sinMedir + parciales + groups.filter(g => g.frenado && g.priced && g.pago !== 'parcial').length)}
       <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap">
         ${matrizN ? `<button class="btn ghost" data-corte-cortar-ids="${pedidos.filter(p => p.estado === 'matriz_lista').map(p => p.id).join(',')}" style="font-size:12px;padding:6px 12px">🪚 Cortar matrices (${matrizN})</button>` : ''}
         <button class="btn btn-ghost" data-corte-etiquetas="${boardTanda || ''}" style="font-size:12px;padding:6px 12px" title="${boardTanda ? 'Una etiqueta por cliente y por bulto (impresora 100×150 o A4)' : 'De la semana más reciente con fecha de corte. Una etiqueta por cliente y por bulto (impresora 100×150 o A4)'}">🏷 Etiquetas de la semana</button>
@@ -5139,14 +5143,20 @@ function renderCorte() {
       const cardHtml = (g, done) => {
         const lg = corteLogiPaquete(g), num = lg && parseInt(lg.numero, 10) > 0 ? logiN(lg.numero) : '';
         const retiraIds = g.items.filter(p => p.entrega === 'retira').map(p => p.id);
+        // Frenos del corte: el cliente pidió sumar algo o hay que revisar el pago → no se embala ni se entrega hasta que Gaspar libere.
+        const fr = corteFrenosDeTel(g.tel);
+        // Sumado después de embalar (aprobado por Gaspar): hay que abrir la caja.
+        const sumadoDespues = !done && g.items.some(p => p.freno_id) && pedidos.some(p => p.estado === 'embalado' && p.telefono && p.telefono === g.tel);
         return `
-        <div style="background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:14px;margin-bottom:12px">
+        <div style="background:var(--ink-100);border:1px solid ${fr.length ? '#ef4444' : 'var(--border)'};border-radius:var(--r-sm);padding:14px;margin-bottom:12px">
+          ${fr.length ? `<div style="background:rgba(239,68,68,.14);color:#ef4444;font-weight:800;font-size:13.5px;border-radius:8px;padding:8px 10px;margin-bottom:10px">🛑 Frenado: ${escapeHtml(fr.map(corteFrenoCortoFront).join(' · '))}. Esperá a Gaspar</div>` : ''}
+          ${sumadoDespues ? `<div style="background:rgba(245,158,11,.14);color:#f59e0b;font-weight:800;font-size:13px;border-radius:8px;padding:7px 10px;margin-bottom:10px">Sumado después: abrí la caja que ya está embalada y agregalo</div>` : ''}
           <div style="font-size:15px;font-weight:700;margin-bottom:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">${num ? `<span title="N° de paquete (va en la etiqueta)" style="font-size:14px;font-weight:900;padding:1px 8px;border:1px solid var(--fg-mute);border-radius:7px">N° ${num}</span>` : ''}${done ? '<span style="color:#22c55e">✓</span> ' : ''}${escapeHtml(g.nombre || 'cliente')} <span style="color:var(--fg-mute);font-weight:400;font-size:12px">· ${g.items.length} pieza${g.items.length === 1 ? '' : 's'}</span>${entregaBadge(g.entrega)}
             <button class="btn btn-ghost" ${corteEtiquetaAttrs(g, cortePaqInfo(g).key)} title="Reimprimir la etiqueta de este cliente" style="margin-left:auto;font-size:13px;padding:3px 9px">🏷</button></div>
           ${g.items.map(corteEmbItemHtml).join('')}
           ${g.entrega === 'envio' ? cortePaqMedidasHtml(g) + corteLogiLineaHtml(lg) : ''}
           <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-            ${done ? `<button class="btn ghost" data-corte-desembalar="${g.items.map(p => p.id).join(',')}" style="font-size:12px;padding:5px 11px">↩ Deshacer</button>${retiraIds.length ? `<button class="btn btn-cyan" data-corte-retiro data-corte-retiro-tel="${escapeHtml(g.tel || '')}" data-corte-retiro-nombre="${escapeHtml(g.nombre || '')}" data-corte-retiro-ids="${retiraIds.join(',')}" style="font-size:14px;padding:8px 16px;margin-left:auto">Retiró</button>` : ''}` : `<button class="btn" ${g.tel ? `data-corte-embalar-tel="${escapeHtml(g.tel)}"` : `data-corte-embalar-ids="${g.items.map(p => p.id).join(',')}"`} data-corte-entrega="${escapeHtml(g.entrega || '')}">📦 Marcar paquete embalado</button>`}
+            ${done ? `<button class="btn ghost" data-corte-desembalar="${g.items.map(p => p.id).join(',')}" style="font-size:12px;padding:5px 11px">↩ Deshacer</button>${retiraIds.length && fr.length ? `<button class="btn" disabled style="font-size:14px;padding:8px 16px;margin-left:auto;opacity:.6">Retiró (frenado)</button>` : ''}${retiraIds.length && !fr.length ? `<button class="btn btn-cyan" data-corte-retiro data-corte-retiro-tel="${escapeHtml(g.tel || '')}" data-corte-retiro-nombre="${escapeHtml(g.nombre || '')}" data-corte-retiro-ids="${retiraIds.join(',')}" style="font-size:14px;padding:8px 16px;margin-left:auto">Retiró</button>` : ''}` : (fr.length ? `<button class="btn" disabled style="opacity:.6">🛑 Frenado: esperá a Gaspar</button>` : `<button class="btn" ${g.tel ? `data-corte-embalar-tel="${escapeHtml(g.tel)}"` : `data-corte-embalar-ids="${g.items.map(p => p.id).join(',')}"`} data-corte-entrega="${escapeHtml(g.entrega || '')}">📦 Marcar paquete embalado</button>`)}
           </div>
         </div>`;
       };
@@ -5398,6 +5408,7 @@ function renderCorte() {
       </div>
       <p style="color:var(--fg-mute);font-size:13px;margin:0 0 16px">Tu semana de un vistazo — una fila por cliente. Tocá un cliente para ver sus diseños; tocá un diseño para moverlo de etapa.</p>
       ${corteSinPagarBtnHtml()}
+      ${corteFrenosHtml()}
       ${corteSenasHtml()}
       ${corteAnibalCardHtml()}
       ${corteHerramientasHtml()}
@@ -10063,6 +10074,144 @@ function corteSenasBind() {
     location.hash = 'chat'; render();
   }; });
 }
+// ===== FRENOS DEL CORTE — "Para resolver" (Gaspar 26-oct, caso Vir) =====
+// Lo que un cliente pidió SUMAR por WhatsApp (o por la web con un cobro abierto) y los comprobantes que no coinciden con el
+// cobro. Mientras está abierto (y el freno está prendido), Neyen no puede embalar ni logística despachar. Gaspar decide acá:
+// sumar al pedido (el server cotiza con los precios de la web y le manda al cliente el detalle), dejar a favor, devolver,
+// marcar pagado lo pendiente, o liberar. El precio que se ve es orientativo: lo recalcula el server.
+const CORTE_FRENO_TIPO = { agregar: 'Quiere sumar', cambio: 'Pidió un cambio', reclamo: 'Reclamo', pago_de_mas: 'Pagó de más', pago_de_menos: 'Pagó de menos', pago_sin_cobro: 'Pagó sin cobro', pago_repetido: 'Comprobante repetido' };
+// Frenos que traban el paquete de un teléfono (admin: la lista completa; Neyen: ya viene filtrada y sin montos).
+function corteFrenosDeTel(tel) {
+  if (!tel) return [];
+  return (STATE.corteFrenos || []).filter(f => String(f.telefono) === String(tel) && (f.estado == null || f.estado === 'abierto') && (f.frena == null || +f.frena) && !+f.prueba);
+}
+function corteFrenoCortoFront(f) {
+  if (f.corto) return f.corto;
+  if (f.tipo === 'agregar') return 'va a sumar ' + ((f.items || []).map(x => (x.cantidad ? x.cantidad + ' ' : '') + (x.nombre || x.texto || 'algo')).join(', ') || 'algo');
+  return { cambio: 'pidió un cambio en el pedido', reclamo: 'hay un reclamo del cliente' }[f.tipo] || 'hay que revisar el pago';
+}
+// Ítems que Gaspar está corrigiendo (aparte de la lista: el refresco de cada minuto no los pisa).
+function corteFrenoItemsDe(f) { return (STATE.corteFrenoEdits && STATE.corteFrenoEdits[f.id]) || f.items || []; }
+function corteFrenoUnit(def, cant) { for (const [desde, p] of (def.escala || [])) if (cant >= desde) return p; return def.precio; }
+function corteFrenoItemsCot(items) {
+  const cat = STATE.corteCatalogo || [];
+  return (items || []).map(x => { const d = cat.find(c => c.codigo === x.codigo); const q = parseInt(x.cantidad, 10) || 0; const ok = !!d && q >= 1 && q <= 50 && (!d.colores || d.colores.includes(x.color)); return { ...x, ok, precio: d && q ? corteFrenoUnit(d, q) * q : 0 }; });
+}
+function corteFrenosHtml() {
+  if (!isAdmin()) return '';
+  const fs = STATE.corteFrenos || [];
+  if (!fs.length) return '';
+  const abiertos = fs.filter(f => f.estado === 'abierto'), resueltos = fs.filter(f => f.estado !== 'abierto');
+  const hace = (iso) => { const ms = Date.now() - Date.parse(iso || ''); if (!(ms >= 0)) return ''; const h = Math.floor(ms / 3600000); return h < 1 ? 'hace ' + Math.max(1, Math.round(ms / 60000)) + ' min' : (h < 48 ? 'hace ' + h + ' h' : 'hace ' + Math.floor(h / 24) + ' días'); };
+  const cat = STATE.corteCatalogo || [];
+  const btn = (f, acc, label, fuerte) => `<button type="button" class="btn ${fuerte ? '' : 'btn-ghost'}" data-fr-acc="${acc}" data-fr-id="${f.id}" style="padding:6px 11px;font-size:12.5px${fuerte ? ';font-weight:800;background:#22c55e;border-color:#22c55e;color:#04140a' : ''}">${label}</button>`;
+  const itemsHtml = (f) => {
+    const its = corteFrenoItemsCot(corteFrenoItemsDe(f));
+    if (f.origen === 'web') return `<div style="font-size:12.5px;margin-top:4px">${its.map(x => escapeHtml((x.cantidad || '') + ' ' + (x.nombre || '')) + (x.precio ? ' · ' + fmtMoney(x.precio) : '')).join('<br>')}</div>`;
+    const fila = (x, i) => {
+      const d = cat.find(c => c.codigo === x.codigo);
+      return `<div data-fr-it="${f.id}" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:5px">
+        <select data-k="codigo" style="max-width:100%;min-width:0;flex:1 1 180px;background:var(--ink-100);color:var(--fg);border:1px solid var(--border);border-radius:7px;padding:5px">
+          <option value="">${escapeHtml(x.codigo ? '—' : ('No está en el catálogo: ' + (x.texto || x.nombre || '')).slice(0, 70))}</option>
+          ${cat.map(c => `<option value="${escapeHtml(c.codigo)}" ${c.codigo === x.codigo ? 'selected' : ''}>${escapeHtml(c.nombre)}</option>`).join('')}
+        </select>
+        <input data-k="cantidad" type="number" min="1" max="50" value="${escapeHtml(String(x.cantidad || ''))}" placeholder="cant." style="width:70px;background:var(--ink-100);color:var(--fg);border:1px solid var(--border);border-radius:7px;padding:5px">
+        ${d && d.colores ? `<select data-k="color" style="background:var(--ink-100);color:var(--fg);border:1px solid var(--border);border-radius:7px;padding:5px"><option value="">color?</option>${d.colores.map(c => `<option ${c === x.color ? 'selected' : ''}>${escapeHtml(c)}</option>`).join('')}</select>` : ''}
+        <span style="font-size:12px;color:${x.ok ? 'var(--fg-mute)' : '#ef4444'}">${x.ok ? fmtMoney(x.precio) : 'falta completar'}</span>
+        <button type="button" class="btn btn-ghost" data-fr-quitar="${f.id}" data-fr-i="${i}" title="Sacar" style="padding:3px 8px;font-size:12px">✕</button>
+      </div>`;
+    };
+    const tot = its.reduce((s, x) => s + (x.precio || 0), 0);
+    return its.map(fila).join('') + `<div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap"><button type="button" class="btn btn-ghost" data-fr-mas="${f.id}" style="padding:3px 9px;font-size:12px">+ ítem</button><span style="font-size:12.5px;font-weight:700">${its.length && its.every(x => x.ok) ? 'Total ' + fmtMoney(tot) + ' (precio web)' : ''}</span></div>`;
+  };
+  const card = (f) => {
+    const c = f.cliente || {};
+    const plata = /^pago_/.test(f.tipo);
+    const rel = f.rel_id ? abiertos.find(x => x.id === f.rel_id) : null;
+    const pdmAbierto = f.tipo === 'agregar' && abiertos.some(x => x.telefono === f.telefono && x.tipo === 'pago_de_mas');
+    const tolOk = (a, b) => Math.abs((+a || 0) - (+b || 0)) <= Math.max(1000, (+b || 0) * 0.01);
+    let acciones = '';
+    if (f.tipo === 'agregar') acciones = btn(f, 'sumar', pdmAbierto ? 'Sumar (cubierto con lo que pagó)' : (c.cobro === 'cobrando' ? 'Sumar y mandar el detalle' : 'Sumar al pedido'), true) + btn(f, 'liberar', 'Ya lo resolví') + btn(f, 'descartar', 'No era un pedido');
+    else if (f.tipo === 'pago_de_mas') acciones = btn(f, 'a_favor', 'Dejar a favor', true) + btn(f, 'devolver', 'Devolver') + btn(f, 'liberar', 'Fue un error de lectura');
+    else if (f.tipo === 'pago_sin_cobro') acciones = (tolOk(f.comprobante_monto, c.pendiente) ? btn(f, 'pagar_pendiente', 'Marcar pagado lo pendiente', true) : '') + btn(f, 'a_favor', 'Dejar a favor', !tolOk(f.comprobante_monto, c.pendiente)) + btn(f, 'devolver', 'Devolver') + btn(f, 'liberar', 'Ya lo resolví');
+    else if (f.tipo === 'pago_repetido') acciones = btn(f, 'liberar', 'Es el mismo reenviado', true) + btn(f, 'a_favor', 'Dejar a favor') + btn(f, 'devolver', 'Devolver');
+    else acciones = btn(f, 'liberar', 'Ya lo resolví', true) + (f.tipo === 'pago_de_menos' ? '' : btn(f, 'descartar', 'Descartar'));
+    const plataHtml = plata ? `<div style="font-size:12.5px;margin-top:4px">${f.cobro_total ? 'Cobro ' + fmtMoney(f.cobro_total) + ' · ' : ''}comprobante ${fmtMoney(f.comprobante_monto)}${f.tipo === 'pago_de_mas' ? ' · <b>de más ' + fmtMoney(f.diferencia) + '</b>' : (f.tipo === 'pago_de_menos' ? ' · <b>faltan ' + fmtMoney(-(+f.diferencia || 0)) + '</b>' : '')}${f.caja ? ' · caja ' + escapeHtml(f.caja) : ''}${f.comprobante_key ? ` · <a href="${escapeHtml(mediaUrl(f.comprobante_key))}" target="_blank" rel="noopener">ver comprobante</a>` : ''}${rel ? '<br><span style="color:#22c55e">Coincide con lo que pidió sumar: aprobalo en su tarjeta.</span>' : ''}${f.tipo === 'pago_sin_cobro' && c.pendiente ? '<br>Lo pendiente suma ' + fmtMoney(c.pendiente) + (tolOk(f.comprobante_monto, c.pendiente) ? ' (coincide)' : '') : ''}</div>` : '';
+    return `<div data-fr-card="${f.id}" style="padding:10px 0 0;border-top:1px solid var(--border);margin-top:10px">
+      <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
+        <span style="font-weight:800;overflow-wrap:anywhere">${escapeHtml(f.nombre || 'Cliente')}</span>
+        ${corteChip(CORTE_FRENO_TIPO[f.tipo] || f.tipo, plata ? '#f59e0b' : '#ef4444')}
+        ${+f.frena && !+f.prueba ? corteChip('Frena el paquete', '#ef4444') : ''}${+f.prueba ? corteChip('prueba', 'var(--fg-subtle)') : ''}${f.origen === 'web' ? corteChip('pedido web', '#60a5fa') : ''}
+        <span style="font-size:12px;color:var(--fg-mute)">${hace(f.created_at)}</span>
+      </div>
+      ${c.cobro_txt || c.paquete_txt ? `<div style="font-size:12px;color:var(--fg-mute);margin-top:3px">${escapeHtml([c.cobro_txt, c.paquete_txt].filter(Boolean).join(' '))}</div>` : ''}
+      ${f.texto_cliente ? `<div style="font-size:12.5px;margin-top:4px;overflow-wrap:anywhere">Dijo: ${escapeHtml(f.texto_cliente)}</div>` : ''}
+      ${plataHtml}
+      ${f.tipo === 'agregar' ? itemsHtml(f) : ''}
+      ${f.nota ? `<div style="font-size:12px;color:var(--fg-mute);margin-top:3px">${escapeHtml(f.nota)}</div>` : ''}
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">${acciones}<button type="button" class="btn btn-ghost" data-sena-chat="${escapeHtml(f.telefono)}" style="padding:6px 10px;font-size:12.5px">Chat</button></div>
+    </div>`;
+  };
+  return `<div id="corte-frenos-panel" style="border:1px solid rgba(239,68,68,.5);background:rgba(239,68,68,.06);border-radius:12px;padding:12px 14px;margin:0 0 14px">
+    <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap"><span style="font-size:15px;font-weight:800">🛑 Para resolver</span><span style="font-size:12px;color:var(--fg-mute)">${abiertos.length} abierto${abiertos.length === 1 ? '' : 's'} · lo que pidieron sumar y los pagos que no coinciden. Mientras esté abierto, Neyen no embala y logística no despacha</span></div>
+    ${abiertos.map(card).join('') || '<div style="font-size:12.5px;color:var(--fg-mute);margin-top:6px">Nada pendiente ✨</div>'}
+    ${resueltos.length ? `<div style="font-size:12px;color:var(--fg-mute);margin-top:9px">Últimos días: ${resueltos.slice(0, 12).map(f => escapeHtml((f.nombre || 'cliente') + ' · ' + (CORTE_FRENO_TIPO[f.tipo] || f.tipo).toLowerCase() + ' (' + (f.resolucion || f.estado) + (f.resuelto_por ? ', ' + f.resuelto_por : '') + ')')).join(' · ')}</div>` : ''}
+  </div>`;
+}
+// Ítems como están en pantalla (lo que Gaspar corrigió). El precio no viaja: lo pone el server.
+function corteFrenoItemsDom(id) {
+  return [...document.querySelectorAll(`[data-fr-it="${id}"]`)].map(row => {
+    const v = k => { const el = row.querySelector(`[data-k="${k}"]`); return el ? el.value : ''; };
+    return { codigo: v('codigo') || null, cantidad: parseInt(v('cantidad'), 10) || null, color: v('color') || null };
+  });
+}
+async function corteFrenoAccion(id, acc, btn) {
+  const f = (STATE.corteFrenos || []).find(x => x.id === id); if (!f) return;
+  const c = f.cliente || {}, nom = f.nombre || 'el cliente';
+  const body = { accion: acc };
+  let txt = '';
+  if (acc === 'sumar') {
+    if (f.origen !== 'web') {
+      const its = corteFrenoItemsCot(corteFrenoItemsDom(id).map(x => ({ ...x, nombre: ((STATE.corteCatalogo || []).find(d => d.codigo === x.codigo) || {}).nombre || '' })));
+      if (!its.length || its.some(x => !x.ok)) { toast('Completá cada ítem: producto, cantidad y, en los cables de 0,35 y 0,5, el color'); return; }
+      body.items = its.map(x => ({ codigo: x.codigo, cantidad: x.cantidad, color: x.color }));
+      f._txtItems = its.map(x => x.cantidad + ' ' + x.nombre + (x.color ? ' ' + x.color : '')).join(', ') + ' (' + fmtMoney(its.reduce((s, x) => s + x.precio, 0)) + ')';
+    } else f._txtItems = (f.items || []).map(x => x.cantidad + ' ' + x.nombre).join(', ') + ' (' + fmtMoney(f.items_total) + ')';
+    const pdm = (STATE.corteFrenos || []).find(x => x.estado === 'abierto' && x.telefono === f.telefono && x.tipo === 'pago_de_mas');
+    const via = c.ventana ? 'por texto' : 'por plantilla (solo el total; el detalle le llega cuando conteste)';
+    if (pdm) txt = `Le sumo a ${nom} ${f._txtItems}. Si lo cubre lo que pagó de más (${fmtMoney(pdm.diferencia)}), quedan pagadas y ${c.ventana ? 'le escribo "Listo, con lo que pasaste de más te sumé..." con el recibo' : 'no le escribo (no tiene la ventana abierta)'}. Si no alcanza, lo pagado queda a favor y le mando el cobro de lo que falta ${via}.`;
+    else if (c.cobro === 'cobrando') txt = `Le sumo a ${nom} ${f._txtItems} y le mando el detalle nuevo con el total actualizado ${via}.`;
+    else if (c.cobro === 'parcial') txt = `Le sumo a ${nom} ${f._txtItems} al pago parcial y le mando el detalle con lo que ya pagó y lo que le queda ${via}.`;
+    else if (c.cobro === 'pagado') txt = `Le sumo a ${nom} ${f._txtItems} y le mando el cobro solo de eso ${via}.`;
+    else txt = `Le sumo a ${nom} ${f._txtItems} a su pedido: entra en el cobro de la semana.${c.ventana ? ' Le escribo "Listo, te sumo ... Te paso el total con el cobro."' : ' No le escribo (no tiene la ventana abierta).'}`;
+    if (c.paquete_txt && /ya salió/.test(c.paquete_txt)) txt += ' Su paquete ya salió: va en un envío aparte (logística vuelve a pedir el envío).';
+  } else if (acc === 'a_favor') {
+    const m = f.tipo === 'pago_de_mas' ? f.diferencia : f.comprobante_monto;
+    txt = `Los ${fmtMoney(m)} quedan a favor de ${nom}: el próximo cobro se los descuenta.` + (c.cobro === 'cobrando' ? ' Como tiene un cobro abierto, le mando ya el detalle con el descuento.' : '');
+  } else if (acc === 'devolver') txt = `Lo cierro como "a devolver ${fmtMoney(f.tipo === 'pago_de_mas' ? f.diferencia : f.comprobante_monto)}". La transferencia la hacés vos.`;
+  else if (acc === 'pagar_pendiente') txt = `Marco pagado lo pendiente de ${nom} (${fmtMoney(c.pendiente)}) con ese comprobante, también en la planilla.${c.ventana ? ' Le escribo "recibido, gracias! ya quedó pagado tu pedido de esta semana".' : ''}`;
+  else if (acc === 'liberar') { txt = `Lo doy por resuelto: el paquete de ${nom} se libera. No le escribo nada.`; body.motivo = btn ? btn.textContent.trim().toLowerCase() : 'ya lo resolví'; }
+  else if (acc === 'descartar') txt = `No era un pedido: lo descarto y el paquete de ${nom} se libera. No le escribo nada.`;
+  if (!(await showConfirm(txt, { title: CORTE_FRENO_TIPO[f.tipo] || 'Para resolver', confirmLabel: 'Confirmar', cancelLabel: 'Volver' }))) return;
+  if (btn) btn.disabled = true;
+  let j = {};
+  try { const r = await fetch(CONFIG.trackerUrl + '/admin/corte/frenos/' + id, { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); j = await r.json().catch(() => ({})); } catch (_) {}
+  if (Array.isArray(j.frenos)) STATE.corteFrenos = j.frenos;
+  if (j.ok && STATE.corteFrenoEdits) delete STATE.corteFrenoEdits[id];
+  const res = j.resultado || {};
+  niToast(j.ok ? ('Listo' + (res.via ? ' · ' + res.via : '') + (res.nota ? ' · ' + res.nota : '')) : (j.motivo || 'No se pudo. Probá de nuevo.'), j.ok ? {} : { error: true });
+  if (j.ok && ['sumar', 'pagar_pendiente', 'a_favor'].includes(acc)) { STATE.cortePedidos = undefined; STATE._corteLoading = false; STATE._corteGen = (STATE._corteGen || 0) + 1; }
+  if (STATE.view === 'corte') render();
+}
+function corteFrenosBind() {
+  document.querySelectorAll('[data-fr-acc]').forEach(b => { b.onclick = () => corteFrenoAccion(parseInt(b.getAttribute('data-fr-id'), 10), b.getAttribute('data-fr-acc'), b); });
+  // Editar ítems: se guardan en STATE (sin pedir nada al server) y se re-dibuja con el precio de la web.
+  const guardar = (id) => { STATE.corteFrenoEdits = STATE.corteFrenoEdits || {}; const its = corteFrenoItemsDom(id).map(x => ({ ...x, nombre: ((STATE.corteCatalogo || []).find(d => d.codigo === x.codigo) || {}).nombre || '' })); STATE.corteFrenoEdits[id] = its; return its; };
+  document.querySelectorAll('[data-fr-it] select, [data-fr-it] input').forEach(el => { el.onchange = () => { const id = parseInt(el.closest('[data-fr-it]').getAttribute('data-fr-it'), 10); guardar(id); render(); }; });
+  document.querySelectorAll('[data-fr-quitar]').forEach(b => { b.onclick = () => { const its = guardar(parseInt(b.getAttribute('data-fr-quitar'), 10)); its.splice(parseInt(b.getAttribute('data-fr-i'), 10), 1); render(); }; });
+  document.querySelectorAll('[data-fr-mas]').forEach(b => { b.onclick = () => { const its = guardar(parseInt(b.getAttribute('data-fr-mas'), 10)); its.push({ codigo: null, cantidad: 1, color: null }); render(); }; });
+  document.querySelectorAll('[data-corte-ir-frenos]').forEach(b => { b.onclick = () => { const p = document.getElementById('corte-frenos-panel'); if (p) p.scrollIntoView({ behavior: 'smooth', block: 'start' }); }; });
+}
 // ===== PAGOS A ANÍBAL (Gaspar 24-oct): sus tandas semanales (acrílicos de alumnos + carteles de Neon Infinito, sin insumos), lo
 // que cobra (15 % de $175.000 el m², por cada pieza cortada) y los pagos. Gaspar paga desde acá los viernes y queda la fecha en la
 // planilla (Venta_Insumos col S). Aníbal ve lo mismo en su usuario, sin los botones. =====
@@ -10282,7 +10431,7 @@ async function corteCargar(silent) {
   const gen = silent ? (STATE._corteGen || 0) : (STATE._corteGen = (STATE._corteGen || 0) + 1);
   if (silent) STATE._corteSilentLoading = true; else STATE._corteLoading = true;
   const admin = isAdmin() && !silent;
-  const prevSig = corteSig(STATE.cortePedidos), prevPaq = JSON.stringify(STATE.cortePaquetes || []), prevSen = JSON.stringify(STATE.corteSenas || []);
+  const prevSig = corteSig(STATE.cortePedidos), prevPaq = JSON.stringify(STATE.cortePaquetes || []), prevSen = JSON.stringify(STATE.corteSenas || []), prevFre = JSON.stringify(STATE.corteFrenos || []);
   let res = [];
   try {
     const proms = [
@@ -10301,12 +10450,15 @@ async function corteCargar(silent) {
     if (res[0] && Array.isArray(res[0].pedidos)) STATE.cortePedidos = res[0].pedidos;
     if (res[0] && Array.isArray(res[0].paquetes)) STATE.cortePaquetes = res[0].paquetes;
     if (res[0] && Array.isArray(res[0].senas)) STATE.corteSenas = res[0].senas;
+    if (res[0] && res[0].ok) { STATE.corteFrenos = Array.isArray(res[0].frenos) ? res[0].frenos : []; if (Array.isArray(res[0].catalogo)) STATE.corteCatalogo = res[0].catalogo; } // frenos del corte (Para resolver / tarjeta de Neyen)
     if (res[1] && res[1].ok) STATE.corteTanda = res[1];
   } else {
     STATE._corteLoading = false;
     STATE.cortePedidos = (res[0] && res[0].pedidos) || STATE.cortePedidos || [];
     STATE.cortePaquetes = (res[0] && res[0].paquetes) || STATE.cortePaquetes || [];
     STATE.corteSenas = (res[0] && res[0].senas) || STATE.corteSenas || [];
+    STATE.corteFrenos = (res[0] && res[0].ok) ? (Array.isArray(res[0].frenos) ? res[0].frenos : []) : (STATE.corteFrenos || []);
+    if (res[0] && Array.isArray(res[0].catalogo)) STATE.corteCatalogo = res[0].catalogo;
     STATE.corteTanda = (res[1] && res[1].ok) ? res[1] : null;
     STATE.corteAlumnos = admin ? ((res[2] && res[2].alumnos) || []) : [];
     STATE.cortePropuestas = admin ? ((res[3] && res[3].propuestas) || []).filter(p => !(STATE._cortePropHechas || {})[p.id]) : [];
@@ -10315,7 +10467,7 @@ async function corteCargar(silent) {
   STATE._corteLoadedAt = Date.now();
   corteBadgePaint();
   if (silent) {
-    if (corteSig(STATE.cortePedidos) !== prevSig || JSON.stringify(STATE.cortePaquetes || []) !== prevPaq || JSON.stringify(STATE.corteSenas || []) !== prevSen) STATE._corteDirty = true; // paquetes: la línea de logística de Neyen
+    if (corteSig(STATE.cortePedidos) !== prevSig || JSON.stringify(STATE.cortePaquetes || []) !== prevPaq || JSON.stringify(STATE.corteSenas || []) !== prevSen || JSON.stringify(STATE.corteFrenos || []) !== prevFre) STATE._corteDirty = true; // paquetes: la línea de logística de Neyen
     if (!STATE._corteDirty || !corteRenderFondoOk()) return; // queda pendiente para el próximo tick
   }
   STATE._corteDirty = false;
@@ -10360,6 +10512,7 @@ async function bindCorte() {
   // "Sin pagar" después del martes 16 h: el botón rojo de la derecha (solo admin).
   if (isAdmin()) { corteSinPagarFetch(false); const spb = document.querySelector('[data-corte-sinpagar]'); if (spb) spb.onclick = corteSinPagarModal; }
   if (isAdmin()) corteSenasBind(); // señas de pedidos web
+  if (isAdmin()) corteFrenosBind(); // frenos del corte: Para resolver
   // Aníbal: tandas y pagos (Gaspar abre el panel desde la tarjeta; Aníbal lo ve en su pantalla).
   if (isAdmin() || isAnibalUser(STATE.user)) { anibalFetch(false); document.querySelectorAll('[data-anb-abrir]').forEach(b => { b.onclick = anibalModal; }); const ap = document.querySelector('[data-anb-panel]'); if (ap) anibalBindAcciones(ap); }
   if (STATE.cortePedidos === undefined && !STATE._corteLoading) {
@@ -10709,7 +10862,7 @@ async function corteBulk(action, extra) {
   try {
     const r = await fetch(CONFIG.trackerUrl + '/admin/corte/pedido', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ action, ...extra }) }).then(x => x.json());
     // niToast (vive fuera de #app): el toast común se perdía con el render() + la recarga que viene atrás.
-    if (r && r.ok) { STATE.corteSelected = null; STATE.corteSel = {}; STATE.cortePedidos = undefined; STATE._corteLoading = false; render(); niToast('Listo ✓ (' + (r.n || 0) + ')'); }
+    if (r && r.ok) { STATE.corteSelected = null; STATE.corteSel = {}; STATE.cortePedidos = undefined; STATE._corteLoading = false; render(); niToast('Listo ✓ (' + (r.n || 0) + ')' + (r.motivo ? ' · ' + r.motivo : ''), r.motivo ? { error: true } : undefined); }
     else { niToast((r && (r.motivo || r.error)) || 'No se pudo', { error: true }); }
   } catch (_) { niToast('Error de red', { error: true }); }
 }
@@ -10739,10 +10892,19 @@ async function corteCobroConflictos(resultados, nombreDe, extra) {
 async function corteBulkCobrar(tandaId) {
   if (STATE._corteCobrando) { toast('Ya hay un cobro enviándose — esperá a que termine'); return; }
   const sel = STATE.corteSel || {};
-  const elig = corteBoardGroups(tandaId).filter(g => sel[g.key] && g.tel && g.pago !== 'parcial').map(g => ({ ...g, cob: corteCobrable(g) })).filter(g => g.cob.n > 0);
+  let elig = corteBoardGroups(tandaId).filter(g => sel[g.key] && g.tel && g.pago !== 'parcial').map(g => ({ ...g, cob: corteCobrable(g) })).filter(g => g.cob.n > 0);
   // Seleccionados SIN teléfono: no se les puede mandar → se avisan (antes quedaban afuera en silencio: Candela, Ezequiel Aranda).
   const sinTelSel = corteBoardGroups(tandaId).filter(g => sel[g.key] && !g.tel && corteCobrable(g).n > 0);
   if (!elig.length) { toast(sinTelSel.length ? 'Los seleccionados no tienen teléfono: asignáselo arriba (⚠ sin teléfono)' : 'Nada para cobrar en la selección'); return; }
+  // Frenos del corte: el que pidió sumar algo o tiene una diferencia de plata se resuelve ANTES del cobro (si no, el cobro sale
+  // con el total viejo). Por defecto quedan afuera.
+  const frAb = tel => (STATE.corteFrenos || []).filter(f => f.estado === 'abierto' && !+f.prueba && String(f.telefono) === String(tel));
+  const conFreno = elig.filter(g => frAb(g.tel).length);
+  if (conFreno.length) {
+    const lista = conFreno.map(g => '• ' + g.nombre + ': ' + frAb(g.tel).map(corteFrenoCortoFront).join(' · ')).join('\n');
+    const igual = await showConfirm('Tienen algo para resolver antes del cobro:\n\n' + lista + '\n\nSi lo resolvés primero en Para resolver, el cobro sale con el total correcto. ¿Les mando el cobro igual?', { title: 'Para resolver', confirmLabel: 'Mandar igual', cancelLabel: 'Dejarlos afuera' }).catch(() => false);
+    if (!igual) { elig = elig.filter(g => !conFreno.includes(g)); if (!elig.length) { toast('No quedó nadie para cobrar'); return; } }
+  }
   const total = elig.reduce((s, g) => s + g.cob.total, 0);
   const reenv = elig.filter(g => g.cob.recobro);
   const lineas = elig.map(g => '• ' + g.nombre + ' (' + corteFmtTel(g.tel) + ') — $' + g.cob.total.toLocaleString('es-AR') + (g.cob.recobro ? ' (re-envío)' : '')).join('\n');
