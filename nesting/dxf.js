@@ -54,7 +54,8 @@
   const num = (e, c, def) => { const v = parseFloat(uno(e, c, '')); return isFinite(v) ? v : def; };
   const todos = (e, c) => e.g.filter(([k]) => k === c).map(([, v]) => parseFloat(v));
 
-  // Sistema de coordenadas del objeto (OCS) → universal, por el "arbitrary axis algorithm" del DXF. Devuelve f(x, y, z) → [X, Y].
+  // Sistema de coordenadas del objeto (OCS) → universal, por el "arbitrary axis algorithm" del DXF. Devuelve f(x, y, z) →
+  // [X, Y, Z]: la Z hace falta adentro de un bloque insertado inclinado, que la proyecta en el plano XY.
   function ocs(e) {
     let nx = num(e, 210, 0), ny = num(e, 220, 0), nz = num(e, 230, 1);
     const L = Math.hypot(nx, ny, nz) || 1; nx /= L; ny /= L; nz /= L;
@@ -63,9 +64,12 @@
     if (Math.abs(nx) < 1 / 64 && Math.abs(ny) < 1 / 64) { ax = nz; ay = 0; az = -nx; } // Wy × N
     else { ax = -ny; ay = nx; az = 0; } // Wz × N
     const La = Math.hypot(ax, ay, az); ax /= La; ay /= La; az /= La;
-    const bx = ny * az - nz * ay, by = nz * ax - nx * az; // N × Ax (solo X e Y)
-    return (x, y, z) => [x * ax + y * bx + z * nx, x * ay + y * by + z * ny];
+    const bx = ny * az - nz * ay, by = nz * ax - nx * az, bz = nx * ay - ny * ax; // N × Ax
+    return (x, y, z) => [x * ax + y * bx + z * nx, x * ay + y * by + z * ny, x * az + y * bz + z * nz];
   }
+  // Puntos (x, y) del OCS de la entidad, a la altura z (su elevación), en el universal; con el normal de siempre solo se les
+  // pone la z (si no es 0).
+  const enOcs = (T, z) => (pts) => (T ? pts.map(([x, y]) => T(x, y, z)) : z ? pts.map(([x, y]) => [x, y, z]) : pts);
 
   // Ángulo de cada tramo recto para que la cuerda quede a tol o menos de un arco de radio r (2·acos(1 - tol/r), escrito de
   // forma que no se pierda con radios enormes).
@@ -89,14 +93,15 @@
     out.push(q); // la punta exacta: así no se abre por redondeo
   }
 
-  // Muestrea la curva P(t) tramo por tramo entre los cortes (los nudos): parte cada tramo en 8 por lo menos y sigue partiendo
-  // mientras alguno de 7 puntos del medio quede a más de tol del segmento (no de la recta: así se ven las vueltas en punta).
+  // Muestrea la curva P(t) tramo por tramo entre los cortes (los nudos): parte cada tramo en 8 por lo menos (salvo que sea
+  // corto: su cuerda de menos de 8·tol) y sigue partiendo mientras alguno de 7 puntos del medio quede a más de tol del
+  // segmento (no de la recta: así se ven las vueltas en punta).
   function muestrear(P, cortes, tol) {
     const pts = [P(cortes[0])];
     const lejos = (a, b, m) => { const dx = b[0] - a[0], dy = b[1] - a[1], L2 = dx * dx + dy * dy; let t = L2 > 1e-24 ? ((m[0] - a[0]) * dx + (m[1] - a[1]) * dy) / L2 : 0; t = Math.max(0, Math.min(1, t)); return Math.hypot(m[0] - a[0] - t * dx, m[1] - a[1] - t * dy); };
     const partir = (ta, pa, tb, pb, prof) => {
       const tm = (ta + tb) / 2, pm = P(tm);
-      let sigue = prof < 3 || lejos(pa, pb, pm) > tol;
+      let sigue = (prof < 3 && Math.hypot(pb[0] - pa[0], pb[1] - pa[1]) >= 8 * tol) || lejos(pa, pb, pm) > tol;
       for (let j = 1; j < 8 && !sigue; j++) if (j !== 4 && lejos(pa, pb, P(ta + (tb - ta) * j / 8)) > tol) sigue = true;
       if (sigue && prof < 18) { partir(ta, pa, tm, pm, prof + 1); partir(tm, pm, tb, pb, prof + 1); }
       else pts.push(pb);
@@ -104,29 +109,29 @@
     for (let i = 0; i + 1 < cortes.length; i++) { const a = cortes[i], b = cortes[i + 1]; if (b - a > 1e-12) partir(a, P(a), b, P(b), 0); }
     return pts;
   }
-  // NURBS (de Boor) en el parámetro t, con pesos.
+  // NURBS (de Boor) en el parámetro t, con pesos; los puntos de control y lo que devuelve van en 3D [x, y, z].
   function deBoor(k, t, nudos, ctrl, w) {
     const n = ctrl.length - 1;
-    let s = k;
-    for (let i = k; i < nudos.length - k - 1; i++) if (t >= nudos[i] && t < nudos[i + 1]) { s = i; break; }
-    if (t >= nudos[n + 1]) s = n; // el final
-    s = Math.min(Math.max(s, k), n);
+    // tramo de nudos: el último s entre k y n con nudos[s] <= t (por bisección: recorrer la lista hacía que una curva de miles
+    // de puntos de control tardara segundos)
+    let s = k, hi = n;
+    while (s < hi) { const m = (s + hi + 1) >> 1; if (nudos[m] <= t) s = m; else hi = m - 1; }
     const d = [];
-    for (let j = 0; j <= k; j++) { const p = ctrl[j + s - k], ww = w ? w[j + s - k] : 1; d.push([p[0] * ww, p[1] * ww, ww]); }
+    for (let j = 0; j <= k; j++) { const p = ctrl[j + s - k], ww = w ? w[j + s - k] : 1; d.push([p[0] * ww, p[1] * ww, p[2] * ww, ww]); }
     for (let r = 1; r <= k; r++) for (let j = k; j >= r; j--) {
       const i = j + s - k, den = nudos[i + k - r + 1] - nudos[i];
-      const a = den > 1e-14 ? (t - nudos[i]) / den : 0;
-      d[j] = [(1 - a) * d[j - 1][0] + a * d[j][0], (1 - a) * d[j - 1][1] + a * d[j][1], (1 - a) * d[j - 1][2] + a * d[j][2]];
+      const a = den > 1e-14 ? (t - nudos[i]) / den : 0, u = d[j - 1], v = d[j];
+      d[j] = [(1 - a) * u[0] + a * v[0], (1 - a) * u[1] + a * v[1], (1 - a) * u[2] + a * v[2], (1 - a) * u[3] + a * v[3]];
     }
-    const q = d[k]; return [q[0] / q[2], q[1] / q[2]];
+    const q = d[k]; return [q[0] / q[3], q[1] / q[3], q[2] / q[3]];
   }
   function spline(e, tol, avisos) {
     const k = Math.round(num(e, 71, 3)), flag = Math.round(num(e, 70, 0));
     const nudos = todos(e, 40), wts = todos(e, 41);
-    const cx = todos(e, 10), cy = todos(e, 20), fx = todos(e, 11), fy = todos(e, 21);
-    const ctrl = cx.map((x, i) => [x, cy[i]]);
-    if (k < 1 || ctrl.length < 2 || nudos.length !== ctrl.length + k + 1) {
-      if (fx.length >= 2) { const s = porAjuste(e, fx.map((x, i) => [x, fy[i]]), !!(flag & 1), tol); if (s) avisos.splineAjuste++; return s; }
+    const cx = todos(e, 10), cy = todos(e, 20), cz = todos(e, 30), fx = todos(e, 11), fy = todos(e, 21), fz = todos(e, 31);
+    const ctrl = cx.map((x, i) => [x, cy[i], cz[i] || 0]);
+    if (k < 1 || ctrl.length < k + 1 || nudos.length !== ctrl.length + k + 1) { // de grado k hacen falta k + 1 puntos de control
+      if (fx.length >= 2) { const s = porAjuste(e, fx.map((x, i) => [x, fy[i], fz[i] || 0]), !!(flag & 1), tol); if (s) avisos.splineAjuste++; return s; }
       return null;
     }
     const w = wts.length === ctrl.length && wts.some((x) => Math.abs(x - 1) > 1e-12) ? wts : null;
@@ -140,14 +145,15 @@
   // SPLINE que trae solo puntos de paso: la cúbica que pasa por ellos con el parámetro = largo de cuerda, como AutoCAD, con
   // curvatura 0 en las puntas o, si vienen, con las tangentes del principio y del final (12/22 y 13/23).
   function porAjuste(e, F, cerrar, tol) {
-    if (cerrar && Math.hypot(F[0][0] - F[F.length - 1][0], F[0][1] - F[F.length - 1][1]) > 1e-9) F = F.concat([F[0]]);
+    const d3 = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]);
+    if (cerrar && d3(F[0], F[F.length - 1]) > 1e-9) F = F.concat([F[0]]);
     const Q = [F[0]];
-    for (const p of F) if (isFinite(p[0]) && isFinite(p[1]) && Math.hypot(p[0] - Q[Q.length - 1][0], p[1] - Q[Q.length - 1][1]) > 1e-9) Q.push(p);
+    for (const p of F) if (isFinite(p[0]) && isFinite(p[1]) && isFinite(p[2]) && d3(p, Q[Q.length - 1]) > 1e-9) Q.push(p);
     const n = Q.length;
     if (n < 2) return null;
     const s = [0];
-    for (let i = 1; i < n; i++) s.push(s[i - 1] + Math.hypot(Q[i][0] - Q[i - 1][0], Q[i][1] - Q[i - 1][1]));
-    const tg = (c1, c2, c3) => { const x = num(e, c1, NaN), y = num(e, c2, NaN), L = Math.hypot(x, y, num(e, c3, 0)); return isFinite(L) && L > 1e-12 ? [x / L, y / L] : null; };
+    for (let i = 1; i < n; i++) s.push(s[i - 1] + d3(Q[i], Q[i - 1]));
+    const tg = (c1, c2, c3) => { const x = num(e, c1, NaN), y = num(e, c2, NaN), z = num(e, c3, 0), L = Math.hypot(x, y, z); return isFinite(L) && L > 1e-12 ? [x / L, y / L, z / L] : null; };
     const t0 = tg(12, 22, 32), t1 = tg(13, 23, 33);
     // segundas derivadas de una coordenada: sistema tridiagonal (Thomas)
     const segundas = (y, d0, d1) => {
@@ -160,14 +166,14 @@
       for (let i = n - 2; i >= 0; i--) M[i] = (d[i] - c[i] * M[i + 1]) / b[i];
       return M;
     };
-    const X = Q.map((p) => p[0]), Y = Q.map((p) => p[1]);
-    const MX = segundas(X, t0 && t0[0], t1 && t1[0]), MY = segundas(Y, t0 && t0[1], t1 && t1[1]);
+    const X = Q.map((p) => p[0]), Y = Q.map((p) => p[1]), Z = Q.map((p) => p[2]);
+    const MX = segundas(X, t0 && t0[0], t1 && t1[0]), MY = segundas(Y, t0 && t0[1], t1 && t1[1]), MZ = segundas(Z, t0 && t0[2], t1 && t1[2]);
     let i = 0;
     const P = (t) => {
       while (i > 0 && t < s[i]) i--;
       while (i < n - 2 && t > s[i + 1]) i++;
       const h = s[i + 1] - s[i], A = (s[i + 1] - t) / h, B = (t - s[i]) / h, k = h * h / 6, a3 = A * A * A - A, b3 = B * B * B - B;
-      return [A * X[i] + B * X[i + 1] + (a3 * MX[i] + b3 * MX[i + 1]) * k, A * Y[i] + B * Y[i + 1] + (a3 * MY[i] + b3 * MY[i + 1]) * k];
+      return [A * X[i] + B * X[i + 1] + (a3 * MX[i] + b3 * MX[i + 1]) * k, A * Y[i] + B * Y[i + 1] + (a3 * MY[i] + b3 * MY[i + 1]) * k, A * Z[i] + B * Z[i + 1] + (a3 * MZ[i] + b3 * MZ[i + 1]) * k];
     };
     const pts = muestrear(P, s, tol);
     pts[0] = Q[0]; pts[pts.length - 1] = Q[n - 1];
@@ -175,10 +181,10 @@
   }
 
   function elipse(e, tol) {
-    const c = [num(e, 10, 0), num(e, 20, 0)], M = [num(e, 11, 0), num(e, 21, 0), num(e, 31, 0)], ra = num(e, 40, 1);
+    const c = [num(e, 10, 0), num(e, 20, 0), num(e, 30, 0)], M = [num(e, 11, 0), num(e, 21, 0), num(e, 31, 0)], ra = num(e, 40, 1);
     let nx = num(e, 210, 0), ny = num(e, 220, 0), nz = num(e, 230, 1);
     const L = Math.hypot(nx, ny, nz) || 1; nx /= L; ny /= L; nz /= L;
-    const m = [(ny * M[2] - nz * M[1]) * ra, (nz * M[0] - nx * M[2]) * ra]; // eje menor = ratio · (N × mayor), en 3D; de él, X e Y
+    const m = [(ny * M[2] - nz * M[1]) * ra, (nz * M[0] - nx * M[2]) * ra, (nx * M[1] - ny * M[0]) * ra]; // eje menor = ratio · (N × mayor), en 3D
     // parámetros fuera de [0, 2π): se llevan adentro; 0 a 2π es la elipse entera
     const p0 = num(e, 41, 0), a0 = mod(p0, 2 * Math.PI);
     let vuelta = mod(num(e, 42, 2 * Math.PI) - p0, 2 * Math.PI);
@@ -186,15 +192,15 @@
     const entera = Math.abs(vuelta - 2 * Math.PI) < 1e-9;
     const R = Math.hypot(M[0], M[1], M[2]), n = Math.min(MAX_TRAMOS, Math.max(entera ? 8 : 1, Math.ceil(vuelta / pasoArco(R, tol))));
     const pts = [];
-    for (let i = 0; i < (entera ? n : n + 1); i++) { const t = a0 + vuelta * i / n; pts.push([c[0] + M[0] * Math.cos(t) + m[0] * Math.sin(t), c[1] + M[1] * Math.cos(t) + m[1] * Math.sin(t)]); }
+    for (let i = 0; i < (entera ? n : n + 1); i++) { const t = a0 + vuelta * i / n, co = Math.cos(t), si = Math.sin(t); pts.push([c[0] + M[0] * co + m[0] * si, c[1] + M[1] * co + m[1] * si, c[2] + M[2] * co + m[2] * si]); }
     return { pts, cerrado: entera };
   }
 
-  // Una entidad a subtrazos; null si no dibuja nada que se corte.
+  // Una entidad a subtrazos (puntos [x, y] o [x, y, z] del universal del bloque); null si no dibuja nada que se corte.
   function geometria(e, tol, av) {
-    const T = ocs(e), tr = (pts) => (T ? pts.map(([x, y]) => T(x, y, num(e, 38, num(e, 30, 0)))) : pts);
+    const tr = enOcs(ocs(e), num(e, 38, num(e, 30, 0))); // ARC, CIRCLE y LWPOLYLINE: en su OCS, a su elevación
     switch (e.tipo) {
-      case 'LINE': return [{ pts: [[num(e, 10, 0), num(e, 20, 0)], [num(e, 11, 0), num(e, 21, 0)]], cerrado: false }];
+      case 'LINE': return [{ pts: [[num(e, 10, 0), num(e, 20, 0), num(e, 30, 0)], [num(e, 11, 0), num(e, 21, 0), num(e, 31, 0)]], cerrado: false }];
       case 'ARC': {
         const cx = num(e, 10, 0), cy = num(e, 20, 0), r = num(e, 40, 0);
         if (!(r > 0)) return null;
@@ -269,7 +275,7 @@
       const [a, b] = secciones.BLOCKS, es = entidades(ps, a, b);
       let cur = null;
       for (const e of es) {
-        if (e.tipo === 'BLOCK') { cur = { base: [num(e, 10, 0), num(e, 20, 0)], ents: [] }; bloques[uno(e, 2, '')] = cur; }
+        if (e.tipo === 'BLOCK') { cur = { base: [num(e, 10, 0), num(e, 20, 0), num(e, 30, 0)], ents: [] }; bloques[uno(e, 2, '')] = cur; }
         else if (e.tipo === 'ENDBLK') cur = null;
         else if (cur) cur.ents.push(e);
       }
@@ -291,26 +297,31 @@
       return { capa, rgb, apagada: info.apagada || col < 0, congelada: info.congelada };
     };
     // Tolerancia de las curvas en unidades del dibujo para la matriz M: tol (mm) dividido por el factor de las unidades y por
-    // lo más que estira M (su norma espectral). Así un DXF en metros o un bloque a escala 4 también quedan a tol en mm.
-    const tolEn = (M) => { const [p, q, r, t] = M, s2 = p * p + q * q + r * r + t * t, d = Math.hypot(p * p + q * q - r * r - t * t, 2 * (p * r + q * t)); return tol / (factor * Math.max(1e-9, Math.sqrt((s2 + d) / 2))); };
+    // lo más que estira M al proyectarla en el plano XY (la norma espectral de sus dos primeras filas). Así un DXF en metros o
+    // un bloque a escala 4 también quedan a tol en mm.
+    const tolEn = (M) => {
+      const a = M[0] * M[0] + M[3] * M[3] + M[6] * M[6], b = M[0] * M[1] + M[3] * M[4] + M[6] * M[7], c = M[1] * M[1] + M[4] * M[4] + M[7] * M[7];
+      return tol / (factor * Math.max(1e-9, Math.sqrt((a + c + Math.hypot(a - c, 2 * b)) / 2)));
+    };
     const seVe = (e, capaPadre, colorPadre) => !colorDe(e, capaPadre, colorPadre).apagada;
     const recorrer = (lista, M, capaPadre, colorPadre, prof) => {
       for (let i = 0; i < lista.length; i++) {
         const e = lista[i];
         if (Math.round(num(e, 67, 0)) === 1) continue; // espacio papel
         if (e.tipo === 'POLYLINE') { // viene seguida de VERTEX... SEQEND
-          const vs = []; let j = i + 1;
+          const vs = [], vz = []; let j = i + 1;
           for (; j < lista.length && lista[j].tipo === 'VERTEX'; j++) {
             const fv = Math.round(num(lista[j], 70, 0));
             if (fv & (16 | 64 | 128)) continue; // marco de spline, malla, cara
-            vs.push({ p: [num(lista[j], 10, 0), num(lista[j], 20, 0)], b: num(lista[j], 42, 0) });
+            vs.push({ p: [num(lista[j], 10, 0), num(lista[j], 20, 0)], b: num(lista[j], 42, 0) }); vz.push(num(lista[j], 30, 0));
           }
           if (j < lista.length && lista[j].tipo === 'SEQEND') j++;
           i = j - 1;
           const fl = Math.round(num(e, 70, 0));
           if (fl & (16 | 64)) { otros.MALLA = (otros.MALLA || 0) + 1; continue; }
-          const T = fl & 8 ? null : ocs(e), tr = (pts) => (T ? pts.map(([x, y]) => T(x, y, num(e, 30, 0))) : pts);
-          const g = polilinea(vs, !!(fl & 1), tolEn(M), tr);
+          // 2D: en su OCS, a la elevación de la POLYLINE; 3D (8): cada vértice con su z, en el universal
+          const tr = fl & 8 ? (pts) => pts : enOcs(ocs(e), num(e, 30, 0));
+          const g = polilinea(fl & 8 ? vs.map((v, k) => ({ p: [v.p[0], v.p[1], vz[k]], b: 0 })) : vs, !!(fl & 1), tolEn(M), tr);
           if (g) emitir(e, g, M, capaPadre, colorPadre);
           continue;
         }
@@ -332,13 +343,13 @@
           copias += nc * nf;
           if (copias > MAX_COPIAS) throw new Error('El DXF tiene más de 200.000 copias de bloques: parece roto o es demasiado grande para leerlo acá.');
           // La referencia se arma en su OCS (inserción, giro, escala y grilla del arreglo) y después pasa al universal: con
-          // extrusión (0, 0, -1) queda espejada entera, no solo en X.
-          const p = [num(e, 10, 0), num(e, 20, 0)];
-          const T = ocs(e), W = T ? [...T(1, 0, 0), ...T(0, 1, 0), ...T(0, 0, num(e, 30, 0))] : null;
+          // extrusión (0, 0, -1) queda espejada entera, no solo en X; inclinada, la z de lo de adentro también corre el dibujo.
+          const p = [num(e, 10, 0), num(e, 20, 0), num(e, 30, 0)], sz = num(e, 43, 1);
+          const T = ocs(e), W = T ? [...T(1, 0, 0), ...T(0, 1, 0), ...T(0, 0, 1), 0, 0, 0] : null;
           for (let f = 0; f < nf; f++) for (let c = 0; c < nc; c++) {
             const ox = c * dc, oy = f * df;
             // local: (x - base)·escala, girado, + inserción (+ la grilla del arreglo, girada)
-            const L = [sx * cs, sx * sn, -sy * sn, sy * cs, p[0] + ox * cs - oy * sn - (b.base[0] * sx * cs - b.base[1] * sy * sn), p[1] + ox * sn + oy * cs - (b.base[0] * sx * sn + b.base[1] * sy * cs)];
+            const L = [sx * cs, sx * sn, 0, -sy * sn, sy * cs, 0, 0, 0, sz, p[0] + ox * cs - oy * sn - (b.base[0] * sx * cs - b.base[1] * sy * sn), p[1] + ox * sn + oy * cs - (b.base[0] * sx * sn + b.base[1] * sy * cs), p[2] - b.base[2] * sz];
             recorrer(b.ents, componer(W ? componer(L, W) : L, M), capa, rgb, prof + 1);
           }
           continue;
@@ -359,22 +370,27 @@
     const emitir = (e, subs, M, capaPadre, colorPadre) => {
       const { capa, rgb, apagada } = colorDe(e, capaPadre, colorPadre);
       if (apagada) return;
-      const f = (x, y) => [(M[0] * x + M[2] * y + M[4]) * factor, (M[1] * x + M[3] * y + M[5]) * factor];
+      const f = (x, y, z) => [(M[0] * x + M[3] * y + M[6] * z + M[9]) * factor, (M[1] * x + M[4] * y + M[7] * z + M[10]) * factor];
       const out = [];
       for (const s of subs) {
-        const pts = s.pts.filter((p) => isFinite(p[0]) && isFinite(p[1])).map(([x, y]) => f(x, y));
+        const pts = s.pts.filter((p) => isFinite(p[0]) && isFinite(p[1])).map(([x, y, z]) => f(x, y, isFinite(z) ? z : 0));
         puntos += pts.length;
         if (pts.length >= 2) out.push({ pts, cerrado: s.cerrado && pts.length >= 3, circulo: !!s.circulo, ent: e.tipo });
       }
       if (puntos > MAX_PUNTOS) throw new Error('El DXF es demasiado grande para leerlo acá (más de 5 millones de puntos). Puede estar roto.');
       if (out.length) els.push({ subs: out, capa, rgb });
     };
-    recorrer(entidades(ps, secciones.ENTITIES[0], secciones.ENTITIES[1]), [1, 0, 0, 1, 0, 0], '', null, 0);
+    recorrer(entidades(ps, secciones.ENTITIES[0], secciones.ENTITIES[1]), [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0], '', null, 0);
     return { els, unidades: ins, unidadConocida: conocida, factor, textos, otros, avisos: av, capas: Object.keys(capas) };
   }
-  // M aplicada después de L (las dos como [a, b, c, d, e, f]: x' = a·x + c·y + e, y' = b·x + d·y + f).
+  // Matrices de los bloques: afines en 3D, por columnas [a, b, c, d, e, f, g, h, i, tx, ty, tz]: x' = a·x + d·y + g·z + tx,
+  // y' = b·x + e·y + h·z + ty, z' = c·x + f·y + i·z + tz. La z importa: un bloque insertado inclinado proyecta en el plano
+  // XY la z de lo que tiene adentro (la elevación de una polilínea, la z de un círculo o de una línea).
+  // componer(L, M): M aplicada después de L.
   function componer(L, M) {
-    return [L[0] * M[0] + L[1] * M[2], L[0] * M[1] + L[1] * M[3], L[2] * M[0] + L[3] * M[2], L[2] * M[1] + L[3] * M[3], L[4] * M[0] + L[5] * M[2] + M[4], L[4] * M[1] + L[5] * M[3] + M[5]];
+    const ap = (x, y, z) => [M[0] * x + M[3] * y + M[6] * z, M[1] * x + M[4] * y + M[7] * z, M[2] * x + M[5] * y + M[8] * z];
+    const t = ap(L[9], L[10], L[11]);
+    return [...ap(L[0], L[1], L[2]), ...ap(L[3], L[4], L[5]), ...ap(L[6], L[7], L[8]), t[0] + M[9], t[1] + M[10], t[2] + M[11]];
   }
 
   // ───────────── unir trazos sueltos ─────────────
@@ -382,18 +398,26 @@
   //  1. Las puntas prácticamente iguales (a 0,0001 mm o menos) son el mismo nodo, y los trazos repetidos (entre los mismos
   //     nodos y por el mismo camino) se toman una vez.
   //  2. Las puntas que quedan sueltas se juntan de a dos, las más cercanas primero, si están a tol o menos.
-  //  3. Una punta que sigue suelta y cae a tol o menos del medio de otro trazo lo parte ahí: una T (Fusion no parte una recta
-  //     cuando otra termina en su medio).
+  //  3. Una punta que cae a tol o menos del medio de otro trazo lo parte ahí: una T (Fusion no parte una recta cuando otra
+  //     termina en su medio). Vale también para un nodo donde ya se juntan dos o más trazos (un "+": dos trazos que terminan
+  //     en el mismo punto del medio de una recta entera). Contra una curva vale tol + curva (el error de cuerda con el que se
+  //     pasó a tramos rectos): la punta está sobre la curva de verdad, no sobre los tramos.
   //  4. Cada zona que encierran los trazos es una figura cerrada (las caras del dibujo): dos piezas pegadas por un lado salen
   //     como dos figuras y el lado compartido va en las dos. Un hueco que toca el borde en una punta sale aparte. No depende
   //     del orden de los trazos en el archivo.
   //  5. Lo que no encierra nada (colas, líneas sueltas, puentes entre figuras) queda abierto, en cadenas que siguen por donde
   //     va más derecho, sin pasar por las figuras.
+  //  6. Dos trazos que se cruzan sin una punta ahí no se parten solos. Solo si son del mismo dibujo conectado y uno de los dos
+  //     va de un nodo a otro distinto (una divisoria, como las dos rectas enteras de una ventana pegadas al borde): ahí hace
+  //     falta para cerrar las figuras. Dos letras superpuestas (dibujos aparte, o contornos que se tocan en un punto) o una
+  //     línea suelta que cruza una pieza siguen enteras, y el cruce se marca (cruzan).
   // Ningún trazo se tira por corto. Devuelve { cerradas: [pts], abiertas: [{pts, falta, toca}], sueltas: [[x, y]],
-  // cruces: [[x, y]], repetidos, partidos, usados, nodos }. falta: lo que le falta a una abierta para cerrar; toca: sale de una
-  // figura cerrada (ahí falta no es un hueco). usados: cuántos trazos forman parte de alguna figura cerrada.
-  function unir(abiertos, tol) {
-    tol = Math.max(1e-6, +tol || 0);
+  // cruces: [[x, y]], cruzan: [[x, y]], repetidos, partidos, cruzadas, usados, nodos }. falta: lo que le falta a una abierta
+  // para cerrar; toca: sale de una figura cerrada (ahí falta no es un hueco). cruces: nodos donde se juntan más de dos trazos;
+  // cruzan: cruces que no se partieron; cruzadas: cruces que se partieron. usados: cuántos trazos forman parte de alguna
+  // figura cerrada.
+  function unir(abiertos, tol, curva) {
+    tol = Math.max(1e-6, +tol || 0); curva = Math.max(0, +curva || 0);
     const eps = Math.min(tol, 1e-4), d2 = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1]), ck = (x, y) => x + ',' + y;
     const largoDe = (p) => { let L = 0; for (let i = 1; i < p.length; i++) L += d2(p[i], p[i - 1]); return L; };
     // Aristas sin puntos repetidos seguidos (con un vértice doble no se puede medir para dónde sale). P: puntas; padre: qué
@@ -488,20 +512,31 @@
       juntar(padre, n, m);
       if (cn !== cm) largoComp.set(juntar(cpadre, cn, cm), largoComp.get(cn) + largoComp.get(cm));
     }
-    // 3. T: una punta que sigue suelta, a tol o menos del medio de otro trazo (o de su propio trazo, lejos de esa punta)
+    // Cadenas: los trazos seguidos por nodos donde se juntan solo dos (e.cad). Devuelve, de cada cadena, los nodos de sus
+    // puntas (los de grado distinto de 2: una T, un cruce, una punta suelta); un contorno cerrado suelto no tiene.
+    const cadenas = () => {
+      const llegan = new Map(), puntas = new Map(), cad = E.map((_, k) => k);
+      E.forEach((e, k) => { for (const n of [nodo(e.ia), nodo(e.ib)]) { const l = llegan.get(n); if (l) l.push(k); else llegan.set(n, [k]); } });
+      for (const [, l] of llegan) if (l.length === 2 && l[0] !== l[1]) juntar(cad, l[0], l[1]);
+      E.forEach((e, k) => { e.cad = raizDe(cad, k); });
+      for (const [n, l] of llegan) if (l.length !== 2) for (const k of l) { const s = puntas.get(E[k].cad); if (s) s.add(n); else puntas.set(E[k].cad, new Set([n])); }
+      return puntas;
+    };
+    // 3. T: una punta (suelta, o un nodo donde ya se juntan trazos) a tol o menos del medio de otro trazo, o de su propio
+    //    trazo lejos de esa punta
     let partidos = 0;
     gr = grados();
-    // grilla de trazos: cada uno en las celdas que toca su caja (agrandada en tol) o, si la caja es grande (una recta larga en
-    // diagonal), en las que tocan sus tramos; los desmedidos van aparte y se miran siempre
-    const C = Math.max(4 * tol, 5), grillaE = new Map(), largas = [];
+    // grilla de trazos: cada uno en las celdas que toca su caja (agrandada en tolT) o, si la caja es grande (una recta larga
+    // en diagonal), en las que tocan sus tramos; los desmedidos van aparte y se miran siempre
+    const tolT = tol + curva, C = Math.max(4 * tolT, 5), grillaE = new Map(), largas = [];
     const caja = (e) => { let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity; for (const [x, y] of e.pts) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; } e.bb = [x0, y0, x1, y1]; };
     const enCelda = (k, e) => { const l = grillaE.get(k); if (l) l.push(e); else grillaE.set(k, [e]); };
     const indexar = (e) => {
       caja(e);
-      const x0 = Math.floor((e.bb[0] - tol) / C), x1 = Math.floor((e.bb[2] + tol) / C), y0 = Math.floor((e.bb[1] - tol) / C), y1 = Math.floor((e.bb[3] + tol) / C);
+      const x0 = Math.floor((e.bb[0] - tolT) / C), x1 = Math.floor((e.bb[2] + tolT) / C), y0 = Math.floor((e.bb[1] - tolT) / C), y1 = Math.floor((e.bb[3] + tolT) / C);
       if ((x1 - x0 + 1) * (y1 - y0 + 1) <= 64) { for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) enCelda(ck(x, y), e); return; }
       if (e.L > 5000 * C) { largas.push(e); return; }
-      const r = tol + C / 4, celdas = new Set(); // cada punto a tol o menos del tramo queda a r o menos de una muestra (cada C/2)
+      const r = tolT + C / 4, celdas = new Set(); // cada punto a tolT o menos del tramo queda a r o menos de una muestra (cada C/2)
       for (let i = 1; i < e.pts.length; i++) {
         const a = e.pts[i - 1], b = e.pts[i], n = Math.max(1, Math.ceil(d2(a, b) / (C / 2)));
         for (let j = 0; j <= n; j++) {
@@ -511,32 +546,41 @@
       }
       for (const k of celdas) enCelda(k, e);
     };
-    if ([...gr.values()].some((x) => x === 1)) E.forEach(indexar);
+    E.forEach(indexar);
     const grado = (i) => gr.get(nodo(i)) || 0;
-    const pegar = (i, j) => { const a = grado(i), b = grado(j); gr.set(juntar(padre, i, j), a + b); };
-    for (const [n0, g] of [...gr]) {
-      if (g !== 1 || grado(n0) !== 1) continue; // ya no está suelta (se le pegó otra)
-      const n = nodo(n0), p = P[n], cand = (grillaE.get(ck(Math.floor(p[0] / C), Math.floor(p[1] / C))) || []).concat(largas);
-      let propia = null, fin = 0;
-      for (const e of cand) { if (nodo(e.ia) === n) { propia = e; fin = 0; } if (nodo(e.ib) === n) { propia = e; fin = 1; } }
-      if (!propia) continue;
+    const pegar = (i, j) => { const a = grado(i), b = grado(j); gr.set(juntar(padre, i, j), a + b); juntar(cpadre, i, j); };
+    // Primero las puntas sueltas; después los nodos donde ya se juntan trazos, pero solo contra otra cadena del mismo dibujo
+    // conectado (el "+" de un panel ya está pegado al borde por sus otras puntas): un círculo o una letra aparte que pasa por
+    // encima de una recta no se pega a ella, aunque una de sus uniones caiga justo sobre la recta, y la unión de dos tramos
+    // de un contorno no se pega a otra parte del mismo contorno que pasa cerca (el trazo fino de una letra).
+    const mirados = new Set();
+    const buscarT = (n) => {
+      const g = grado(n), p = P[n], cand = (grillaE.get(ck(Math.floor(p[0] / C), Math.floor(p[1] / C))) || []).concat(largas);
+      const comp = raizDe(cpadre, n), propias = g > 1 ? new Set(cand.filter((e) => nodo(e.ia) === n || nodo(e.ib) === n).map((e) => e.cad)) : null;
       let mejor = null;
       for (const e of cand) {
         if (!e.bb) caja(e);
-        if (p[0] < e.bb[0] - tol || p[0] > e.bb[2] + tol || p[1] < e.bb[1] - tol || p[1] > e.bb[3] + tol) continue;
+        const lim = tol + (e.pts.length > 2 ? curva : 0); // un tramo recto suelto (LINE) es exacto; una polilínea puede ser una curva
+        if (p[0] < e.bb[0] - lim || p[0] > e.bb[2] + lim || p[1] < e.bb[1] - lim || p[1] > e.bb[3] + lim) continue;
+        if (g > 1 && (raizDe(cpadre, e.ia) !== comp || propias.has(e.cad))) continue;
+        const llegaA = nodo(e.ia) === n, llegaB = nodo(e.ib) === n;
         let acum = 0;
         for (let i = 1; i < e.pts.length; i++) {
           const a = e.pts[i - 1], b = e.pts[i], vx = b[0] - a[0], vy = b[1] - a[1], L2 = vx * vx + vy * vy, L = Math.sqrt(L2);
           let t = L2 > 0 ? ((p[0] - a[0]) * vx + (p[1] - a[1]) * vy) / L2 : 0; t = Math.max(0, Math.min(1, t));
           const q = [a[0] + t * vx, a[1] + t * vy], d = d2(p, q), s = acum + t * L;
-          // no cuenta: cerca de su propia punta, ni a 2·tol o menos de una punta suelta del otro trazo (eso no es una T: son dos
-          // puntas que no se tocan, o se pasan una de la otra, y quedan abiertas)
-          const noT = (e === propia && Math.abs(s - (fin ? e.L : 0)) <= 3 * tol) || (s <= 2 * tol && grado(e.ia) === 1) || (e.L - s <= 2 * tol && grado(e.ib) === 1);
-          if (d <= tol && (!mejor || d < mejor.d) && !noT) mejor = { d, e, i, q };
+          // no cuenta: a 3·lim o menos (por el trazo) de la punta del trazo que llega a este nodo (es esa misma punta). Para una
+          // punta suelta, tampoco a 2·lim o menos de una punta suelta del otro trazo (son dos puntas que no se tocan, o se pasan
+          // una de la otra, y quedan abiertas); para un nodo donde ya se juntan trazos, a 2·lim o menos de cualquier punta del
+          // otro (una esquina cerca de otra esquina no es una T)
+          const noT = (llegaA && s <= 3 * lim) || (llegaB && e.L - s <= 3 * lim) || (g === 1
+            ? (s <= 2 * lim && grado(e.ia) === 1) || (e.L - s <= 2 * lim && grado(e.ib) === 1)
+            : s <= 2 * lim || e.L - s <= 2 * lim);
+          if (d <= lim && (!mejor || d < mejor.d) && !noT) mejor = { d, e, i, q };
           acum += L;
         }
       }
-      if (!mejor) continue;
+      if (!mejor) return;
       const { e, i, q } = mejor, m = e.pts.length;
       let destino;
       if (i === 1 && d2(q, e.pts[0]) <= eps) destino = e.ia; // cae en una punta: es ese nodo
@@ -544,106 +588,207 @@
       else { // parte el trazo ahí
         const k = d2(q, e.pts[i - 1]) <= eps ? i - 1 : d2(q, e.pts[i]) <= eps ? i : -1;
         const A = k >= 0 ? e.pts.slice(0, k + 1) : e.pts.slice(0, i).concat([q]), B = k >= 0 ? e.pts.slice(k) : [q].concat(e.pts.slice(i));
-        destino = punta(A[A.length - 1]); gr.set(destino, 2);
-        const nueva = { pts: B, L: largoDe(B), ia: destino, ib: e.ib, src: e.src };
+        destino = punta(A[A.length - 1]); gr.set(destino, 2); juntar(cpadre, destino, e.ia);
+        const nueva = { pts: B, L: largoDe(B), ia: destino, ib: e.ib, src: e.src, cad: e.cad };
         E.push(nueva); indexar(nueva);
         Object.assign(e, { pts: A, L: largoDe(A), ib: destino, bb: null }); // queda en las celdas de antes: sobra, no falta
         partidos++;
       }
-      pegar(n, destino);
+      pegar(n, destino); mirados.add(nodo(n));
+    };
+    for (const pasada of [1, 2]) {
+      if (pasada === 2) cadenas();
+      for (const [n0] of [...gr]) {
+        const n = nodo(n0);
+        if (mirados.has(n) || (pasada === 1) !== (grado(n) === 1)) continue; // ya se miró (o se le pegó otra), o no le toca
+        mirados.add(n);
+        buscarT(n);
+      }
     }
     if (partidos || tomada.size) sacarRepetidos();
-    // 4. caras. Por cada nodo, los trazos que salen ordenados por ángulo; cada cara se recorre dejándola a la izquierda: al
-    // llegar a un nodo se sigue por el trazo que sale justo antes (en sentido horario) del que vuelve por donde se llegó.
-    const idDe = new Map(), nodos = [];
-    const id = (i) => { const r = nodo(i); let k = idDe.get(r); if (k == null) { k = nodos.length; idDe.set(r, k); nodos.push({ p: P[r], sal: [] }); } return k; };
-    const nE = E.length;
-    E.forEach((e, k) => { e.na = id(e.ia); e.nb = id(e.ib); nodos[e.na].sal.push(2 * k); nodos[e.nb].sal.push(2 * k + 1); });
-    // media arista h: la arista h >> 1 recorrida de na a nb (h par) o de nb a na (h impar)
-    const origen = (h) => (h & 1 ? E[h >> 1].nb : E[h >> 1].na), destinoDe = (h) => (h & 1 ? E[h >> 1].na : E[h >> 1].nb);
-    const angulo = (h, j) => { const p = E[h >> 1].pts, m = p.length, a = h & 1 ? p[m - 1] : p[0], b = h & 1 ? p[Math.max(0, m - 1 - j)] : p[Math.min(m - 1, j)]; return Math.atan2(b[1] - a[1], b[0] - a[0]); };
-    const agregar = (pts, h) => { // los puntos de la media arista h, sin repetir el primero si coincide con el último
-      const p = E[h >> 1].pts, m = p.length;
-      for (let j = 0; j < m; j++) { const q = h & 1 ? p[m - 1 - j] : p[j]; if (j === 0 && pts.length && d2(q, pts[pts.length - 1]) <= eps) continue; pts.push(q); }
+    const caras = () => {
+      // 4. caras. Por cada nodo, los trazos que salen ordenados por ángulo; cada cara se recorre dejándola a la izquierda: al
+      // llegar a un nodo se sigue por el trazo que sale justo antes (en sentido horario) del que vuelve por donde se llegó.
+      const idDe = new Map(), nodos = [];
+      const id = (i) => { const r = nodo(i); let k = idDe.get(r); if (k == null) { k = nodos.length; idDe.set(r, k); nodos.push({ p: P[r], sal: [] }); } return k; };
+      const nE = E.length;
+      E.forEach((e, k) => { e.na = id(e.ia); e.nb = id(e.ib); nodos[e.na].sal.push(2 * k); nodos[e.nb].sal.push(2 * k + 1); });
+      // media arista h: la arista h >> 1 recorrida de na a nb (h par) o de nb a na (h impar)
+      const origen = (h) => (h & 1 ? E[h >> 1].nb : E[h >> 1].na), destinoDe = (h) => (h & 1 ? E[h >> 1].na : E[h >> 1].nb);
+      const angulo = (h, j) => { const p = E[h >> 1].pts, m = p.length, a = h & 1 ? p[m - 1] : p[0], b = h & 1 ? p[Math.max(0, m - 1 - j)] : p[Math.min(m - 1, j)]; return Math.atan2(b[1] - a[1], b[0] - a[0]); };
+      const agregar = (pts, h) => { // los puntos de la media arista h, sin repetir el primero si coincide con el último
+        const p = E[h >> 1].pts, m = p.length;
+        for (let j = 0; j < m; j++) { const q = h & 1 ? p[m - 1 - j] : p[j]; if (j === 0 && pts.length && d2(q, pts[pts.length - 1]) <= eps) continue; pts.push(q); }
+      };
+      // colas: se sacan de a una las aristas con una punta suelta; lo que queda (las que están en algún lazo) arma las caras
+      const fuera = new Uint8Array(nE), g = nodos.map((nd) => nd.sal.length), cola = [];
+      g.forEach((x, n) => { if (x === 1) cola.push(n); });
+      while (cola.length) {
+        const n = cola.pop();
+        if (g[n] !== 1) continue;
+        for (const h of nodos[n].sal) {
+          const k = h >> 1; if (fuera[k]) continue;
+          fuera[k] = 1; g[n]--; const o = destinoDe(h); g[o]--; if (g[o] === 1) cola.push(o);
+          break;
+        }
+      }
+      const pos = new Int32Array(2 * nE);
+      for (const nd of nodos) {
+        nd.giro = nd.sal.filter((h) => !fuera[h >> 1]).map((h) => { const a1 = angulo(h, 1); let a2 = angulo(h, 2) - a1; if (a2 > Math.PI) a2 -= 2 * Math.PI; if (a2 <= -Math.PI) a2 += 2 * Math.PI; return { h, a1, a2 }; });
+        nd.giro.sort((u, v) => (Math.abs(u.a1 - v.a1) > 1e-9 ? u.a1 - v.a1 : u.a2 - v.a2)); // dos que salen igual: desempata la curvatura
+        nd.giro.forEach((x, i) => { pos[x.h] = i; });
+      }
+      const sig = (h) => { const t = h ^ 1, gi = nodos[origen(t)].giro; return gi[(pos[t] - 1 + gi.length) % gi.length].h; };
+      const area = (p) => { let s = 0; for (let i = 0, j = p.length - 1; i < p.length; j = i++) s += p[j][0] * p[i][1] - p[i][0] * p[j][1]; return s / 2; };
+      const vista = new Uint8Array(2 * nE), enFigura = new Uint8Array(nE), cerradas = [];
+      const guardar = (pts, ars) => {
+        if (pts.length > 1 && d2(pts[0], pts[pts.length - 1]) <= eps) pts.pop();
+        if (pts.length < 3 || !(area(pts) > 1e-6)) return; // horaria: el borde de afuera, o un hueco que toca el borde
+        cerradas.push(pts);
+        for (const k of ars) enFigura[k] = 1;
+      };
+      for (let h0 = 0; h0 < 2 * nE; h0++) {
+        if (vista[h0] || fuera[h0 >> 1]) continue;
+        // si la cara pasa dos veces por un nodo, lo del medio es otra vuelta (un hueco que toca el borde, una figura pegada por
+        // una punta, un puente): se separa con una pila de los nodos por los que va pasando
+        const pts = [], ars = [], pila = [{ n: origen(h0), ip: 0, ia: 0 }], enPila = new Map([[origen(h0), 0]]);
+        let h = h0;
+        do {
+          vista[h] = 1;
+          if (!pts.length) pts.push(h & 1 ? E[h >> 1].pts[E[h >> 1].pts.length - 1] : E[h >> 1].pts[0]);
+          agregar(pts, h); ars.push(h >> 1);
+          const n = destinoDe(h);
+          if (enPila.has(n)) {
+            const k0 = enPila.get(n), b = pila[k0];
+            guardar(pts.slice(b.ip), ars.slice(b.ia));
+            pts.length = b.ip + 1; ars.length = b.ia;
+            while (pila.length > k0 + 1) enPila.delete(pila.pop().n);
+          } else { enPila.set(n, pila.length); pila.push({ n, ip: pts.length - 1, ia: ars.length }); }
+          h = sig(h);
+        } while (h !== h0 && !vista[h]);
+      }
+      // 5. lo que no está en ninguna figura queda abierto: cadenas que siguen por los nodos que no tocan figuras, de a pares de
+      // trazos (en un cruce, los que van más derecho)
+      const toca = new Uint8Array(nodos.length), salLibre = nodos.map(() => []);
+      E.forEach((e, k) => { if (enFigura[k]) { toca[e.na] = 1; toca[e.nb] = 1; } else { salLibre[e.na].push(2 * k); salLibre[e.nb].push(2 * k + 1); } });
+      const pareja = new Map();
+      salLibre.forEach((l, n) => {
+        if (toca[n] || l.length < 2 || l.length > 12) return; // en un nodo de muchos (una estrella) cada uno queda por su lado
+        if (l.length === 2) { pareja.set(l[0], l[1]); pareja.set(l[1], l[0]); return; }
+        const dir = l.map((h) => { const a = angulo(h, 1); return [Math.cos(a), Math.sin(a)]; }), cand = [];
+        for (let i = 0; i < l.length; i++) for (let j = i + 1; j < l.length; j++) cand.push([dir[i][0] * dir[j][0] + dir[i][1] * dir[j][1], i, j]);
+        cand.sort((u, v) => u[0] - v[0]);
+        for (const [c, i, j] of cand) if (c < -0.5 && !pareja.has(l[i]) && !pareja.has(l[j])) { pareja.set(l[i], l[j]); pareja.set(l[j], l[i]); }
+      });
+      const hecha = new Uint8Array(nE), abiertas = [];
+      const camino = (h0) => {
+        const pts = [], n0 = origen(h0), ars = [];
+        let h = h0, n = n0;
+        while (h != null && !hecha[h >> 1]) {
+          hecha[h >> 1] = 1; agregar(pts, h); ars.push(h >> 1); n = destinoDe(h);
+          h = pareja.get(h ^ 1); // sigue por la pareja del que vuelve
+        }
+        if (largoDe(pts) <= 2 * eps) return; // un punto: no dibuja nada
+        if (n === n0 && pareja.has(h0)) { if (d2(pts[0], pts[pts.length - 1]) <= eps) pts.pop(); if (pts.length >= 3) { cerradas.push(pts); for (const k of ars) enFigura[k] = 1; return; } } // una vuelta que se cruza a sí misma (un 8): queda cerrada, como vino
+        abiertas.push({ pts, falta: d2(pts[0], pts[pts.length - 1]), toca: !!(toca[n0] || toca[n]) });
+      };
+      salLibre.forEach((l) => { for (const h of l) if (!hecha[h >> 1] && !pareja.has(h)) camino(h); });
+      salLibre.forEach((l) => { for (const h of l) if (!hecha[h >> 1]) camino(h); });
+      const sueltas = [], cruces = [], usados = new Set();
+      nodos.forEach((nd) => { if (nd.sal.length === 1) sueltas.push(nd.p); else if (nd.sal.length > 2) cruces.push(nd.p); });
+      E.forEach((e, k) => { if (enFigura[k]) usados.add(e.src); });
+      return { cerradas, abiertas, sueltas, cruces, usados: usados.size, nodos: nodos.length, enFigura, abLargo: abiertas.reduce((s, o) => s + largoDe(o.pts), 0) };
     };
-    // colas: se sacan de a una las aristas con una punta suelta; lo que queda (las que están en algún lazo) arma las caras
-    const fuera = new Uint8Array(nE), g = nodos.map((nd) => nd.sal.length), cola = [];
-    g.forEach((x, n) => { if (x === 1) cola.push(n); });
-    while (cola.length) {
-      const n = cola.pop();
-      if (g[n] !== 1) continue;
-      for (const h of nodos[n].sal) {
-        const k = h >> 1; if (fuera[k]) continue;
-        fuera[k] = 1; g[n]--; const o = destinoDe(h); g[o]--; if (g[o] === 1) cola.push(o);
-        break;
+    let R = caras(), cruzadas = 0, partidas = new Set();
+    // 6. cruces: dos tramos de trazos distintos que se cruzan lejos de sus puntas (a más de 2·tol: si no, es una T o una
+    //    esquina) y en un ángulo de 15° o más (más cerrado son dos trazos casi encimados, como la misma curva pasada dos veces
+    //    a tramos rectos de distinto largo, que se cruzan a cada rato). Grilla de tramos de C de lado; cada cruce se cuenta en
+    //    la celda donde cae.
+    const cruzamientos = () => {
+      const celdas = new Map(), out = [];
+      let total = 0; for (const e of E) total += e.pts.length;
+      if (total > 4e5) return out; // demasiado grande para buscarlos
+      let pares = 3e6; // como mucho (una estrella de miles de rayos cae entera en una celda): si no alcanza, no se buscan
+      const anotar = (key, r) => { const l = celdas.get(key); if (l) l.push(r); else celdas.set(key, [r]); };
+      E.forEach((e, k) => {
+        let acum = 0;
+        for (let i = 1; i < e.pts.length; i++) {
+          const a = e.pts[i - 1], b = e.pts[i], L = d2(a, b), r = { k, i, s0: acum, L };
+          acum += L;
+          if (!(L > 0)) continue;
+          const x0 = Math.floor(Math.min(a[0], b[0]) / C), x1 = Math.floor(Math.max(a[0], b[0]) / C), y0 = Math.floor(Math.min(a[1], b[1]) / C), y1 = Math.floor(Math.max(a[1], b[1]) / C);
+          if ((x1 - x0 + 1) * (y1 - y0 + 1) <= 4) { for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) anotar(ck(x, y), r); continue; }
+          const n = Math.ceil(L / (C / 2)), vistas = new Set(); // las celdas por las que pasa: muestras cada C/2, con C/4 de margen
+          for (let j = 0; j <= n; j++) {
+            const x = a[0] + (b[0] - a[0]) * j / n, y = a[1] + (b[1] - a[1]) * j / n;
+            for (let cx = Math.floor((x - C / 4) / C); cx <= Math.floor((x + C / 4) / C); cx++) for (let cy = Math.floor((y - C / 4) / C); cy <= Math.floor((y + C / 4) / C); cy++) vistas.add(ck(cx, cy));
+          }
+          for (const key of vistas) anotar(key, r);
+        }
+      });
+      for (const [key, l] of celdas) {
+        if (l.length < 2) continue;
+        const coma = key.indexOf(','), cx = +key.slice(0, coma), cy = +key.slice(coma + 1);
+        for (let u = 0; u < l.length; u++) for (let v = u + 1; v < l.length; v++) {
+          const A = l[u], B = l[v];
+          if (A.k === B.k) continue;
+          if (--pares < 0) return [];
+          const ea = E[A.k], eb = E[B.k], p = ea.pts[A.i - 1], p2 = ea.pts[A.i], q = eb.pts[B.i - 1], q2 = eb.pts[B.i];
+          const rx = p2[0] - p[0], ry = p2[1] - p[1], sx = q2[0] - q[0], sy = q2[1] - q[1], den = rx * sy - ry * sx;
+          if (Math.abs(den) < 0.2588 * A.L * B.L) continue; // |sen| < sen 15°: paralelos o casi encimados, no es un cruce
+          const wx = q[0] - p[0], wy = q[1] - p[1], t = (wx * sy - wy * sx) / den, w = (wx * ry - wy * rx) / den;
+          if (t < 0 || t >= 1 || w < 0 || w >= 1) continue;
+          const x = p[0] + t * rx, y = p[1] + t * ry;
+          if (Math.floor(x / C) !== cx || Math.floor(y / C) !== cy) continue; // se cuenta en otra celda
+          const sa = A.s0 + t * A.L, sb = B.s0 + w * B.L;
+          if (sa <= 2 * tol || ea.L - sa <= 2 * tol || sb <= 2 * tol || eb.L - sb <= 2 * tol) continue;
+          out.push({ x: [x, y], a: A.k, ia: A.i, b: B.k, ib: B.i });
+        }
+      }
+      return out;
+    };
+    const cr = cruzamientos();
+    if (cr.length) {
+      // dibujos conectados por los nodos (comp) y cadenas: los trazos seguidos por nodos donde se juntan solo dos. Una cadena
+      // es una cuerda si sus dos puntas son nodos distintos (de grado distinto de 2: una T, un cruce, una punta suelta), como
+      // las dos rectas de una ventana; si no, es un lazo (un contorno cerrado, o que sale de un nodo y vuelve al mismo, como
+      // dos letras superpuestas que se tocan en un punto). Se parte un cruce del mismo dibujo con una cuerda: sin el nodo ahí,
+      // las caras de ese dibujo no tienen sentido (no se puede recorrer cada zona por su borde).
+      const cp = P.map((_, i) => i), comp = (e) => raizDe(cp, nodo(e.ia));
+      for (const e of E) juntar(cp, nodo(e.ia), nodo(e.ib));
+      const puntas = cadenas(), cuerda = (k) => { const s = puntas.get(E[k].cad); return !!s && s.size >= 2; };
+      const aPartir = cr.filter((c) => comp(E[c.a]) === comp(E[c.b]) && (cuerda(c.a) || cuerda(c.b)));
+      if (aPartir.length) {
+        const cortes = new Map(), enCruce = new Map();
+        // un nodo por cruce (dos cruces en el mismo punto, el mismo nodo)
+        const nodoCruce = (x) => {
+          const cx = Math.floor(x[0] / eps), cy = Math.floor(x[1] / eps);
+          for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) { const j = enCruce.get(ck(cx + dx, cy + dy)); if (j != null && d2(P[j], x) <= eps) return j; }
+          const j = punta(x); enCruce.set(ck(cx, cy), j); return j;
+        };
+        for (const c of aPartir) {
+          const n = nodoCruce(c.x);
+          for (const [k, i] of [[c.a, c.ia], [c.b, c.ib]]) { const l = cortes.get(k); const o = { i, x: c.x, n }; if (l) l.push(o); else cortes.set(k, [o]); }
+        }
+        // cada trazo se parte de la punta para atrás (así los índices de lo que queda antes no cambian)
+        for (const [k, l] of cortes) {
+          const e = E[k], p0 = e.pts;
+          l.sort((u, v) => v.i - u.i || d2(v.x, p0[v.i - 1]) - d2(u.x, p0[u.i - 1]));
+          for (const { i, x, n } of l) {
+            const pts = e.pts, m = pts.length;
+            if (d2(x, pts[m - 1]) <= eps) { juntar(padre, n, e.ib); continue; }
+            if (d2(x, pts[0]) <= eps) { juntar(padre, n, e.ia); continue; }
+            const j = d2(x, pts[i - 1]) <= eps ? i - 1 : i < m && d2(x, pts[i]) <= eps ? i : -1;
+            const A = j >= 0 ? pts.slice(0, j + 1) : pts.slice(0, i).concat([x]), B = j >= 0 ? pts.slice(j) : [x].concat(pts.slice(i));
+            E.push({ pts: B, L: largoDe(B), ia: n, ib: e.ib, src: e.src });
+            Object.assign(e, { pts: A, L: largoDe(A), ib: n, bb: null });
+          }
+        }
+        R = caras(); cruzadas = aPartir.length; partidas = new Set(aPartir);
       }
     }
-    const pos = new Int32Array(2 * nE);
-    for (const nd of nodos) {
-      nd.giro = nd.sal.filter((h) => !fuera[h >> 1]).map((h) => { const a1 = angulo(h, 1); let a2 = angulo(h, 2) - a1; if (a2 > Math.PI) a2 -= 2 * Math.PI; if (a2 <= -Math.PI) a2 += 2 * Math.PI; return { h, a1, a2 }; });
-      nd.giro.sort((u, v) => (Math.abs(u.a1 - v.a1) > 1e-9 ? u.a1 - v.a1 : u.a2 - v.a2)); // dos que salen igual: desempata la curvatura
-      nd.giro.forEach((x, i) => { pos[x.h] = i; });
-    }
-    const sig = (h) => { const t = h ^ 1, gi = nodos[origen(t)].giro; return gi[(pos[t] - 1 + gi.length) % gi.length].h; };
-    const area = (p) => { let s = 0; for (let i = 0, j = p.length - 1; i < p.length; j = i++) s += p[j][0] * p[i][1] - p[i][0] * p[j][1]; return s / 2; };
-    const vista = new Uint8Array(2 * nE), enFigura = new Uint8Array(nE), cerradas = [];
-    const guardar = (pts, ars) => {
-      if (pts.length > 1 && d2(pts[0], pts[pts.length - 1]) <= eps) pts.pop();
-      if (pts.length < 3 || !(area(pts) > 1e-6)) return; // horaria: el borde de afuera, o un hueco que toca el borde
-      cerradas.push(pts);
-      for (const k of ars) enFigura[k] = 1;
-    };
-    for (let h0 = 0; h0 < 2 * nE; h0++) {
-      if (vista[h0] || fuera[h0 >> 1]) continue;
-      // si la cara pasa dos veces por un nodo, lo del medio es otra vuelta (un hueco que toca el borde, una figura pegada por
-      // una punta, un puente): se separa con una pila de los nodos por los que va pasando
-      const pts = [], ars = [], pila = [{ n: origen(h0), ip: 0, ia: 0 }], enPila = new Map([[origen(h0), 0]]);
-      let h = h0;
-      do {
-        vista[h] = 1;
-        if (!pts.length) pts.push(h & 1 ? E[h >> 1].pts[E[h >> 1].pts.length - 1] : E[h >> 1].pts[0]);
-        agregar(pts, h); ars.push(h >> 1);
-        const n = destinoDe(h);
-        if (enPila.has(n)) {
-          const k0 = enPila.get(n), b = pila[k0];
-          guardar(pts.slice(b.ip), ars.slice(b.ia));
-          pts.length = b.ip + 1; ars.length = b.ia;
-          while (pila.length > k0 + 1) enPila.delete(pila.pop().n);
-        } else { enPila.set(n, pila.length); pila.push({ n, ip: pts.length - 1, ia: ars.length }); }
-        h = sig(h);
-      } while (h !== h0 && !vista[h]);
-    }
-    // 5. lo que no está en ninguna figura queda abierto: cadenas que siguen por los nodos que no tocan figuras, de a pares de
-    // trazos (en un cruce, los que van más derecho)
-    const toca = new Uint8Array(nodos.length), salLibre = nodos.map(() => []);
-    E.forEach((e, k) => { if (enFigura[k]) { toca[e.na] = 1; toca[e.nb] = 1; } else { salLibre[e.na].push(2 * k); salLibre[e.nb].push(2 * k + 1); } });
-    const pareja = new Map();
-    salLibre.forEach((l, n) => {
-      if (toca[n] || l.length < 2 || l.length > 12) return; // en un nodo de muchos (una estrella) cada uno queda por su lado
-      if (l.length === 2) { pareja.set(l[0], l[1]); pareja.set(l[1], l[0]); return; }
-      const dir = l.map((h) => { const a = angulo(h, 1); return [Math.cos(a), Math.sin(a)]; }), cand = [];
-      for (let i = 0; i < l.length; i++) for (let j = i + 1; j < l.length; j++) cand.push([dir[i][0] * dir[j][0] + dir[i][1] * dir[j][1], i, j]);
-      cand.sort((u, v) => u[0] - v[0]);
-      for (const [c, i, j] of cand) if (c < -0.5 && !pareja.has(l[i]) && !pareja.has(l[j])) { pareja.set(l[i], l[j]); pareja.set(l[j], l[i]); }
-    });
-    const hecha = new Uint8Array(nE), abiertas = [];
-    const camino = (h0) => {
-      const pts = [], n0 = origen(h0), ars = [];
-      let h = h0, n = n0;
-      while (h != null && !hecha[h >> 1]) {
-        hecha[h >> 1] = 1; agregar(pts, h); ars.push(h >> 1); n = destinoDe(h);
-        h = pareja.get(h ^ 1); // sigue por la pareja del que vuelve
-      }
-      if (largoDe(pts) <= 2 * eps) return; // un punto: no dibuja nada
-      if (n === n0 && pareja.has(h0)) { if (d2(pts[0], pts[pts.length - 1]) <= eps) pts.pop(); if (pts.length >= 3) { cerradas.push(pts); for (const k of ars) enFigura[k] = 1; return; } } // una vuelta que se cruza a sí misma (un 8): queda cerrada, como vino
-      abiertas.push({ pts, falta: d2(pts[0], pts[pts.length - 1]), toca: !!(toca[n0] || toca[n]) });
-    };
-    salLibre.forEach((l) => { for (const h of l) if (!hecha[h >> 1] && !pareja.has(h)) camino(h); });
-    salLibre.forEach((l) => { for (const h of l) if (!hecha[h >> 1]) camino(h); });
-    const sueltas = [], cruces = [], usados = new Set();
-    nodos.forEach((nd) => { if (nd.sal.length === 1) sueltas.push(nd.p); else if (nd.sal.length > 2) cruces.push(nd.p); });
-    E.forEach((e, k) => { if (enFigura[k]) usados.add(e.src); });
-    return { cerradas, abiertas, sueltas, cruces, repetidos, partidos, usados: usados.size, nodos: nodos.length };
+    const cruzan = cr.filter((c) => !partidas.has(c)).map((c) => c.x);
+    return { cerradas: R.cerradas, abiertas: R.abiertas, sueltas: R.sueltas, cruces: R.cruces, cruzan, repetidos, partidos, cruzadas, usados: R.usados, nodos: R.nodos };
   }
 
   const api = { leer, unir, aciRgb };

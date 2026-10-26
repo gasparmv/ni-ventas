@@ -120,6 +120,7 @@
   .rev .ley i { display: inline-block; width: 16px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 5px; }
   .rev .ley i.punta { width: 10px; height: 10px; border-radius: 50%; border: 2px solid #f87171; }
   .rev .ley i.cruce { width: 10px; height: 10px; border-radius: 1px; border: 2px solid var(--aviso); }
+  .rev .ley i.cruza { width: 8px; height: 8px; border-radius: 1px; border: 2px solid var(--aviso); transform: rotate(45deg); margin-left: 2px; margin-right: 7px; }
   .rev .ley i.falta { height: 0; border-top: 2px dashed #f87171; border-radius: 0; }
   .rev ul.prob { margin: 8px 0 0; padding: 0; list-style: none; display: grid; gap: 4px; font-size: 13px; }
   .rev ul.prob li { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
@@ -159,7 +160,7 @@
         <li>Guardar como <b>PDF</b>, o el <b>.ai</b> de siempre con "Crear archivo compatible con PDF" tildado (viene así).</li>
         <li>Escala 1:1 en milímetros. Si hay textos, pasados a contornos (Texto › Crear contornos).</li>
         <li>Un archivo por material (por ejemplo, "transparentes 47").</li>
-        <li>Un DXF (por ejemplo de Fusion 360) también sirve. Una capa que se llama corte, calado o agujeros va a lo suyo. Lo demás va a corte si viene todo de un color, o si es blanco o negro y no hay nada rojo; si no, los colores van como en el punto 1. Si viene con los trazos sueltos, abajo de los archivos aparece para unirlos.</li>
+        <li>Un DXF (por ejemplo de Fusion 360) también sirve. Una capa que se llama corte, calado o agujeros va a lo suyo. Si ninguna se llama corte, lo demás va a corte si viene todo de un color, o si es blanco o negro y no hay nada rojo; si no, los colores van como en el punto 1. Si viene con los trazos sueltos, abajo de los archivos aparece para unirlos.</li>
       </ol>
     </details>
   </section>
@@ -281,7 +282,7 @@
 <script src="nest-core.js?v=4"></script>
 <script src="clipper.js?v=1"></script>
 <script src="gcode.js?v=3"></script>
-<script src="dxf.js?v=2"></script>
+<script src="dxf.js?v=3"></script>
 <script>
 'use strict';
 // Nesting de placas para el corte (Gaspar 25-oct-2026). Lee los .ai/.pdf de Emma con pdf.js, separa por color (corte rojo,
@@ -300,7 +301,7 @@ const VERSION_MOTOR = '4'; // subirla (y la de nest-core.js?v= arriba) cada vez 
 const TOLS_UNION = [0.001, 0.01, 0.05, 0.1, 0.5, 1, 2]; // mm: a cuánto se toman como la misma las puntas de dos trazos sueltos
 const TOL_UNION = 0.01;
 const CIERRE_SOLO = 2;       // mm: un contorno de corte abierto (3 puntos o más) que no cierra por esto o menos se cierra solo
-const S = { archivos: [], sec: 0, mapa: {}, defs: {}, revZoom: new Map(), piezas: [], grandes: [], cfg: cargarCfg(), recortes: cargarRecortes(), recNest: [], perfiles: cargarPerfiles(), gcodeCache: new Map(), mejor: null, firmaMejor: '', workers: [], firmaWorkers: '', vivos: 0, corridas: 0, t0: 0, ronda: 0, corriendo: false, timer: null, nest: null, cfgNest: null, pintarPend: false };
+const S = { archivos: [], sec: 0, mapa: {}, revZoom: new Map(), piezas: [], grandes: [], cfg: cargarCfg(), recortes: cargarRecortes(), recNest: [], perfiles: cargarPerfiles(), gcodeCache: new Map(), mejor: null, firmaMejor: '', workers: [], firmaWorkers: '', vivos: 0, corridas: 0, t0: 0, ronda: 0, corriendo: false, timer: null, nest: null, cfgNest: null, pintarPend: false };
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const fmt = (n, d = 0) => Number(n).toLocaleString('es-AR', { minimumFractionDigits: d, maximumFractionDigits: d });
@@ -457,17 +458,19 @@ async function leerArchivo(file, a) {
   } finally { doc.destroy(); }
 }
 // DXF (Fusion 360, AutoCAD…): una sola "página". Cada capa con su color es una fila del paso 2. Una capa que se llama como
-// corte, calado o agujeros va a lo suyo. Lo demás va a corte si viene todo de un color (Fusion exporta todo en la capa 0, en
-// blanco) o si es blanco o negro (el color de siempre del AutoCAD) y no hay nada rojo; si no, por color como los de Emma.
+// corte, calado o agujeros va a lo suyo. Si ninguna se llama como corte, lo demás va a corte si viene todo de un color (Fusion
+// exporta todo en la capa 0, en blanco) o si es blanco o negro (el color de siempre del AutoCAD) y no hay nada rojo. Si no
+// (o si hay una capa de corte), por color como los de Emma: con una capa CORTE, una capa 0 blanca es grabado y unas cotas
+// verdes se ignoran (no se cortan atravesando la pieza).
 function leerDxf(buf, a) {
   if (!window.NestDxf) throw new Error('No se pudo cargar el lector de DXF. Recargá la página.');
   const r = NestDxf.leer(new TextDecoder('utf-8').decode(buf), TOL_CURVA);
-  const els = r.els.map((el) => ({ subs: el.subs.map((s) => ({ pts: s.pts, cerrado: s.cerrado, lw: 0 })), trazo: true, relleno: false, sc: el.rgb, fc: el.rgb, capa: el.capa, clave: 'dxf ' + hex(el.rgb) + ' ' + el.capa }));
+  const els = r.els.map((el) => ({ subs: el.subs.map((s) => ({ pts: s.pts, cerrado: s.cerrado, lw: 0 })), trazo: true, relleno: false, sc: el.rgb, fc: el.rgb, capa: el.capa, base: 'dxf ' + hex(el.rgb) + ' ' + el.capa }));
   if (!els.length) throw new Error('El DXF no tiene nada que se pueda cortar: ni líneas, ni arcos, ni círculos, ni curvas.');
   const libres = els.filter((el) => !claseCapa(el.capa)), colores = new Set(libres.map((el) => hex(el.sc)));
-  const hayRojo = libres.some((el) => claseDefecto(el.sc) === 'corte');
+  const hayRojo = libres.some((el) => claseDefecto(el.sc) === 'corte'), corteNombrado = els.some((el) => claseCapa(el.capa) === 'corte');
   const neutro = (c) => claseDefecto(c) === 'calado' || Math.max(...c) < 40; // blanco o negro
-  for (const el of els) el.def = claseCapa(el.capa) || (colores.size === 1 || (!hayRojo && neutro(el.sc)) ? 'corte' : claseDefecto(el.sc));
+  for (const el of els) el.def = claseCapa(el.capa) || (!corteNombrado && (colores.size === 1 || (!hayRojo && neutro(el.sc))) ? 'corte' : claseDefecto(el.sc));
   a.tipo = 'dxf'; a.textos += r.textos; a.dxf = { unidades: r.unidades, conocida: r.unidadConocida, otros: r.otros, avisos: r.avisos };
   a.paginas.push({ n: 1, els });
 }
@@ -492,14 +495,34 @@ function claseCapa(nom) {
   if (/^(placa|sheet|marco)$/.test(n)) return 'ignorar';
   return '';
 }
-// Un solo valor por defecto por clave de DXF (capa y color): el del primer archivo que la trae. Así la fila del paso 2 dice lo
-// mismo que se usa en todos los archivos.
-function calcularDefs() {
-  S.defs = {};
-  for (const a of S.archivos) if (a.estado === 'ok') for (const pg of a.paginas) for (const el of pg.els) if (el.clave && !(el.clave in S.defs)) S.defs[el.clave] = el.def;
+// Fila del paso 2 (clave) de cada capa y color de los DXF. El valor por defecto sale de cada archivo (depende de si viene todo
+// de un color, de si hay rojo, de si alguna capa se llama corte): si dos archivos traen la misma capa y color con distinto valor
+// por defecto (un DXF de Fusion y uno de AutoCAD), la fila va por archivo, con su nombre, así se corrige cada uno. Lo que
+// Gaspar eligió sigue a sus trazos cuando una fila se parte en una por archivo o vuelve a juntarse.
+function calcularClaves() {
+  const grupos = new Map(); // capa y color → archivo → { a, def, antes: la clave que tenía, els }
+  for (const a of S.archivos) if (a.estado === 'ok') for (const pg of a.paginas) for (const el of pg.els) {
+    if (!el.base) continue;
+    let g = grupos.get(el.base); if (!g) grupos.set(el.base, (g = new Map()));
+    let x = g.get(a); if (!x) g.set(a, (x = { a, def: el.def, antes: el.clave, els: [] }));
+    x.els.push(el);
+  }
+  for (const [b, g] of grupos) {
+    const xs = [...g.values()], propia = (x) => 'dxf ' + x.a.id + ' ' + b.slice(4), eraPropia = (x) => x.antes != null && x.antes !== b;
+    // por archivo: si los valores por defecto no coinciden, o si ya iba por archivo y en cada uno quedó otra cosa
+    const vale = (x) => S.mapa[eraPropia(x) ? x.antes : b] || x.def;
+    const porArchivo = new Set(xs.map((x) => x.def)).size > 1 || (xs.some(eraPropia) && new Set(xs.map(vale)).size > 1);
+    const viejas = new Set();
+    for (const x of xs) {
+      const k = porArchivo ? propia(x) : b;
+      if (x.antes != null && x.antes !== k) { if (S.mapa[x.antes] != null && S.mapa[k] == null) S.mapa[k] = S.mapa[x.antes]; viejas.add(x.antes); } // lo que eligió en la fila de antes
+      for (const el of x.els) { el.clave = k; el.archivo = porArchivo ? x.a.nombre : null; }
+    }
+    for (const k of viejas) delete S.mapa[k]; // que no reviva si la fila vuelve a cambiar
+  }
 }
 function claseDe(el) {
-  if (el.clave) return { cl: S.mapa[el.clave] || S.defs[el.clave] || el.def || 'ignorar', porTrazo: true }; // DXF: por capa y color
+  if (el.base) return { cl: S.mapa[el.clave] || el.def || 'ignorar', porTrazo: true }; // DXF: por capa y color (y archivo, si hace falta)
   if (el.trazo) { const k = claseColor(el.sc); if (k !== 'ignorar') return { cl: k, porTrazo: true }; }
   if (el.relleno) { const k = claseColor(el.fc); if (k !== 'ignorar') return { cl: k, porTrazo: false }; }
   return { cl: 'ignorar', porTrazo: false };
@@ -507,7 +530,7 @@ function claseDe(el) {
 function inventarioColores() {
   const m = new Map();
   for (const a of S.archivos) if (a.estado === 'ok') for (const pg of a.paginas) for (const el of pg.els) {
-    if (el.clave) { const e = m.get(el.clave) || { clave: el.clave, hex: hex(el.sc), rgb: el.sc, capa: el.capa, def: S.defs[el.clave] || el.def, trazo: 0, relleno: 0 }; e.trazo += el.subs.length; m.set(el.clave, e); continue; }
+    if (el.base) { const e = m.get(el.clave) || { clave: el.clave, hex: hex(el.sc), rgb: el.sc, capa: el.capa, archivo: el.archivo, def: el.def, trazo: 0, relleno: 0 }; e.trazo += el.subs.length; m.set(el.clave, e); continue; }
     const sumar = (c, tipo) => { const k = hex(c); const e = m.get(k) || { clave: k, hex: k, rgb: c, trazo: 0, relleno: 0 }; e[tipo] += el.subs.length; m.set(k, e); };
     if (el.trazo) sumar(el.sc, 'trazo');
     if (el.relleno) sumar(el.fc, 'relleno');
@@ -648,7 +671,7 @@ function armar() {
 function unirPagina(pg, tol) {
   const ab = { corte: [], agujero: [] }, out = {};
   for (const el of pg.els) { const { cl } = claseDe(el); if (ab[cl]) for (const s of el.subs) if (!s.cerrado) ab[cl].push(s); }
-  for (const cl of Object.keys(ab)) if (ab[cl].length) out[cl] = Object.assign(NestDxf.unir(ab[cl], tol), { trazos: ab[cl] });
+  for (const cl of Object.keys(ab)) if (ab[cl].length) out[cl] = Object.assign(NestDxf.unir(ab[cl], tol, TOL_CURVA), { trazos: ab[cl] });
   return out;
 }
 // La unión de una página con la tolerancia elegida: la que ya calculó la revisión del paso 1 (con las mismas clases), o se calcula.
@@ -657,53 +680,61 @@ function unionDe(a, pg) {
   if (v && v.tol === a.union.tol) { const pr = v.pags.find((x) => x.pg === pg); return pr ? pr.u : {}; }
   return unirPagina(pg, a.union.tol);
 }
-// Revisión del paso 1: ¿hay trazos sueltos que se juntan con otros? (cuando unir arma menos figuras que trazos). Cuenta
-// cuántas figuras cerradas y abiertas quedan con la tolerancia elegida; las abiertas de corte que armar() igual cierra (les
-// falta CIERRE_SOLO o menos) van aparte, en "solas". Mientras Gaspar no eligió, si quedan abiertas prueba tolerancias más
-// grandes. Lo que se calcula queda guardado por tolerancia y por cómo están clasificados los trazos (paso 2): repintar, el
-// zoom o cambiar otro archivo no vuelven a unir.
+// Revisión del paso 1: ¿hay trazos sueltos que se juntan con otros? (cuando unir arma menos figuras que trazos, o arma una
+// figura partiendo trazos en una T o un cruce). Cuenta cuántas figuras cerradas y abiertas quedan con la tolerancia elegida;
+// las abiertas de corte que armar() igual cierra (les falta CIERRE_SOLO o menos) van aparte, en "solas". Lo que se calcula
+// queda guardado por tolerancia y por cómo están clasificados los trazos (paso 2): repintar, el zoom o cambiar otro archivo
+// no vuelven a unir.
 const LETRA_CLASE = { corte: 'c', calado: 'k', agujero: 'a', ignorar: '-' };
+function cuentaUnion(a, t) {
+  let v = a.revCache.porTol.get(t);
+  if (v) return v;
+  v = { tol: t, trazos: 0, usados: 0, cerradas: 0, abiertas: [], solas: [], cruces: [], cruzan: [], repetidos: 0, partidos: 0, cruzadas: 0, pags: [] };
+  for (const pg of a.paginas) {
+    const u = unirPagina(pg, t);
+    if (!Object.keys(u).length) continue;
+    v.pags.push({ pg, u });
+    for (const cl of Object.keys(u)) {
+      const x = u[cl];
+      v.trazos += x.trazos.length; v.usados += x.usados; v.cerradas += x.cerradas.length; v.repetidos += x.repetidos; v.partidos += x.partidos || 0; v.cruzadas += x.cruzadas || 0;
+      for (const o of x.abiertas) {
+        o.sola = cl === 'corte' && cierraSola(o.pts); // armar() la cierra igual
+        (o.sola ? v.solas : v.abiertas).push({ ...o, pg: pg.n });
+      }
+      for (const p of x.cruces) v.cruces.push({ p, pg: pg.n });
+      for (const p of x.cruzan || []) v.cruzan.push({ p, pg: pg.n });
+    }
+  }
+  // una T o un cruce partido que arma una figura también es unir (cerradas + abiertas puede llegar a los trazos, o pasarse)
+  v.hace = v.trazos >= 2 && (v.cerradas + v.abiertas.length + v.solas.length < v.trazos || (v.partidos + v.cruzadas > 0 && v.cerradas > 0));
+  a.revCache.porTol.set(t, v);
+  return v;
+}
 function revisarArchivo(a) {
   if (!window.NestDxf || a.estado !== 'ok') { a.rev = null; return; }
   const firma = a.paginas.map((pg) => pg.els.map((el) => LETRA_CLASE[claseDe(el).cl] || '-').join('')).join('|');
   if (!a.revCache || a.revCache.firma !== firma) a.revCache = { firma, porTol: new Map() };
-  const cuenta = (t) => {
-    let v = a.revCache.porTol.get(t);
-    if (v) return v;
-    v = { tol: t, trazos: 0, usados: 0, cerradas: 0, abiertas: [], solas: [], cruces: [], repetidos: 0, partidos: 0, pags: [] };
-    for (const pg of a.paginas) {
-      const u = unirPagina(pg, t);
-      if (!Object.keys(u).length) continue;
-      v.pags.push({ pg, u });
-      for (const cl of Object.keys(u)) {
-        const x = u[cl];
-        v.trazos += x.trazos.length; v.usados += x.usados; v.cerradas += x.cerradas.length; v.repetidos += x.repetidos; v.partidos += x.partidos || 0;
-        for (const o of x.abiertas) {
-          o.sola = cl === 'corte' && cierraSola(o.pts); // armar() la cierra igual
-          (o.sola ? v.solas : v.abiertas).push({ ...o, pg: pg.n });
-        }
-        for (const p of x.cruces) v.cruces.push({ p, pg: pg.n });
-      }
-    }
-    v.hace = v.trazos >= 2 && v.cerradas + v.abiertas.length + v.solas.length < v.trazos;
-    a.revCache.porTol.set(t, v);
-    return v;
-  };
-  const tol = a.union.tol, v = cuenta(tol);
-  v.otra = null;
-  // otra tolerancia: solo si todavía no eligió; primero la más grande (si con esa no mejora, con ninguna)
-  const mejora = (w) => w.abiertas.length < v.abiertas.length && w.cerradas >= v.cerradas;
-  if (v.hace && v.abiertas.length && a.union.estado === 'pendiente' && tol < TOLS_UNION[TOLS_UNION.length - 1] && mejora(cuenta(TOLS_UNION[TOLS_UNION.length - 1]))) {
-    for (const t of TOLS_UNION) {
-      if (t <= tol) continue;
-      const w = cuenta(t);
-      if (mejora(w)) { v.otra = { tol: t, abiertas: w.abiertas.length, cerradas: w.cerradas }; break; }
-    }
-  }
+  const tol = a.union.tol, v = cuentaUnion(a, tol);
+  // pide que Gaspar elija (y hasta entonces no se acomoda) si unir hace algo con la tolerancia elegida o con la de siempre: si
+  // eligió una con la que no se junta nada, el panel sigue ahí para volver
+  v.pide = v.hace || (tol !== TOL_UNION && cuentaUnion(a, TOL_UNION).hace);
   a.rev = v;
 }
+// Otra tolerancia que deja menos abiertas sin perder figuras, para sugerirla mientras Gaspar no eligió: primero la más grande
+// (si con esa no mejora, con ninguna).
+function otraTol(a) {
+  const v = a.rev, tol = a.union.tol, max = TOLS_UNION[TOLS_UNION.length - 1];
+  const mejora = (w) => w.abiertas.length < v.abiertas.length && w.cerradas >= v.cerradas;
+  if (!v.abiertas.length || tol >= max || !mejora(cuentaUnion(a, max))) return null;
+  for (const t of TOLS_UNION) {
+    if (t <= tol) continue;
+    const w = cuentaUnion(a, t);
+    if (mejora(w)) return { tol: t, abiertas: w.abiertas.length, cerradas: w.cerradas };
+  }
+  return null;
+}
 // Archivos con trazos sueltos donde Gaspar todavía no eligió unirlos o dejarlos como vinieron: hasta que elija no se acomoda.
-const sinDecidir = () => S.archivos.filter((a) => a.estado === 'ok' && a.rev && a.rev.hace && a.union.estado === 'pendiente');
+const sinDecidir = () => S.archivos.filter((a) => a.estado === 'ok' && a.rev && a.rev.pide && a.union.estado === 'pendiente');
 
 // ───────────── dibujo ─────────────
 function trazar(ctx, pts, X, Y, cerrar) {
@@ -788,6 +819,7 @@ function dibujarRevision(cv, a, pr) {
     ctx.stroke();
     ctx.strokeStyle = '#fbbf24'; ctx.beginPath();
     for (const p of u.cruces) ctx.rect(X(p[0]) - 5, Y(p[1]) - 5, 10, 10);
+    for (const p of u.cruzan || []) { const x = X(p[0]), y = Y(p[1]); ctx.moveTo(x, y - 7); ctx.lineTo(x + 7, y); ctx.lineTo(x, y + 7); ctx.lineTo(x - 7, y); ctx.closePath(); } // rombo
     ctx.stroke();
   }
 }
@@ -911,7 +943,7 @@ function dibujarRings(cv, rings, largo, ancho, W, H) {
 function pintarArchivos() {
   $('lista-archivos').innerHTML = S.archivos.map((a) => {
     const r = a.res || {};
-    const sueltos = a.rev && a.rev.hace && a.union.estado !== 'unido' ? ` · <span style="color:var(--suelto)">${plural(a.rev.trazos, 'trazo suelto', 'trazos sueltos')} sin unir</span>` : '';
+    const sueltos = a.rev && a.rev.pide && a.union.estado !== 'unido' ? ` · <span style="color:var(--suelto)">${plural(a.rev.trazos, 'trazo suelto', 'trazos sueltos')} sin unir</span>` : '';
     const det = a.estado === 'leyendo' ? 'leyendo…' : a.estado === 'error' ? '' : `${a.tipo === 'dxf' ? 'DXF · ' : ''}${plural(r.piezas || 0, 'pieza', 'piezas')} · ${plural(r.calados || 0, 'calado', 'calados')} · ${plural(r.agujeros || 0, 'agujero', 'agujeros')}${a.paginas.length > 1 ? ' · ' + a.paginas.length + ' mesas de trabajo' : ''}${sueltos}`;
     return `<div class="archivo"><span class="nom">${esc(a.nombre)}</span><span class="det">${det}</span><button class="chico" data-quitar="${a.id}">Quitar</button>${a.error ? `<div class="err">${esc(a.error)}</div>` : ''}</div>`;
   }).join('');
@@ -924,10 +956,12 @@ function pintarRevision() {
   const cont = $('revision');
   cont.innerHTML = '';
   for (const a of S.archivos) {
-    const v = a.rev, est = a.union && a.union.estado;
-    // el panel queda mientras haya trazos sueltos que unir o Gaspar ya eligió algo (para poder deshacerlo)
-    if (a.estado !== 'ok' || !v || !v.trazos || (!v.hace && est === 'pendiente')) continue;
-    const n = esc(a.nombre), d = document.createElement('div'), r = a.res || {};
+    const v = a.rev, est = a.union && a.union.estado, r = a.res || {};
+    // el panel queda mientras haya trazos sueltos que unir, o Gaspar ya eligió algo (para poder deshacerlo), o cambió la
+    // tolerancia (aunque con esa no se junte nada: para poder volver), o el archivo no tiene ninguna pieza (para probar con
+    // más tolerancia)
+    if (a.estado !== 'ok' || !v || !v.trazos || (!v.pide && est === 'pendiente' && v.tol === TOL_UNION && (r.piezas || v.trazos < 2))) continue;
+    const n = esc(a.nombre), d = document.createElement('div');
     d.className = 'rev' + (est === 'unido' ? ' ok' : est === 'como_vino' ? ' dejado' : '');
     const selTol = `<label class="tol">Unir puntas a<select data-rev-tol="${a.id}">${TOLS_UNION.map((t) => `<option value="${t}"${t === v.tol ? ' selected' : ''}>${fmtMm(t)}</option>`).join('')}</select><span class="sutil">o menos</span></label>`;
     const libres = v.abiertas.filter((o) => !o.toca).sort((p, q) => p.falta - q.falta), pegadas = v.abiertas.filter((o) => o.toca);
@@ -938,6 +972,8 @@ function pintarRevision() {
     const comoViene = r.piezas
       ? `Así como viene, en el paso 3 quedan solo las figuras que ya venían cerradas (${plural(r.piezas || 0, 'pieza', 'piezas')}): los trazos sueltos no se cortan, y un hueco cuyo contorno está suelto sale como pieza aparte.`
       : 'Así como viene no hay ninguna figura cerrada: no sale ninguna pieza.';
+    const otra = est === 'pendiente' ? otraTol(a) : null;
+    const otraHtml = otra ? `<p class="sutil">Con ${fmtMm(otra.tol)} ${otra.abiertas ? `${verbo(otra.abiertas, 'quedaría', 'quedarían')} ${plural(otra.abiertas, 'abierta', 'abiertas')}` : 'se cerrarían todas'}. Ojo: con más tolerancia se pueden juntar puntas que no van.</p>` : '';
     let html;
     if (est === 'unido') {
       html = `<h3>Trazos unidos · ${n}</h3>
@@ -947,22 +983,28 @@ function pintarRevision() {
       html = `<h3>Trazos sueltos sin unir · ${n}</h3>
         <p>Elegiste dejarlos como vinieron, así que los ${fmt(v.trazos)} trazos sueltos no forman piezas: los que no quedan adentro de una pieza salen en naranja en el paso 3 y no se cortan. ${r.piezas ? `Se acomodan solo las figuras que ya venían cerradas (${plural(r.piezas || 0, 'pieza', 'piezas')}); si alguna es un hueco cuyo contorno estaba suelto, sale como pieza aparte.` : 'No queda ninguna pieza.'}</p>
         <div class="acciones"><button class="primario" data-rev-unir="${a.id}">Unir y cerrar</button></div>`;
+    } else if (!v.pide) { // cambió la tolerancia (o no sale ninguna pieza) y con esta no se arma nada: no frena el acomodo
+      html = `<h3>Trazos sueltos · ${n}</h3>
+        <p>Viene con <b>${plural(v.trazos, 'trazo suelto', 'trazos sueltos')}</b>${a.tipo === 'dxf' ? ': cada línea, arco o curva por separado' : ''}. En la vista, en naranja. Con ${fmtMm(v.tol)} o menos no se juntan en ninguna figura, así que quedan como vinieron${ab ? `: ${plural(ab, 'abierta', 'abiertas')}; ${detalleAbiertas}` : ''}.${v.tol !== TOL_UNION ? ` Podés volver a ${fmtMm(TOL_UNION)} o probar con más.` : ''}</p>${solas}${otraHtml}
+        <div class="acciones">${selTol}</div>`;
     } else {
       html = `<h3>Trazos sueltos · ${n}</h3>
         <p>Viene con <b>${plural(v.trazos, 'trazo suelto', 'trazos sueltos')}</b>: cada línea, arco o curva por separado, sin unir${a.tipo === 'dxf' ? ' (Fusion 360 exporta así)' : ''}. En la vista, en naranja. ${comoViene} <b>Hasta que elijas qué hacer, no se puede acomodar.</b></p>
         <p>Si se unen las puntas que se tocan (a ${fmtMm(v.tol)} o menos), ${verbo(v.cerradas, 'queda', 'quedan')} <b>${plural(v.cerradas, 'figura cerrada', 'figuras cerradas')}</b>${ab ? ` y <b style="color:var(--error)">${plural(ab, 'abierta', 'abiertas')}</b>: ${detalleAbiertas}.` : so ? '.' : '. No queda ninguna abierta.'}</p>${solas}
-        ${v.otra ? `<p class="sutil">Con ${fmtMm(v.otra.tol)} ${v.otra.abiertas ? `${verbo(v.otra.abiertas, 'quedaría', 'quedarían')} ${plural(v.otra.abiertas, 'abierta', 'abiertas')}` : 'se cerrarían todas'}. Ojo: con más tolerancia se pueden juntar puntas que no van.</p>` : ''}
+        ${otraHtml}
         <div class="acciones">${selTol}<button class="primario" data-rev-unir="${a.id}">Unir y cerrar</button><button data-rev-dejar="${a.id}">Dejar como vino</button></div>`;
     }
     if (v.repetidos) html += `<p class="sutil">${plural(v.repetidos, 'trazo estaba repetido', 'trazos estaban repetidos')} uno encima del otro: se ${verbo(v.repetidos, 'toma', 'toman')} una vez.</p>`;
     if (v.partidos) html += `<p class="sutil">${plural(v.partidos, 'trazo termina', 'trazos terminan')} en el medio de otro: ese otro se parte ahí.</p>`;
+    if (v.cruzadas) html += `<p class="sutil">En ${plural(v.cruzadas, 'punto', 'puntos')} se cruzan dos trazos sin una punta ahí (una divisoria que atraviesa a otra, de borde a borde): se parten ahí para cerrar las figuras.</p>`;
     if (v.cruces.length) html += `<p class="sutil">En ${plural(v.cruces.length, 'punto', 'puntos')} se juntan más de dos trazos (cuadrado amarillo): cada zona cerrada sale como una figura aparte, y una línea que las separa se corta en las dos. Conviene mirarlos.</p>`;
+    if (v.cruzan.length) html += `<p class="sutil">En ${plural(v.cruzan.length, 'punto', 'puntos')} se cruzan dos trazos que no se parten (rombo amarillo): por ejemplo dos letras superpuestas, que salen cada una entera, o una línea suelta que pasa por encima de una pieza. Conviene mirarlos.</p>`;
     if (est !== 'como_vino') {
-      const prob = [...libres.map((o) => ({ t: `Abierta: le falta ${fmtMm(o.falta)} para cerrar`, pg: o.pg, pts: [o.pts[0], o.pts[o.pts.length - 1]] })), ...pegadas.map((o) => ({ t: 'Línea que sale de una figura y no vuelve', pg: o.pg, pts: o.pts })), ...v.cruces.map((c) => ({ t: 'Se juntan más de dos trazos', pg: c.pg, pts: [c.p] }))];
+      const prob = [...libres.map((o) => ({ t: `Abierta: le falta ${fmtMm(o.falta)} para cerrar`, pg: o.pg, pts: [o.pts[0], o.pts[o.pts.length - 1]] })), ...pegadas.map((o) => ({ t: 'Línea que sale de una figura y no vuelve', pg: o.pg, pts: o.pts })), ...v.cruces.map((c) => ({ t: 'Se juntan más de dos trazos', pg: c.pg, pts: [c.p] })), ...v.cruzan.map((c) => ({ t: 'Se cruzan dos trazos (no se parten)', pg: c.pg, pts: [c.p] }))];
       a.revProb = prob;
       if (prob.length) html += `<ul class="prob">${prob.slice(0, 10).map((p, i) => `<li><span>${p.t}${a.paginas.length > 1 ? ` · mesa ${p.pg}` : ''}</span><button class="chico" data-rev-ver="${a.id}:${i}">Ver</button></li>`).join('')}${prob.length > 10 ? `<li class="sutil">y ${fmt(prob.length - 10)} más</li>` : ''}</ul>`;
       for (const pr of v.pags) html += `<div class="lienzo" data-rev-lienzo="${a.id}:${pr.pg.n}"><canvas title="Tocá para acercar"></canvas>${S.revZoom.has(a.id + ':' + pr.pg.n) ? `<button class="chico" data-rev-todo="${a.id}:${pr.pg.n}">Ver todo</button>` : ''}</div>`;
-      html += `<div class="ley"><span><i style="background:var(--suelto)"></i>${est === 'unido' ? 'quedó abierto' : 'trazo suelto'}</span>${est === 'unido' ? '<span><i style="background:var(--corte)"></i>figura cerrada</span>' : ''}<span><i class="punta"></i>punta que no toca nada</span><span><i class="falta"></i>lo que falta para cerrar</span><span><i class="cruce"></i>se juntan más de dos</span><span>tocá la vista para acercar</span></div>`;
+      html += `<div class="ley"><span><i style="background:var(--suelto)"></i>${est === 'unido' ? 'quedó abierto' : 'trazo suelto'}</span>${est === 'unido' ? '<span><i style="background:var(--corte)"></i>figura cerrada</span>' : ''}<span><i class="punta"></i>punta que no toca nada</span><span><i class="falta"></i>lo que falta para cerrar</span><span><i class="cruce"></i>se juntan más de dos</span>${v.cruzan.length ? '<span><i class="cruza"></i>se cruzan sin partirse</span>' : ''}<span>tocá la vista para acercar</span></div>`;
     }
     d.innerHTML = html;
     cont.appendChild(d);
@@ -984,7 +1026,7 @@ function pintarColores() {
   $('sec-colores').hidden = !cols.length;
   $('tabla-colores').innerHTML = cols.map((c) => {
     const dxf = c.capa != null, k = dxf ? S.mapa[c.clave] || c.def : claseColor(c.rgb);
-    const donde = dxf ? `${plural(c.trazo, 'trazo', 'trazos')} del DXF, capa ${esc(c.capa)}` : [c.trazo ? fmt(c.trazo) + ' en trazo' : '', c.relleno ? fmt(c.relleno) + ' en relleno' : ''].filter(Boolean).join(' · ');
+    const donde = dxf ? `${plural(c.trazo, 'trazo', 'trazos')} del DXF, capa ${esc(c.capa)}${c.archivo ? `, en ${esc(c.archivo)}` : ''}` : [c.trazo ? fmt(c.trazo) + ' en trazo' : '', c.relleno ? fmt(c.relleno) + ' en relleno' : ''].filter(Boolean).join(' · ');
     return `<tr><td><span class="muestra" style="background:${c.hex}"></span></td><td>${c.hex}</td><td class="mute">${donde}</td><td><select data-color="${esc(c.clave)}">${CLASES.map(([v, t]) => `<option value="${v}"${v === k ? ' selected' : ''}>${t}</option>`).join('')}</select></td></tr>`;
   }).join('');
 }
@@ -996,11 +1038,12 @@ function avisosArchivos() {
   for (const a of S.archivos) {
     if (a.estado !== 'ok') continue;
     const r = a.res, n = esc(a.nombre), p = plural, dxf = a.tipo === 'dxf';
-    const sinUnir = a.rev && a.rev.hace && a.union.estado !== 'unido';
+    const sinUnir = a.rev && a.rev.pide && a.union.estado !== 'unido';
     if (sinUnir) out.push({ grave: true, t: a.union.estado === 'como_vino'
       ? `${n}: ${p(a.rev.trazos, 'trazo suelto quedó', 'trazos sueltos quedaron')} sin unir porque elegiste dejarlos como vinieron, así que no forman piezas.`
       : `${n}: viene con ${p(a.rev.trazos, 'trazo suelto', 'trazos sueltos')} sin unir. Elegí en el paso 1 si se unen o quedan como vinieron; hasta entonces no se puede acomodar.` });
-    if (!r.piezas && !sinUnir) out.push({ grave: true, t: `${n}: no hay ningún contorno ${dxf ? 'de corte' : 'rojo'} cerrado, así que no salió ninguna pieza. Revisá los colores del paso 2.` });
+    // sin piezas: si hay trazos sueltos, primero la tolerancia del paso 1; si no, los colores
+    if (!r.piezas && !sinUnir) out.push({ grave: true, t: `${n}: no hay ningún contorno ${dxf ? 'de corte' : 'rojo'} cerrado, así que no salió ninguna pieza. ${a.rev && a.rev.trazos >= 2 ? `Tiene ${p(a.rev.trazos, 'trazo suelto', 'trazos sueltos')} que con ${fmtMm(a.union.tol)} no cierran ninguna figura: probá con más tolerancia en el paso 1, o revisá los colores del paso 2.` : 'Revisá los colores del paso 2.'}` });
     if (r.unidas) out.push({ t: `${n}: se unieron trazos sueltos en ${p(r.unidas, 'figura cerrada', 'figuras cerradas')} (paso 1).` });
     if (r.sueltos) out.push({ grave: true, t: `${n}: ${p(r.sueltos, 'calado o agujero quedó', 'calados o agujeros quedaron')} fuera de toda pieza (en naranja). No se van a cortar.` });
     if (r.abiertosSueltos) out.push({ grave: true, t: `${n}: ${p(r.abiertosSueltos, `línea ${dxf ? 'de corte' : 'roja'} no cierra y no está`, `líneas ${dxf ? 'de corte' : 'rojas'} no cierran y no están`)} adentro de ninguna pieza (en naranja). No se ${r.abiertosSueltos === 1 ? 'corta' : 'cortan'}.` });
@@ -1051,7 +1094,7 @@ function pintarPiezas() {
     dibujarPagina(d.querySelector('canvas'), pg);
   }
 }
-function pintarTodo() { calcularDefs(); for (const a of S.archivos) revisarArchivo(a); armar(); pintarArchivos(); pintarRevision(); pintarColores(); pintarPiezas(); }
+function pintarTodo() { calcularClaves(); for (const a of S.archivos) revisarArchivo(a); armar(); pintarArchivos(); pintarRevision(); pintarColores(); pintarPiezas(); }
 function invalidarResultado(msg) {
   detenerWorkers();
   S.mejor = null; S.firmaMejor = ''; S.gcodeCache = new Map();
@@ -1471,7 +1514,7 @@ async function recorteDesdeArchivo(file) {
   for (const el of a.paginas[0].els) for (const s of el.subs) { if (s.cerrado && s.pts.length >= 3) fijos.push(s.pts); else if (!s.cerrado) abiertos.push(s); }
   let cerrados = [], aviso = '', falta = null;
   for (const t of abiertos.length && window.NestDxf ? [0.05, 0.1, 0.5, 1, 2] : [0]) {
-    const u = t ? NestDxf.unir(abiertos, t) : { cerradas: [], abiertas: [] };
+    const u = t ? NestDxf.unir(abiertos, t, TOL_CURVA) : { cerradas: [], abiertas: [] };
     cerrados = [...fijos, ...u.cerradas, ...u.abiertas.filter((o) => cierraSola(o.pts)).map((o) => o.pts)].map((pts) => ({ pts, area: areaPts(pts), bb: caja(pts) }));
     const mayor = cerrados.reduce((m, c) => Math.max(m, c.area), 0);
     const grande = u.abiertas.filter((o) => !cierraSola(o.pts)).map((o) => ({ o, bb: caja(o.pts) })).filter((x) => (x.bb.x1 - x.bb.x0) * (x.bb.y1 - x.bb.y0) > mayor);
