@@ -170,6 +170,7 @@
       <label>Girar las piezas cada<span class="fila"><select id="c-paso"><option value="5">5°</option><option value="10">10°</option><option value="15">15°</option><option value="45">45°</option><option value="90">90°</option></select></span></label>
       <label>Tiempo de búsqueda<span class="fila"><select id="c-seg"><option value="10">10 s</option><option value="20">20 s</option><option value="40">40 s</option><option value="60">1 min</option></select></span></label>
       <label class="check"><input type="checkbox" id="c-borde"> Borde de la placa en el DXF (capa PLACA)</label>
+      <label class="check" style="grid-column:1/-1"><input type="checkbox" id="c-adentro"> Meter piezas adentro de los huecos de otras (por ejemplo, adentro de una O)</label>
     </div>
     <div class="recortes">
       <h3>Recortes del taller</h3>
@@ -239,7 +240,7 @@
       <label>Ajuste del tiempo (%)<span class="fila"><input type="number" data-g="ajuste" min="10" step="5"><span class="sutil">100 = sin ajuste</span></span></label>
     </div>
     <label class="check" style="margin-top:12px"><input type="checkbox" id="g-zip"> Sumar el código G al ZIP</label>
-    <p class="nota">El avance y la bajada van en mm/s como en Aspire (en el archivo quedan en mm/min). Cero: X0 Y0 en la esquina de abajo a la izquierda de cada placa y Z0 arriba del material. El corte va por fuera de cada pieza (se corre el radio de la fresa), los cortes de adentro por dentro, el calado sobre la línea y los agujeros de la medida de la fresa con un taladro en el centro. Orden: calado, agujeros, cortes de adentro y contornos. "Prueba en el aire" sube todo esos milímetros para correr el programa sin tocar la placa.</p>
+    <p class="nota">El avance y la bajada van en mm/s como en Aspire (en el archivo quedan en mm/min). Cero: X0 Y0 en la esquina de abajo a la izquierda de cada placa y Z0 arriba del material. El corte va por fuera de cada pieza (se corre el radio de la fresa), los cortes de adentro por dentro, el calado sobre la línea y los agujeros de la medida de la fresa con un taladro en el centro. Orden: calado, agujeros, cortes de adentro y contornos; si una pieza va adentro del hueco de otra, primero se corta esa pieza entera, después el hueco y al final el contorno de la de afuera. "Prueba en el aire" sube todo esos milímetros para correr el programa sin tocar la placa.</p>
   </section>
 </main>
 
@@ -258,9 +259,9 @@
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" integrity="sha384-/1qUCSGwTur9vjf/z9lmu/eCUYbpOTgSjmpbMQZ1/CtX2v/WcAIKqRv+U1DUCG6e" crossorigin="anonymous"></script>
-<script src="nest-core.js?v=3"></script>
+<script src="nest-core.js?v=4"></script>
 <script src="clipper.js?v=1"></script>
-<script src="gcode.js?v=2"></script>
+<script src="gcode.js?v=3"></script>
 <script>
 'use strict';
 // Nesting de placas para el corte (Gaspar 25-oct-2026). Lee los .ai/.pdf de Emma con pdf.js, separa por color (corte rojo,
@@ -272,8 +273,8 @@ const TOL_CURVA = 0.05;      // mm: error máximo al pasar las curvas a tramos r
 const TOL_NEST = 0.05;       // mm: simplificación del contorno para acomodar (el motor la suma a la separación)
 const COL = { corte: '#ff4d4d', calado: '#f2f2f2', agujero: '#4d8dff', suelto: '#ff9f1a', ignorado: '#4a5263', fondo: '#0b0d11', placa: '#161a22' };
 const CLASES = [['corte', 'Corte'], ['calado', 'Calado'], ['agujero', 'Agujeros'], ['ignorar', 'Ignorar']];
-const CFG_DEF = { largo: 2440, ancho: 1220, sep: 6.5, margen: 5, paso: 5, seg: 20, borde: true, enteras: true, gzip: true };
-const VERSION_MOTOR = '3'; // subirla (y la de nest-core.js?v= arriba) cada vez que cambian nest-core.js o nest-worker.js: GitHub Pages los cachea 10 min
+const CFG_DEF = { largo: 2440, ancho: 1220, sep: 6.5, margen: 5, paso: 5, seg: 20, borde: true, enteras: true, gzip: true, adentro: true };
+const VERSION_MOTOR = '4'; // subirla (y la de nest-core.js?v= arriba) cada vez que cambian nest-core.js o nest-worker.js: GitHub Pages los cachea 10 min
 const S = { archivos: [], sec: 0, mapa: {}, piezas: [], grandes: [], cfg: cargarCfg(), recortes: cargarRecortes(), recNest: [], perfiles: cargarPerfiles(), gcodeCache: new Map(), mejor: null, firmaMejor: '', workers: [], firmaWorkers: '', vivos: 0, corridas: 0, t0: 0, ronda: 0, corriendo: false, timer: null, nest: null, cfgNest: null, pintarPend: false };
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -292,6 +293,7 @@ function cfgAlForm() {
   $('c-largo').value = S.cfg.largo; $('c-ancho').value = S.cfg.ancho; $('c-sep').value = S.cfg.sep; $('c-margen').value = S.cfg.margen;
   $('c-paso').value = String(S.cfg.paso); $('c-seg').value = String(S.cfg.seg); $('c-borde').checked = !!S.cfg.borde;
   $('c-enteras').checked = S.cfg.enteras !== false;
+  $('c-adentro').checked = S.cfg.adentro !== false;
   $('g-zip').checked = S.cfg.gzip !== false;
 }
 function cfgDelForm() {
@@ -300,7 +302,7 @@ function cfgDelForm() {
     largo: num('c-largo', CFG_DEF.largo, 100, 10000), ancho: num('c-ancho', CFG_DEF.ancho, 100, 10000),
     sep: num('c-sep', CFG_DEF.sep, 6.5, 50), margen: num('c-margen', CFG_DEF.margen, 5, 8),
     paso: parseInt($('c-paso').value, 10) || 5, seg: parseInt($('c-seg').value, 10) || 20, borde: $('c-borde').checked,
-    enteras: $('c-enteras').checked, gzip: $('g-zip').checked,
+    enteras: $('c-enteras').checked, gzip: $('g-zip').checked, adentro: $('c-adentro').checked,
   };
   guardarCfg();
 }
@@ -814,14 +816,31 @@ function prepararNest() {
   const recs = S.recortes.filter((r) => r.usar).sort((a, b) => b.area - a.area);
   const cajas = recs.map((r) => [r.largo, r.ancho]);
   if (cfg.enteras !== false || !recs.length) cajas.push([cfg.largo, cfg.ancho]);
-  const nest = [], grandes = [];
+  const nest = [], grandes = [], conHuecos = [];
+  let angosta = Infinity, chica = Infinity; // lo mínimo que tendría que entrar en un hueco: el lado de la pieza más angosta (en su mejor giro) y el área más chica
   for (const pz of S.piezas) {
     if (!pz.simple) pz.simple = NestCore.simplificar(pz.poly, TOL_NEST);
-    const entra = angs.some((t) => { const b = NestCore.bbox(NestCore.rotar(pz.simple, t)), w = b.x1 - b.x0, h = b.y1 - b.y0; return cajas.some(([L, A]) => w <= L - 2 * cfg.margen - 3 && h <= A - 2 * cfg.margen - 3); });
-    if (entra) nest.push({ id: pz.id, poly: pz.simple, simple: pz.simple, area: pz.area });
-    else grandes.push(pz);
+    let entra = false, lado = Infinity;
+    for (const t of angs) { const b = NestCore.bbox(NestCore.rotar(pz.simple, t)), w = b.x1 - b.x0, h = b.y1 - b.y0; lado = Math.min(lado, w, h); if (!entra) entra = cajas.some(([L, A]) => w <= L - 2 * cfg.margen - 3 && h <= A - 2 * cfg.margen - 3); }
+    if (!entra) { grandes.push(pz); continue; }
+    const it = { id: pz.id, poly: pz.simple, simple: pz.simple, area: pz.area, neta: areaNeta(pz), huecos: [] };
+    nest.push(it); angosta = Math.min(angosta, lado); chica = Math.min(chica, pz.area);
+    if (pz.huecos.length) conHuecos.push([it, pz]);
+  }
+  // Pieza dentro de pieza (Gaspar 26-oct): los huecos (cortes de adentro) quedan libres para meter otras piezas. Solo los que
+  // podrían alojar a alguna (de lado, la más angosta con la separación alrededor; de área, la más chica): el resto sigue
+  // contando lleno y no hace más pesada la máscara.
+  if (cfg.adentro !== false && nest.length > 1) for (const [it, pz] of conHuecos) {
+    if (!pz.simpleHuecos) pz.simpleHuecos = pz.huecos.map((h) => NestCore.simplificar(h, TOL_NEST));
+    pz.huecos.forEach((h, k) => { const b = caja(h); if (Math.min(b.x1 - b.x0, b.y1 - b.y0) >= angosta + 2 * cfg.sep && areaPts(h) >= chica) it.huecos.push(pz.simpleHuecos[k]); });
   }
   return { cfg: { ...cfg }, nest, grandes, recs };
+}
+// Material de la pieza: el contorno menos sus cortes de adentro (con piezas metidas en huecos, contar el contorno entero las
+// sumaría dos veces).
+function areaNeta(pz) {
+  if (pz.neta == null) pz.neta = pz.huecos.reduce((s, h) => s - areaPts(h), pz.area);
+  return pz.neta;
 }
 function detenerWorkers() {
   for (const w of S.workers) w.terminate();
@@ -846,7 +865,7 @@ function iniciar(seguir) {
   $('sec-resultado').hidden = false;
   if (!nest.length) { S.mejor = null; pintarResultado(); return; }
   const soloRecortes = recs.length > 0 && cfg.enteras === false;
-  const firma = JSON.stringify([nest.map((p) => p.id + ':' + Math.round(p.area)), cfg.largo, cfg.ancho, cfg.sep, cfg.margen, cfg.paso, recs.map((r) => r.id), soloRecortes]);
+  const firma = JSON.stringify([nest.map((p) => p.id + ':' + Math.round(p.area) + ':' + p.huecos.length), cfg.largo, cfg.ancho, cfg.sep, cfg.margen, cfg.paso, recs.map((r) => r.id), soloRecortes]);
   if (firma !== S.firmaMejor || !seguir) { S.mejor = null; S.firmaMejor = firma; }
   const cfgW = { largo: cfg.largo, ancho: cfg.ancho, sep: cfg.sep, margen: cfg.margen, paso: cfg.paso, res: 1, tol: TOL_NEST, recortes: recs.map((r) => ({ rings: r.rings, largo: r.largo, ancho: r.ancho })), soloRecortes };
   if (firma !== S.firmaWorkers || !S.workers.length) { crearWorkers(nest, cfgW); S.firmaWorkers = firma; }
@@ -881,7 +900,7 @@ function programarPintado() {
 function textoEstado() {
   const r = S.mejor, cfg = S.cfgNest;
   if (!r) return S.corriendo ? 'Acomodando… (la primera vuelta tarda unos segundos)' : (S.errorWorker ? 'No se pudo calcular: ' + esc(S.errorWorker) : 'No hay piezas para acomodar.');
-  const ult = r.ultimoLargo, area = S.nest.filter((p) => !r.sinLugar.includes(p.id)).reduce((s, p) => s + p.area, 0);
+  const ult = r.ultimoLargo, area = S.nest.filter((p) => !r.sinLugar.includes(p.id)).reduce((s, p) => s + p.neta, 0);
   const nRec = r.nRec || 0, recUs = r.usadas.filter((s) => s < nRec);
   const usado = recUs.reduce((s, k) => s + S.recNest[k].area, 0) + (r.nuevas ? (r.nuevas - 1) * cfg.largo * cfg.ancho + ult * cfg.ancho : 0), apr = usado > 0 ? 100 * area / usado : 0;
   const partes = [];
@@ -917,7 +936,7 @@ function pintarResultado() {
   const dis = S.corriendo ? ' disabled' : '';
   for (const s of r.usadas) {
     const lam = laminaInfo(s), cs = r.coloc.filter((c) => c.hoja === s);
-    const area = cs.reduce((t, c) => t + S.piezas[c.id].area, 0);
+    const area = cs.reduce((t, c) => t + areaNeta(S.piezas[c.id]), 0);
     let extra = '';
     if (!S.corriendo) {
       // Tiempo de máquina estimado y lo que el código G no puede hacer con esta fresa.
@@ -965,8 +984,12 @@ function dxfPlaca(h) {
     if (ci) { g(bl.AGUJEROS, 0, 'CIRCLE'); g(bl.AGUJEROS, 8, 'AGUJEROS'); g(bl.AGUJEROS, 10, n(ci.cx)); g(bl.AGUJEROS, 20, n(ci.cy)); g(bl.AGUJEROS, 30, '0.000'); g(bl.AGUJEROS, 40, n(ci.r)); }
     else poli(bl.AGUJEROS, 'AGUJEROS', t.pts, t.cerrado);
   }
-  for (const q of geos) { for (const p of q.huecos) poli(bl.CORTE, 'CORTE', p, true); for (const p of q.abiertos) poli(bl.CORTE, 'CORTE', p, false); }
-  for (const q of geos) poli(bl.CORTE, 'CORTE', q.poly, true);
+  // Los cortes van del nivel más adentro al de afuera, como en el código G (una pieza metida en un hueco, antes que ese hueco).
+  const nivel = NestGcode.niveles(geos);
+  for (let k = Math.max(0, ...nivel); k >= 0; k--) {
+    geos.forEach((q, i) => { if (nivel[i] !== k) return; for (const p of q.huecos) poli(bl.CORTE, 'CORTE', p, true); for (const p of q.abiertos) poli(bl.CORTE, 'CORTE', p, false); });
+    geos.forEach((q, i) => { if (nivel[i] === k) poli(bl.CORTE, 'CORTE', q.poly, true); });
+  }
   g(L, 0, 'SECTION'); g(L, 2, 'HEADER');
   g(L, 9, '$ACADVER'); g(L, 1, 'AC1009');
   g(L, 9, '$INSBASE'); g(L, 10, '0.000'); g(L, 20, '0.000'); g(L, 30, '0.000');

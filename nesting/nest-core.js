@@ -6,6 +6,8 @@
 //    rotaciones y las placas en orden; si no entra en ninguna, abre otra.
 //  · varias corridas con distinto orden de piezas; gana la que usa menos placas y deja la última más corta.
 //  · recortes del taller (cfg.recortes, con cualquier forma): se llenan primero y después se abren placas enteras.
+//  · pieza dentro de pieza (Gaspar 26-oct): si la pieza trae huecos (pz.huecos, ya simplificados), su máscara los deja libres
+//    y la búsqueda mete ahí otras piezas (adentro de una O), a la separación del borde del hueco como entre piezas.
 // Sin dependencias: sirve en un Worker (importScripts) y en Node (require) para las pruebas.
 (function (raiz) {
   'use strict';
@@ -60,13 +62,18 @@
   // (ini[j]..ini[j+1] en dat, de a pares). Lo que la pieza toca dentro de una franja = los tramos de adentro sobre la línea
   // de abajo de la franja + lo que recorre cada arista dentro de la franja (desde cualquier punto de la pieza se baja derecho
   // hasta esa línea sin salir, o se cruza el borde antes). Es exacta a nivel de celda: no agrega relleno de más.
-  function mascara(poly, ang, res) {
-    const p = rotar(poly, ang), b = bbox(p);
+  // huecos (opcional, Gaspar 26-oct): cortes de adentro de la pieza que quedan libres para meter otras piezas (adentro de una
+  // O, por ejemplo). Se toman par-impar con el contorno: lo de adentro de un hueco no es pieza, y las celdas que toca su borde
+  // sí (al colocar, el disco de la separación también agranda el borde del hueco hacia adentro). Sin huecos, como siempre.
+  function mascara(poly, ang, res, huecos) {
+    const p = rotar(poly, ang), anillos = [p];
+    if (huecos) for (const hu of huecos) anillos.push(rotar(hu, ang));
+    const b = bbox(anillos.length > 1 ? [].concat(...anillos) : p);
     const ox = b.x0 - res, oy = b.y0 - res;
     const w = Math.ceil((b.x1 - b.x0) / res) + 3, h = Math.ceil((b.y1 - b.y0) / res) + 3;
     const filas = new Array(h); for (let j = 0; j < h; j++) filas[j] = [];
     const cx = (x) => Math.floor((x - ox) / res);
-    for (let i = 0, n = p.length, q = n - 1; i < n; q = i++) {
+    for (const p of anillos) for (let i = 0, n = p.length, q = n - 1; i < n; q = i++) {
       let xa = p[q][0], ya = p[q][1], xb = p[i][0], yb = p[i][1];
       if (ya > yb) { const tx = xa, ty = ya; xa = xb; ya = yb; xb = tx; yb = ty; }
       const j0 = Math.floor((ya - oy) / res), j1 = Math.floor((yb - oy) / res);
@@ -77,9 +84,10 @@
         filas[j].push(x1 < x2 ? [cx(x1), cx(x2)] : [cx(x2), cx(x1)]);
       }
     }
-    // Tramos de adentro sobre la línea de abajo de cada franja (barrido con aristas activas, ordenadas por su y más baja).
+    // Tramos de adentro sobre la línea de abajo de cada franja (barrido con aristas activas, ordenadas por su y más baja;
+    // con huecos, las aristas de todos los anillos y los cruces de a pares).
     const ar = [], xs = [];
-    for (let i = 0, n = p.length, q = n - 1; i < n; q = i++) { const a = p[q], c = p[i]; if (a[1] !== c[1]) ar.push(a[1] < c[1] ? [a[1], c[1], a[0], c[0]] : [c[1], a[1], c[0], a[0]]); }
+    for (const p of anillos) for (let i = 0, n = p.length, q = n - 1; i < n; q = i++) { const a = p[q], c = p[i]; if (a[1] !== c[1]) ar.push(a[1] < c[1] ? [a[1], c[1], a[0], c[0]] : [c[1], a[1], c[0], a[0]]); }
     ar.sort((u, v) => u[0] - v[0]);
     let sig = 0; const act = [];
     for (let j = 0; j < h; j++) {
@@ -257,7 +265,7 @@
           if (vistos.has(a)) return; vistos.add(a);
           const clave = idx + '|' + a;
           let m = cache.get(clave);
-          if (!m) { m = mascara(pz.simple || (pz.simple = simplificar(pz.poly, tol)), angs[a], res); cache.set(clave, m); if (!pz.celdas || m.celdas < pz.celdas) pz.celdas = m.celdas; }
+          if (!m) { m = mascara(pz.simple || (pz.simple = simplificar(pz.poly, tol)), angs[a], res, pz.huecos); cache.set(clave, m); if (!pz.celdas || m.celdas < pz.celdas) pz.celdas = m.celdas; }
           const r = buscar(hoja, m, M, mejor ? mejor.p : null, rapido ? 3 : 1);
           if (r) puntos.push([r.p, a]);
           if (r && (!mejor || r.p < mejor.p || (r.p === mejor.p && r.gy < mejor.gy))) mejor = { gx: r.gx, gy: r.gy, p: r.p, m, a };
