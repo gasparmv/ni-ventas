@@ -10519,7 +10519,9 @@ async function ensureCorteNeonSchema(env) {
   // cm_colores: cm de neón de cada color de UN cartel de neón propio, los carga Emma al diseñar la matriz
   // (Gaspar 19-oct). JSON [{c:'Rosa', cm:600}, …] con los colores de NEON_COLORES.
   // prod_entregado_at/por: Neyen le entregó al productor el paquete (la base + el neón cortado) — Gaspar 19-oct.
-  for (const col of ['pedido_id INTEGER', 'pedido_numero INTEGER', 'origen TEXT', 'base TEXT', 'vendedor TEXT', 'disenado_at TEXT', 'cm_colores TEXT', 'prod_entregado_at TEXT', 'prod_entregado_por TEXT']) {
+  // prod_entregadas_u: bases ya entregadas cuando la entrega quedó a medias (un neón repartido que se juntó en un productor que
+  // tenía solo su parte): Neyen ve las que faltan aunque el productor ya esté armando. NULL = como siempre.
+  for (const col of ['pedido_id INTEGER', 'pedido_numero INTEGER', 'origen TEXT', 'base TEXT', 'vendedor TEXT', 'disenado_at TEXT', 'cm_colores TEXT', 'prod_entregado_at TEXT', 'prod_entregado_por TEXT', 'prod_entregadas_u INTEGER']) {
     try { await env.DB.prepare(`ALTER TABLE corte_pedidos ADD COLUMN ${col}`).run(); } catch (_) {} // tira si ya existe
   }
   // UNA pieza por cartel: índice único parcial (las manuales tienen pedido_id NULL) + INSERT OR IGNORE en
@@ -10527,7 +10529,7 @@ async function ensureCorteNeonSchema(env) {
   try { await env.DB.prepare('CREATE UNIQUE INDEX IF NOT EXISTS uq_corte_pedidos_pedido ON corte_pedidos(pedido_id) WHERE pedido_id IS NOT NULL').run(); } catch (_) {}
   // Memoizar solo si las columnas existen de verdad (un ALTER que falló por un corte transitorio no
   // tiene que dejar el isolate entero sin la feature hasta que se recicle).
-  try { await env.DB.prepare('SELECT pedido_id, pedido_numero, origen, base, vendedor, disenado_at, cm_colores, prod_entregado_at, prod_entregado_por FROM corte_pedidos LIMIT 0').all(); _corteNeonSchemaOk = true; } catch (_) {}
+  try { await env.DB.prepare('SELECT pedido_id, pedido_numero, origen, base, vendedor, disenado_at, cm_colores, prod_entregado_at, prod_entregado_por, prod_entregadas_u FROM corte_pedidos LIMIT 0').all(); _corteNeonSchemaOk = true; } catch (_) {}
 }
 // Colores de neón: los mismos 10 del pedido (PEDIDO_COLORES del front).
 const NEON_COLORES = ['Amarillo', 'Azul', 'Blanco cálido', 'Blanco frío', 'Celeste', 'Naranja', 'Rojo', 'Rosa', 'Verde', 'Violeta'];
@@ -22140,7 +22142,13 @@ async function moActualizar(env, ids) {
       cambio = true;
     }
     if (fija) continue;   // la 'fija' sigue sin tocarse en la línea: solo se prorratea
-    if (!mo) { if (r.mo_monto != null || cambio) stmts.push(env.DB.prepare("UPDATE pedidos SET mo_monto = NULL, mo_regla = '', mo_detalle = NULL, mo_at = ? WHERE id = ?").bind(now, r.id)); continue; }
+    if (!mo) {
+      // Sin MO (se borraron los tramos o las medidas): con partes ya pagadas la línea se queda con lo pagado (la V nunca queda por
+      // debajo de lo que ya se pagó); sin nada pagado, vacía como una línea normal.
+      if (x.linea != null) { if (r.mo_monto == null || Math.round(+r.mo_monto) !== x.linea) stmts.push(env.DB.prepare('UPDATE pedidos SET mo_monto = ?, mo_at = ? WHERE id = ?').bind(x.linea, now, r.id)); }
+      else if (r.mo_monto != null || cambio) stmts.push(env.DB.prepare("UPDATE pedidos SET mo_monto = NULL, mo_regla = '', mo_detalle = NULL, mo_at = ? WHERE id = ?").bind(now, r.id));
+      continue;
+    }
     if (!cambio && r.mo_monto != null && Math.round(+r.mo_monto) === x.linea) continue;
     stmts.push(env.DB.prepare('UPDATE pedidos SET mo_monto = ?, mo_regla = ?, mo_detalle = ?, mo_at = ? WHERE id = ?').bind(x.linea, mo.regla, JSON.stringify(mo.detalle), now, r.id));
   }
@@ -22183,11 +22191,16 @@ async function ensureProdSchema(env) {
     const l = await env.DB.prepare("SELECT 1 AS x FROM pragma_table_info('pedido_prod_log') WHERE name = 'parte_id'").first();
     if (!t) {
       await env.DB.batch([
-        env.DB.prepare("CREATE TABLE IF NOT EXISTS pedido_prod_partes (id INTEGER PRIMARY KEY AUTOINCREMENT, pedido_id INTEGER NOT NULL, productor_id TEXT NOT NULL, unidades INTEGER NOT NULL CHECK (unidades >= 1), prod_estado TEXT NOT NULL DEFAULT 'pendiente', prod_estado_at TEXT, asignado_at TEXT, terminado_at TEXT, pagado_at TEXT, pagado_por TEXT DEFAULT '', mo_monto REAL, recibido_at TEXT, recibido_por TEXT, entregado_at TEXT, entregado_por TEXT, created_at TEXT, updated_at TEXT, UNIQUE (pedido_id, productor_id))"),
+        env.DB.prepare("CREATE TABLE IF NOT EXISTS pedido_prod_partes (id INTEGER PRIMARY KEY AUTOINCREMENT, pedido_id INTEGER NOT NULL, productor_id TEXT NOT NULL, unidades INTEGER NOT NULL CHECK (unidades >= 1), prod_estado TEXT NOT NULL DEFAULT 'pendiente', prod_estado_at TEXT, asignado_at TEXT, terminado_at TEXT, pagado_at TEXT, pagado_por TEXT DEFAULT '', mo_monto REAL, recibido_at TEXT, recibido_por TEXT, entregado_at TEXT, entregado_por TEXT, entregadas_u INTEGER, created_at TEXT, updated_at TEXT, UNIQUE (pedido_id, productor_id))"),
         env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_ppp_productor ON pedido_prod_partes (productor_id)')
       ]);
     }
     if (!l) { try { await env.DB.prepare('ALTER TABLE pedido_prod_log ADD COLUMN parte_id INTEGER').run(); } catch (_) {} }
+    // entregadas_u (bases que Neyen ya le dio antes de que le agrandaran la parte): la tabla de una 070 anterior no la tiene.
+    if (t && !(await env.DB.prepare("SELECT 1 AS x FROM pragma_table_info('pedido_prod_partes') WHERE name = 'entregadas_u'").first())) {
+      try { await env.DB.prepare('ALTER TABLE pedido_prod_partes ADD COLUMN entregadas_u INTEGER').run(); } catch (_) {}
+      if (!(await env.DB.prepare("SELECT 1 AS x FROM pragma_table_info('pedido_prod_partes') WHERE name = 'entregadas_u'").first())) return false;
+    }
     if (!f) {
       try { await env.DB.prepare('ALTER TABLE pedido_prod_fotos ADD COLUMN parte_id INTEGER').run(); } catch (_) {}
       try { await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_pedido_prod_fotos_parte ON pedido_prod_fotos (parte_id)').run(); } catch (_) {}
@@ -22231,7 +22244,8 @@ function prodFotosRequeridas(row) { return Math.min(5, Math.max(1, Math.round(+r
 // paga a quien no corresponde). Puede haber unidades LIBRES (SUM(unidades) <= cantidad) que no son de nadie hasta que se
 // asignan. Una sola parte con TODAS las unidades no existe: esa línea vuelve a ser normal con ese productor. Las columnas
 // prod_* y recibido_* de la línea son un RESUMEN de las partes (prodResumenStmt): el tablero, el despacho, la logística y la
-// reapertura del grupo siguen leyendo lo mismo. Kill-switch: kv 'prod_partes_on' = '1' (apagado solo deja el dry_run).
+// reapertura del grupo siguen leyendo lo mismo. Kill-switch: kv 'prod_partes_on' = '1' (apagado: el dry_run y juntar cada
+// repartida en un productor o en ninguno, para poder volver atrás; ver POST /admin/prod/partes).
 const PROD_VARIOS = '*';
 async function prodPartesOn(env) { try { return String(await kvGet(env, 'prod_partes_on', '0')) === '1'; } catch (_) { return false; } }
 // Unidades de la línea (pedidos.cantidad se guarda como REAL: 9.0).
@@ -22256,33 +22270,60 @@ function prodTextoPartes(partes, nombres, libres, mayus) {
   if (libres > 0) t.push((mayus ? 'SIN ASIGNAR' : 'sin asignar') + ' ×' + libres);
   return t.join(' · ');
 }
+// La cantidad de la venta escrita en el nombre o la aclaración del cartel, cambiada por la de la parte (lo que ve su productor).
+// Solo lo que seguro es la cantidad: "N unidades / carteles / piezas…" (en número o en letras) y, en el nombre, "xN" al final
+// ("Logo x9"). Medidas ("60x9 cm"), "x 2 metros" o "dimmer x2" no se tocan. soloUnidades: la aclaración (sin el "xN").
+const PROD_NUM_LETRAS = ['', '', 'dos', 'tres', 'cuatro', 'cinco', 'seis', 'siete', 'ocho', 'nueve', 'diez', 'once', 'doce', 'trece', 'catorce', 'quince', 'dieciséis', 'diecisiete', 'dieciocho', 'diecinueve', 'veinte'];
+const _prodCantAntes = '(^|[^\\d.,\\wáéíóúñ])';   // el número suelto: ni pegado a otro número ni a una palabra
+function prodCantNum(N) { return '(?:' + N + (PROD_NUM_LETRAS[N] ? '|' + PROD_NUM_LETRAS[N] : '') + ')'; }
+function prodCantTexto(t, N, u, soloUnidades) {
+  let s = String(t || '').replace(new RegExp(_prodCantAntes + prodCantNum(N) + '(\\s*(?:unidades?|unid\\.?|uds?\\.?|u\\.?|carteles?|neones?|piezas?|logos?|letreros?)(?![a-záéíóúñ]))', 'gi'), '$1' + u + '$2');
+  if (!soloUnidades) s = s.replace(new RegExp('(^|\\s)([x×]\\s*)' + N + '\\s*$', 'i'), '$1$2' + u);
+  return s;
+}
+// ¿Queda la cantidad de la venta en el texto después de prodCantTexto ("son 9 iguales", "pack (9)", "dimmer x9")? Las medidas no
+// cuentan. Es para avisarle a Gaspar al repartir: cada productor ve ese texto tal cual.
+function prodCantQueda(t, N, soloUnidades) {
+  const s = prodCantTexto(t, N, '', soloUnidades)
+    .replace(/\d+(?:[.,]\d+)?\s*[x×]\s*\d+(?:[.,]\d+)?/gi, ' ')
+    .replace(new RegExp(_prodCantAntes + N + '\\s*(?:cm|mm|mts?|metros?|m)(?![a-záéíóúñ])', 'gi'), '$1 ');
+  return new RegExp(_prodCantAntes + prodCantNum(N) + '(?![\\d\\wáéíóúñ]|[.,]\\d)', 'i').test(s) || new RegExp('(^|[^\\d])[x×]\\s*' + N + '(?!\\d)', 'i').test(s);
+}
 // Mano de obra de cada parte: la de la línea ENTERA (calcManoObra, misma fórmula) prorrateada por unidades. Es exacto porque la
 // fórmula es lineal en precio y cantidad juntos. Las partes pagadas quedan congeladas; el resto (partes sin pagar + unidades
 // libres) se reparte con redondeo acumulado: ninguna parte da negativo y la suma cierra al peso. Lo libre no se le paga a nadie
 // hasta asignarlo. partes = [{key, unidades, pagado, mo_monto}] → {partes: {key: monto|null}, libre, linea}; linea = lo que va a
-// pedidos.mo_monto (columna V): pagadas + el resto. Sin nada pagado, linea es la MO de siempre.
+// pedidos.mo_monto (columna V): pagadas + el resto.
+// El resto: si la MO de la línea no cambió desde los pagos (lo congelado difiere de su proporción solo por redondeo, ≤ $1 por
+// parte pagada) se reparte mo − congelado, así la línea sigue siendo la MO exacta aunque se pague primero una del medio. Si cambió
+// de verdad (precio, medidas, parámetros), cada unidad sin pagar vale lo que dice la fórmula de hoy y la línea = pagadas + resto.
+// Sin MO (faltan tramos o medidas): las sin pagar quedan sin MO y la línea se queda con lo ya pagado (nunca por debajo de eso).
 function prodMoReparto(mo, cantidad, partes) {
   const N = Math.max(1, Math.round(+cantidad || 1)), ps = partes || [], out = { partes: {}, libre: null, linea: null };
   const pag = ps.filter(p => p.pagado), nopag = ps.filter(p => !p.pagado);
   for (const p of pag) out.partes[p.key] = p.mo_monto == null ? null : Math.round(+p.mo_monto);
-  if (mo == null || mo === '' || !isFinite(+mo)) { for (const p of nopag) out.partes[p.key] = null; return out; }
   const uPag = pag.reduce((s, p) => s + (+p.unidades || 0), 0), uResto = Math.max(0, N - uPag);
   const congelado = pag.reduce((s, p) => s + (Math.round(+p.mo_monto) || 0), 0);
-  const acum = u => Math.round(+mo * u / N);
+  if (mo == null || mo === '' || !isFinite(+mo)) { for (const p of nopag) out.partes[p.key] = null; if (pag.length) out.linea = congelado; return out; }
+  const igual = Math.abs(congelado - Math.round(+mo * uPag / N)) <= pag.length;
+  const R = !uResto ? 0 : igual ? Math.max(0, Math.round(+mo) - congelado) : Math.round(+mo * uResto / N);
+  const acum = u => uResto ? Math.round(R * u / uResto) : 0;
   let u = 0;
   for (const p of nopag) { const antes = acum(u); u += +p.unidades || 0; out.partes[p.key] = acum(u) - antes; }
-  out.libre = acum(uResto) - acum(Math.min(u, uResto));
-  out.linea = congelado + acum(uResto);
+  out.libre = R - acum(Math.min(u, uResto));
+  out.linea = congelado + R;
   return out;
 }
 // Resumen de la línea repartida en pedidos (UNA sentencia, va en el MISMO batch que cambia las partes). "Todas" exige además que
-// no queden unidades libres: con libres la línea nunca está terminada, pagada ni llegada.
+// no queden unidades libres: con libres la línea nunca está terminada, pagada ni llegada. Toda pagada: la MO de la línea (V) es
+// lo que se pagó (moActualizar ya no la toca; si se bajó la cantidad, no queda la MO de una unidad que ya no existe).
 function prodResumenStmt(env, pid) {
   const X = 'FROM pedido_prod_partes x WHERE x.pedido_id = pedidos.id';
   const completa = `(SELECT IFNULL(SUM(x.unidades),0) ${X}) >= CAST(ROUND(IFNULL(pedidos.cantidad,1)) AS INTEGER)`;
   const todas = c => `(NOT EXISTS (SELECT 1 ${X} AND NOT (${c})) AND ${completa})`;
   const term = todas("x.prod_estado = 'terminado'"), pag = todas('x.pagado_at IS NOT NULL'), rec = todas('x.recibido_at IS NOT NULL');
   return env.DB.prepare(`UPDATE pedidos SET
+      mo_monto = CASE WHEN ${pag} AND NOT EXISTS (SELECT 1 ${X} AND x.mo_monto IS NULL) THEN (SELECT SUM(ROUND(x.mo_monto)) ${X}) ELSE mo_monto END,
       prod_estado = CASE WHEN ${term} THEN 'terminado' WHEN EXISTS (SELECT 1 ${X} AND x.prod_estado IN ('en_armado','terminado')) THEN 'en_armado' ELSE 'pendiente' END,
       prod_estado_at = (SELECT MAX(x.prod_estado_at) ${X}),
       prod_asignado_at = (SELECT MIN(x.asignado_at) ${X}),
@@ -22340,7 +22381,8 @@ async function prodCarteles(env, whereSql, args, paraProductor, prodId) {
       const fs = (await env.DB.prepare(`SELECT id, pedido_id, parte_id, r2_key, created_at FROM pedido_prod_fotos WHERE pedido_id IN (${sl.map(() => '?').join(',')}) ORDER BY id`).bind(...sl).all()).results || [];
       for (const f of fs) {
         const x = { id: f.id, key: f.r2_key, at: f.created_at };
-        (fotos[f.pedido_id] = fotos[f.pedido_id] || []).push(x);
+        // Al productor de una línea normal, solo las de la línea: las que quedaron de partes de otros (se juntó) no son suyas.
+        if (!paraProductor || !f.parte_id) (fotos[f.pedido_id] = fotos[f.pedido_id] || []).push(x);
         if (f.parte_id) (fotosParte[f.parte_id] = fotosParte[f.parte_id] || []).push(x);
       }
     }
@@ -22356,10 +22398,10 @@ async function prodCarteles(env, whereSql, args, paraProductor, prodId) {
         // Su parte como si fuera la línea. Nunca r.partes, la cantidad total ni la MO de la línea.
         const p = prodId ? ps.find(x => x.productor_id === prodId) : null;
         if (!p) continue;
-        // El nombre del cartel suele decir la cantidad de la venta ("del norte 9 unidades"): al productor le llega con la suya.
+        // El nombre del cartel suele decir la cantidad de la venta ("del norte 9 unidades"): al productor le llega con la suya. Solo
+        // lo que seguro es la cantidad (prodCantTexto); lo dudoso se le avisa a Gaspar al repartir.
         const N = prodUnidadesLinea(r);
-        const conSuyas = t => String(t || '').replace(new RegExp('\\b' + N + '(\\s*(?:unidades?|unid\\.?|carteles?|neones?|u\\.?)(?![a-záéíóúñ]))', 'gi'), p.unidades + '$1').replace(new RegExp('([x×]\\s*)' + N + '\\b', 'gi'), '$1' + p.unidades);
-        if (N !== p.unidades) { r.cartel = conSuyas(r.cartel); r.aclaracion = conSuyas(r.aclaracion); }
+        if (N !== p.unidades) { r.cartel = prodCantTexto(r.cartel, N, p.unidades); r.aclaracion = prodCantTexto(r.aclaracion, N, p.unidades, true); }
         Object.assign(r, { cantidad: p.unidades, productor_id: prodId, prod_estado: p.prod_estado, prod_estado_at: p.prod_estado_at, prod_asignado_at: p.asignado_at,
           prod_terminado_at: p.terminado_at, prod_pagado_at: p.pagado_at, mo_monto: p.mo_monto, fotos: fotosParte[p.id] || [], fotos_requeridas: prodFotosRequeridas({ cantidad: p.unidades }) });
         out.push(r); continue;
@@ -22413,18 +22455,43 @@ async function prodAsignarFilas(env, rows, pid, prod, quien) {
   await prodLog(env, log);
   return { cambiados: stmts.length, saltados };
 }
+// Reabrió una línea terminada (un estado para atrás, un reparto que agrega unidades o libres, subir la cantidad de una repartida) y
+// el pedido estaba 'para enviar' porque lo puso el tablero (sync): vuelve a 'En produccion' (todo el grupo, con espejo y log) para
+// que Pedidos, la planilla y los paquetes de Neyen no digan 'para enviar' mientras se rehace. Lo puesto a mano no se toca.
+async function prodReabrirSiTablero(env, pid) {
+  try {
+    const now = new Date().toISOString();
+    const gq = await neonGrupoDe(env, pid);
+    const ids = [...new Set([pid, ...(gq.fr || []).map(x => x.id), ...(gq.serv || []).map(x => x.id)])];
+    const pe = await env.DB.prepare("SELECT estado_pedido FROM pedidos WHERE id = ?").bind(pid).first();
+    const lg = await env.DB.prepare("SELECT por FROM pedido_estado_log WHERE pedido_id IN (" + ids.map(() => '?').join(',') + ") AND lower(a) LIKE 'para enviar%' ORDER BY ts DESC LIMIT 1").bind(...ids).first();
+    const sigueParaEnviar = (gq.fr || []).length && gq.fr.every(x => ['enviar', 'enviado'].includes(x._etapa));
+    if (pe && /^para enviar/i.test(String(pe.estado_pedido || '')) && lg && String(lg.por || '') === 'tablero' && !sigueParaEnviar) {
+      const u = await env.DB.prepare("UPDATE pedidos SET estado_pedido = 'En produccion', mirror_dirty = 1, mirror_attempts = 0, mirror_error = NULL, updated_at = ? WHERE id IN (" + ids.map(() => '?').join(',') + ") AND lower(IFNULL(estado_pedido,'')) LIKE 'para enviar%'").bind(now, ...ids).run();
+      if (((u.meta && u.meta.changes) || 0) && gq.base) await env.DB.prepare('INSERT INTO pedido_estado_log (pedido_id, numero, fecha, comercial_id, telefono, de, a, por, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(pid, gq.base.numero, gq.base.fecha, gq.base.comercial_id || 'joaco', gq.base.telefono || '', 'para enviar', 'En produccion', 'tablero', now).run();
+    }
+  } catch (_) {}
+}
 // Reparte las unidades de UNA línea entre productores (POST /admin/prod/partes). lista = [{productor_id, unidades}] (0 = no va).
 // Se pueden dejar unidades libres; [] saca a todos; un solo productor con TODAS = línea normal (el /asignar de siempre). Lo pagado
-// no se toca; cambiarle las unidades (o sacar) a un trabajo ya arrancado pide confirmación (o.forzar). o.seco = dry_run: el plan
-// con la MO de cada uno (montos, nunca parámetros) y los avisos, sin escribir nada. Devuelve {st, j} (status y JSON).
+// no se toca; cambiarle las unidades (o sacar) a un trabajo ya arrancado, o a alguien que ya tiene sus bases, pide confirmación
+// (o.forzar). o.seco = dry_run: el plan con la MO de cada uno (montos, nunca parámetros), los avisos y la firma de lo que se leyó,
+// sin escribir nada; o.firma = esa firma: si el reparto cambió desde el "cómo queda" (otra pantalla, un productor que arrancó), 409.
+// o.soloUnir (kill-switch apagado): solo juntar en un productor o en ninguno. Devuelve {st, j} (status y JSON).
 async function prodRepartir(env, pid, lista, o) {
   o = o || {};
-  const L = await env.DB.prepare('SELECT id, numero, fecha, cartel, precio, cantidad, tramos, cm_neon, alto, ancho, es_corporeo, productor_id, productor, prod_estado, prod_estado_at, prod_asignado_at, prod_terminado_at, prod_pagado_at, prod_pagado_por, recibido_at, recibido_por, mo_monto, mo_regla FROM pedidos WHERE id = ?').bind(pid).first();
+  const L = await env.DB.prepare('SELECT id, numero, fecha, cartel, aclaracion, precio, cantidad, tramos, cm_neon, alto, ancho, es_corporeo, productor_id, productor, prod_estado, prod_estado_at, prod_asignado_at, prod_terminado_at, prod_pagado_at, prod_pagado_por, recibido_at, recibido_por, mo_monto, mo_regla FROM pedidos WHERE id = ?').bind(pid).first();
   if (!L || +L.es_corporeo) return { st: 404, j: { error: 'cartel no encontrado' } };
   if (neonNoCartel(L)) return { st: 400, j: { error: 'eso no es un cartel para producir' } };
   const N = prodUnidadesLinea(L);
   if (Math.abs((+L.cantidad || 1) - N) > 1e-6) return { st: 400, j: { error: 'la cantidad del cartel no es un número entero' } };
   if (!Array.isArray(lista)) return { st: 400, j: { error: 'faltan las partes' } };
+  const esRep = String(L.productor_id || '') === PROD_VARIOS;
+  const actuales = esRep ? ((await prodPartesDe(env, [pid]))[pid] || []) : [];
+  const firma = prodFirma(L, actuales);
+  if (o.firma != null && String(o.firma) !== firma) return { st: 409, j: { error: 'el reparto cambió mientras tanto, actualizá' } };
+  // Lo de antes como partes: la línea normal con productor es "una parte con todas las unidades".
+  const antes = esRep ? actuales : (L.productor_id ? [{ id: null, productor_id: String(L.productor_id), unidades: N, prod_estado: L.prod_estado || 'pendiente', pagado_at: L.prod_pagado_at }] : []);
   const prods = await prodProductores(env), nombres = {};
   for (const p of prods) nombres[p.id] = p.nombre;
   const dest = [];
@@ -22432,18 +22499,15 @@ async function prodRepartir(env, pid, lista, o) {
     const id = prodSlug(x && x.productor_id).replace(/\s+/g, ''), u = Number(x && x.unidades);
     if (!id || !u) continue;
     if (!Number.isInteger(u) || u < 1) return { st: 400, j: { error: 'las unidades tienen que ser números enteros' } };
-    const p = prods.find(q => q.id === id);
-    if (!p || p.baja) return { st: 400, j: { error: 'ese productor no existe o está dado de baja (' + id + ')' } };
-    if (dest.some(d => d.productor_id === id)) return { st: 400, j: { error: p.nombre + ' está dos veces' } };
+    const p = prods.find(q => q.id === id), ya = antes.find(a => a.productor_id === id);
+    // De baja (o un extra desactivado): no recibe trabajo nuevo, pero conserva la parte que ya tiene (con sus unidades o menos). Si
+    // no, la parte pagada de alguien que se fue trababa la línea para siempre.
+    if ((!p || p.baja) && !(ya && u <= ya.unidades)) return { st: 400, j: { error: 'ese productor no existe o está dado de baja (' + id + ')' } };
+    if (dest.some(d => d.productor_id === id)) return { st: 400, j: { error: (nombres[id] || id) + ' está dos veces' } };
     dest.push({ productor_id: id, unidades: u });
   }
   const suma = dest.reduce((s, d) => s + d.unidades, 0), libres = N - suma;
   if (suma > N) return { st: 400, j: { error: `son ${N} unidades y repartiste ${suma}` } };
-  const esRep = String(L.productor_id || '') === PROD_VARIOS;
-  const actuales = esRep ? ((await prodPartesDe(env, [pid]))[pid] || []) : [];
-  const firma = prodFirma(L, actuales);
-  // Lo de antes como partes: la línea normal con productor es "una parte con todas las unidades".
-  const antes = esRep ? actuales : (L.productor_id ? [{ id: null, productor_id: String(L.productor_id), unidades: N, prod_estado: L.prod_estado || 'pendiente', pagado_at: L.prod_pagado_at }] : []);
   const txt = ps => ps.slice().sort((a, b) => String(a.productor_id).localeCompare(String(b.productor_id))).map(p => p.productor_id + '×' + p.unidades).join('|');
   if (txt(antes) === txt(dest)) return { st: 200, j: o.seco ? { ok: true, dry_run: true, sin_cambios: true } : { ok: true, sin_cambios: true, carteles: await prodCartelesPorIds(env, [pid], false) } };
   // Lo pagado no se toca.
@@ -22453,12 +22517,26 @@ async function prodRepartir(env, pid, lista, o) {
     const d = dest.find(x => x.productor_id === a.productor_id);
     if (!d || d.unidades !== a.unidades) return { st: 409, j: { error: `la parte de ${nombres[a.productor_id] || a.productor_id} ya está pagada: no se puede cambiar` } };
   }
-  // Trabajos ya arrancados (armando o terminados) a los que se les cambian las unidades o se sacan: se confirma.
-  const confirmar = antes.filter(a => { const d = dest.find(x => x.productor_id === a.productor_id); return ['en_armado', 'terminado'].includes(String(a.prod_estado || '')) && (!d || d.unidades !== a.unidades); })
-    .map(a => ({ productor_id: a.productor_id, nombre: nombres[a.productor_id] || a.productor_id, estado: a.prod_estado, unidades: a.unidades, a: (dest.find(x => x.productor_id === a.productor_id) || {}).unidades || 0 }));
   const tipo = !dest.length ? 'vacia' : (dest.length === 1 && dest[0].unidades === N) ? 'normal' : 'rep';
   let pieza = null;
-  try { pieza = await env.DB.prepare("SELECT id, estado, prod_entregado_at, prod_entregado_por FROM corte_pedidos WHERE pedido_id = ? AND producto = 'NEON' ORDER BY id DESC LIMIT 1").bind(pid).first(); } catch (_) {}
+  try { await ensureCorteNeonSchema(env); } catch (_) {}
+  try { pieza = await env.DB.prepare("SELECT * FROM corte_pedidos WHERE pedido_id = ? AND producto = 'NEON' ORDER BY id DESC LIMIT 1").bind(pid).first(); } catch (_) {}
+  // Bases que ya tiene cada uno (Neyen se las entregó). Una parte: todas si está entregada, o las de entregas anteriores
+  // (entregadas_u, cuando le agrandaron la parte). La línea normal: la pieza entregada, lo entregado a medias (prod_entregadas_u)
+  // o, como siempre en los paquetes de Neyen, todas si la pieza está cortada y el productor ya arrancó.
+  const conParcial = !!pieza && ('prod_entregadas_u' in pieza);
+  const parcialL = conParcial && pieza.prod_entregadas_u != null && pieza.prod_entregadas_u !== '';
+  const yaLinea = !pieza ? 0 : pieza.prod_entregado_at ? N : parcialL ? Math.min(N, +pieza.prod_entregadas_u || 0) : (L.productor_id && ['cortado', 'embalado'].includes(String(pieza.estado || '')) && ['en_armado', 'terminado'].includes(String(L.prod_estado || ''))) ? N : 0;
+  const yaParte = a => a.entregado_at ? a.unidades : Math.min(a.unidades, +a.entregadas_u || 0);
+  const yaDe = a => !a ? 0 : a.id ? yaParte(a) : yaLinea;
+  // Se confirma: a un trabajo ya arrancado (armando o terminado) le cambian las unidades o lo sacan, o al que ya tiene sus bases le
+  // dejan menos unidades que bases (o lo sacan).
+  const confirmar = antes.filter(a => {
+    const d = dest.find(x => x.productor_id === a.productor_id), b = yaDe(a);
+    return (['en_armado', 'terminado'].includes(String(a.prod_estado || '')) && (!d || d.unidades !== a.unidades)) || (b > 0 && (!d || d.unidades < b));
+  }).map(a => ({ productor_id: a.productor_id, nombre: nombres[a.productor_id] || a.productor_id, estado: a.prod_estado, unidades: a.unidades, a: (dest.find(x => x.productor_id === a.productor_id) || {}).unidades || 0, bases: yaDe(a) }));
+  const sacan = antes.filter(a => !dest.some(d => d.productor_id === a.productor_id))
+    .map(a => ({ productor_id: a.productor_id, nombre: nombres[a.productor_id] || a.productor_id, unidades: a.unidades, estado: a.prod_estado || 'pendiente', bases: yaDe(a) }));
   // MO de la línea entera con la fórmula de siempre (la 'fija' es la que está), prorrateada entre las partes. undefined = sin los
   // parámetros: la deja moActualizar.
   const fija = String(L.mo_regla || '') === 'fija';
@@ -22470,40 +22548,49 @@ async function prodRepartir(env, pid, lista, o) {
     const hereda = !esRep && String(L.productor_id || '') === d.productor_id;
     const sube = !!a && d.unidades > a.unidades;
     const estado = a ? ((sube && a.prod_estado === 'terminado') ? 'en_armado' : a.prod_estado) : hereda ? (L.prod_estado || 'pendiente') : 'pendiente';
-    return { ...d, nombre: nombres[d.productor_id] || d.productor_id, actual: a, hereda, sube, estado_resultante: estado };
+    return { ...d, nombre: nombres[d.productor_id] || d.productor_id, actual: a, hereda, sube, estado_resultante: estado, ya: a ? yaParte(a) : hereda ? yaLinea : 0 };
   });
-  const rep = (tipo === 'rep' && moL !== undefined) ? prodMoReparto(moL, N, res.map(d => ({ key: d.productor_id, unidades: d.unidades, pagado: !!(d.actual && d.actual.pagado_at), mo_monto: d.actual ? d.actual.mo_monto : null }))) : null;
+  // El prorrateo en el MISMO orden en que moActualizar lee las partes (unidades DESC, id; las nuevas después, en el orden en que se
+  // insertan): la MO del "cómo queda" es la que se guarda, al peso.
+  const enOrden = res.map((d, i) => ({ d, k: d.actual ? +d.actual.id : 1e12 + i })).sort((a, b) => (b.d.unidades - a.d.unidades) || (a.k - b.k)).map(x => x.d);
+  const rep = (tipo === 'rep' && moL !== undefined) ? prodMoReparto(moL, N, enOrden.map(d => ({ key: d.productor_id, unidades: d.unidades, pagado: !!(d.actual && d.actual.pagado_at), mo_monto: d.actual ? d.actual.mo_monto : null }))) : null;
   const avisos = [];
-  const entregada = !!(pieza && pieza.prod_entregado_at) || actuales.some(a => a.entregado_at);
-  if (entregada) for (const d of res) {
-    const ya = (d.actual && d.actual.entregado_at) ? d.actual.unidades : (d.hereda && pieza && pieza.prod_entregado_at) ? N : 0;
-    if (d.unidades > ya) avisos.push(`la base ${pieza ? '(pieza ' + pieza.id + ') ' : ''}ya se entregó: hay que darle ${d.unidades - ya} base${d.unidades - ya === 1 ? '' : 's'} a ${d.nombre}`);
+  // Ya se entregaron bases de esta matriz: a cada uno que entra o al que le cambian las unidades, las que le faltan.
+  if (pieza && (pieza.prod_entregado_at || antes.some(a => yaDe(a) > 0))) for (const d of res) {
+    if (d.unidades > d.ya && (!d.actual || d.actual.unidades !== d.unidades)) avisos.push(`Neyen ya entregó bases de esta matriz (pieza ${pieza.id}): a ${d.nombre} le falta${d.unidades - d.ya === 1 ? '' : 'n'} ${d.unidades - d.ya} y le aparece${d.unidades - d.ya === 1 ? '' : 'n'} en su paquete`);
   }
+  for (const s of sacan) if (s.bases > 0) avisos.push(`${s.nombre} ya tiene ${s.bases} base${s.bases === 1 ? '' : 's'}: que las devuelva o pasáselas a otro`);
   if (tipo === 'rep' && libres > 0) avisos.push(`quedan ${libres} sin asignar: la tarjeta no pasa a Terminado hasta repartirlas`);
+  if (tipo === 'rep') {
+    // Lo que dice la cantidad de la venta y no se cambia solo (prodCantTexto): cada productor lo ve tal cual.
+    const q = [prodCantQueda(L.cartel, N) ? 'el nombre' : '', prodCantQueda(L.aclaracion, N, true) ? 'la aclaración' : ''].filter(Boolean);
+    if (q.length) avisos.push(`${q.join(' y ')} del cartel dice${q.length > 1 ? 'n' : ''} ${N}: cada productor lo ve tal cual, revisalo`);
+  }
   for (const d of res) { const p = prods.find(q => q.id === d.productor_id); if (p && !+p.activo) avisos.push(`${d.nombre} todavía no tiene contraseña: no lo va a ver en su pantalla`); }
   const plan = {
-    tipo, cantidad: N, libres: tipo === 'rep' ? libres : (tipo === 'vacia' ? N : 0), confirmar, avisos,
+    tipo, cantidad: N, libres: tipo === 'rep' ? libres : (tipo === 'vacia' ? N : 0), confirmar, avisos, sacan,
     partes: res.map(d => ({ productor_id: d.productor_id, nombre: d.nombre, unidades: d.unidades, estado_resultante: d.estado_resultante, hereda: d.hereda, mo: rep ? (rep.partes[d.productor_id] ?? null) : (tipo === 'normal' ? (moL ?? null) : null) })),
     mo_linea: fija ? (L.mo_monto == null ? null : Math.round(+L.mo_monto)) : (rep ? rep.linea : (moL ?? null)), mo_libre: rep ? rep.libre : null,
     texto: tipo === 'rep' ? prodTextoPartes(dest, nombres, libres) : tipo === 'normal' ? res[0].nombre : '',
   };
-  if (o.seco) return { st: 200, j: { ok: true, dry_run: true, plan } };
-  if (confirmar.length && !o.forzar) return { st: 409, j: { error: 'confirmar', confirmar: true, partes: confirmar, plan } };
+  if (o.seco) return { st: 200, j: { ok: true, dry_run: true, plan, firma } };
+  if (o.soloUnir && tipo === 'rep') return { st: 403, j: { error: 'Repartir está apagado: solo se puede juntar todo en un productor (o en ninguno)' } };
+  if (confirmar.length && !o.forzar) return { st: 409, j: { error: 'confirmar', confirmar: true, partes: confirmar, plan, firma } };
   const deTxt = txt(antes), aTxt = txt(dest);
   // Línea normal que sigue normal (un productor con todas, o ninguno): el /asignar de siempre.
   if (!esRep && tipo !== 'rep') {
     const pidD = tipo === 'normal' ? dest[0].productor_id : '';
-    const r = await prodAsignarFilas(env, [L], pidD, pidD ? prods.find(q => q.id === pidD) : null, o.quien);
+    const r = await prodAsignarFilas(env, [L], pidD, pidD ? (prods.find(q => q.id === pidD) || { nombre: nombres[pidD] || pidD }) : null, o.quien);
     if (r.saltados.length && !r.cambiados) return { st: 409, j: { error: r.saltados[0].motivo } };
     try { await moActualizar(env, [pid]); } catch (_) {}
     return { st: 200, j: { ok: true, carteles: await prodCartelesPorIds(env, [pid], false) } };
   }
   const st = [prodFirmaStmt(env, pid, firma)];
   if (tipo === 'rep') {
-    // 1) Las que salen (sin pagar; las pagadas siguen por la validación de arriba). Sus fotos quedan de la línea.
+    // 1) Las que salen (sin pagar; las pagadas siguen por la validación de arriba). Sus fotos se quedan con su parte (historial que
+    //    solo ve el admin): nadie más las ve ni le cuentan para el terminado.
     for (const a of actuales) {
       if (dest.some(d => d.productor_id === a.productor_id)) continue;
-      st.push(env.DB.prepare('UPDATE pedido_prod_fotos SET parte_id = NULL WHERE parte_id = ?').bind(a.id));
       st.push(env.DB.prepare('DELETE FROM pedido_prod_partes WHERE id = ? AND pagado_at IS NULL').bind(a.id));
     }
     // 2) Las que siguen (y les cambian las unidades) y las que entran.
@@ -22512,14 +22599,17 @@ async function prodRepartir(env, pid, lista, o) {
       const a = d.actual;
       if (a) {
         if (a.pagado_at) continue;
-        // Le suben las unidades: lo terminado vuelve a armado, y lo que llegó al taller o le entregó Neyen ya no alcanza.
-        if (d.sube) st.push(env.DB.prepare(`UPDATE pedido_prod_partes SET unidades = ?, prod_estado = CASE WHEN prod_estado = 'terminado' THEN 'en_armado' ELSE prod_estado END, prod_estado_at = CASE WHEN prod_estado = 'terminado' THEN ? ELSE prod_estado_at END, terminado_at = NULL, recibido_at = NULL, recibido_por = NULL, entregado_at = NULL, entregado_por = NULL${moSql}, updated_at = ? WHERE id = ? AND pagado_at IS NULL`).bind(d.unidades, ahora, ...moB, ahora, a.id));
-        else st.push(env.DB.prepare(`UPDATE pedido_prod_partes SET unidades = ?${moSql}, updated_at = ? WHERE id = ? AND pagado_at IS NULL`).bind(d.unidades, ...moB, ahora, a.id));
+        // Le suben las unidades: lo terminado vuelve a armado y lo que llegó al taller ya no alcanza. Las bases que ya tenía quedan
+        // contadas (entregadas_u) y Neyen ve solo las que le faltan, aunque ya esté armando.
+        if (d.sube) st.push(env.DB.prepare(`UPDATE pedido_prod_partes SET unidades = ?, prod_estado = CASE WHEN prod_estado = 'terminado' THEN 'en_armado' ELSE prod_estado END, prod_estado_at = CASE WHEN prod_estado = 'terminado' THEN ? ELSE prod_estado_at END, terminado_at = NULL, recibido_at = NULL, recibido_por = NULL, entregadas_u = CASE WHEN entregado_at IS NOT NULL THEN unidades ELSE MIN(unidades, IFNULL(entregadas_u, 0)) END, entregado_at = NULL, entregado_por = NULL${moSql}, updated_at = ? WHERE id = ? AND pagado_at IS NULL`).bind(d.unidades, ahora, ...moB, ahora, a.id));
+        // Le bajan (o solo cambia la MO): si las bases que ya tenía alcanzan para lo que le queda, queda entregada.
+        else st.push(env.DB.prepare(`UPDATE pedido_prod_partes SET unidades = ?, entregado_por = CASE WHEN entregado_at IS NULL AND IFNULL(entregadas_u, 0) >= ? THEN 'reparto' ELSE entregado_por END, entregado_at = CASE WHEN entregado_at IS NULL AND IFNULL(entregadas_u, 0) >= ? THEN ? ELSE entregado_at END, entregadas_u = MIN(IFNULL(entregadas_u, 0), ?)${moSql}, updated_at = ? WHERE id = ? AND pagado_at IS NULL`).bind(d.unidades, d.unidades, d.unidades, ahora, d.unidades, ...moB, ahora, a.id));
       } else if (d.hereda) {
-        // La línea era de este productor: su parte se queda con lo que ya hizo (estado, fechas, llegada, entrega de la base y fotos).
-        const ent = !!(pieza && pieza.prod_entregado_at), term = String(L.prod_estado || '') === 'terminado';
-        st.push(env.DB.prepare('INSERT INTO pedido_prod_partes (pedido_id, productor_id, unidades, prod_estado, prod_estado_at, asignado_at, terminado_at, recibido_at, recibido_por, entregado_at, entregado_por, mo_monto, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
-          .bind(pid, d.productor_id, d.unidades, L.prod_estado || 'pendiente', L.prod_estado_at || ahora, L.prod_asignado_at || ahora, term ? (L.prod_terminado_at || ahora) : null, L.recibido_at || null, L.recibido_at ? (L.recibido_por || null) : null, ent ? pieza.prod_entregado_at : null, ent ? (pieza.prod_entregado_por || null) : null, mo === undefined ? null : mo, ahora, ahora));
+        // La línea era de este productor: su parte se queda con lo que ya hizo (estado, fechas, llegada, sus bases y sus fotos).
+        const term = String(L.prod_estado || '') === 'terminado', yaH = Math.min(d.unidades, d.ya), todas = yaH >= d.unidades;
+        st.push(env.DB.prepare('INSERT INTO pedido_prod_partes (pedido_id, productor_id, unidades, prod_estado, prod_estado_at, asignado_at, terminado_at, recibido_at, recibido_por, entregado_at, entregado_por, entregadas_u, mo_monto, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+          .bind(pid, d.productor_id, d.unidades, L.prod_estado || 'pendiente', L.prod_estado_at || ahora, L.prod_asignado_at || ahora, term ? (L.prod_terminado_at || ahora) : null, L.recibido_at || null, L.recibido_at ? (L.recibido_por || null) : null,
+            todas ? ((pieza && pieza.prod_entregado_at) || ahora) : null, todas ? ((pieza && pieza.prod_entregado_por) || 'reparto') : null, yaH || null, mo === undefined ? null : mo, ahora, ahora));
         st.push(env.DB.prepare('UPDATE pedido_prod_fotos SET parte_id = (SELECT id FROM pedido_prod_partes WHERE pedido_id = ? AND productor_id = ?) WHERE pedido_id = ? AND parte_id IS NULL').bind(pid, d.productor_id, pid));
       } else {
         st.push(env.DB.prepare("INSERT INTO pedido_prod_partes (pedido_id, productor_id, unidades, prod_estado, prod_estado_at, asignado_at, mo_monto, created_at, updated_at) VALUES (?,?,?,'pendiente',?,?,?,?,?)")
@@ -22530,20 +22620,31 @@ async function prodRepartir(env, pid, lista, o) {
     const moLinea = (!fija && rep) ? rep.linea : undefined;
     st.push(env.DB.prepare(`UPDATE pedidos SET productor_id = '${PROD_VARIOS}', productor = ?${moLinea === undefined ? '' : ', mo_monto = ?'} WHERE id = ?`).bind(prodTextoPartes(dest, nombres, libres), ...(moLinea === undefined ? [] : [moLinea]), pid));
     // 4) La base ya estaba entregada y ahora alguien no tiene la suya (o quedan libres): la pieza vuelve a "sin entregar" para Neyen.
+    //    Lo entregado a medias de la línea normal ya pasó a la parte del que hereda.
     if (pieza && pieza.prod_entregado_at) st.push(env.DB.prepare("UPDATE corte_pedidos SET prod_entregado_at = NULL, prod_entregado_por = NULL WHERE id = ? AND (? > 0 OR EXISTS (SELECT 1 FROM pedido_prod_partes pp WHERE pp.pedido_id = ? AND pp.entregado_at IS NULL))").bind(pieza.id, libres, pid));
+    if (parcialL) st.push(env.DB.prepare('UPDATE corte_pedidos SET prod_entregadas_u = NULL WHERE id = ?').bind(pieza.id));
     st.push(prodResumenStmt(env, pid));
   } else {
-    // Se une: un solo productor con todas las unidades (vuelve a ser normal) o ninguno. Las fotos quedan de la línea.
+    // Se une: un solo productor con todas las unidades (vuelve a ser normal) o ninguno.
     const d = dest[0] || null, a = d ? actuales.find(x => x.productor_id === d.productor_id) : null;
     if (d) {
       const sube = !!a && d.unidades > a.unidades, est = a ? ((sube && a.prod_estado === 'terminado') ? 'en_armado' : a.prod_estado) : 'pendiente';
       st.push(env.DB.prepare("UPDATE pedidos SET productor_id = ?, productor = ?, prod_estado = ?, prod_estado_at = ?, prod_asignado_at = ?, prod_terminado_at = ?, prod_pagado_at = NULL, prod_pagado_por = '', recibido_at = ?, recibido_por = ? WHERE id = ?")
         .bind(d.productor_id, res[0].nombre, est, (a && est === a.prod_estado) ? (a.prod_estado_at || ahora) : ahora, a ? (a.asignado_at || ahora) : ahora, est === 'terminado' ? (a.terminado_at || ahora) : null, (a && !sube) ? (a.recibido_at || null) : null, (a && !sube) ? (a.recibido_por || null) : null, pid));
+      // Fotos: las de su parte pasan a ser de la línea; las de los demás se quedan con su parte (historial que solo ve el admin), así
+      // el que queda no ve, ni borra, ni le cuentan para el terminado fotos del trabajo de otro.
+      if (a) st.push(env.DB.prepare('UPDATE pedido_prod_fotos SET parte_id = NULL WHERE parte_id = ?').bind(a.id));
+      // La base: tiene las que Neyen ya le dio (nunca todas: tenía una parte); las que le faltan le aparecen a Neyen en su paquete,
+      // aunque ya esté armando (prod_entregadas_u). Sin esa columna, por lo menos la pieza vuelve a "sin entregar".
+      if (pieza) {
+        const yaD = a ? yaParte(a) : 0;
+        if (conParcial) st.push(env.DB.prepare('UPDATE corte_pedidos SET prod_entregado_at = NULL, prod_entregado_por = NULL, prod_entregadas_u = ? WHERE id = ?').bind(yaD, pieza.id));
+        else if (pieza.prod_entregado_at) st.push(env.DB.prepare('UPDATE corte_pedidos SET prod_entregado_at = NULL, prod_entregado_por = NULL WHERE id = ?').bind(pieza.id));
+      }
     } else {
-      // Nadie: como sacarle el productor en /asignar (si estaba todo terminado, queda terminado).
+      // Nadie: como sacarle el productor en /asignar (si estaba todo terminado, queda terminado). Las fotos se quedan con sus partes.
       st.push(env.DB.prepare("UPDATE pedidos SET productor_id = '', productor = '', prod_estado = CASE WHEN prod_estado = 'terminado' THEN 'terminado' ELSE '' END, prod_asignado_at = NULL, prod_pagado_at = NULL, prod_pagado_por = '' WHERE id = ?").bind(pid));
     }
-    st.push(env.DB.prepare('UPDATE pedido_prod_fotos SET parte_id = NULL WHERE pedido_id = ?').bind(pid));
     st.push(env.DB.prepare('DELETE FROM pedido_prod_partes WHERE pedido_id = ?').bind(pid));
   }
   st.push(prodGuardaStmt(env, pid));
@@ -22551,6 +22652,11 @@ async function prodRepartir(env, pid, lista, o) {
   catch (e) { if (prodErrGuarda(e)) return { st: 409, j: { error: 'el reparto cambió mientras tanto, actualizá' } }; throw e; }
   await prodLog(env, [{ pedido_id: pid, campo: 'partes', de: deTxt, a: aTxt, por: o.quien }]);
   try { await moActualizar(env, [pid]); } catch (_) {}
+  // Estaba terminada y el reparto la reabrió (le agregaron unidades, una parte nueva o libres): el 'para enviar' del tablero vuelve.
+  if (String(L.prod_estado || '') === 'terminado') {
+    const des = await env.DB.prepare('SELECT prod_estado FROM pedidos WHERE id = ?').bind(pid).first().catch(() => null);
+    if (des && String(des.prod_estado || '') !== 'terminado') await prodReabrirSiTablero(env, pid);
+  }
   return { st: 200, j: { ok: true, carteles: await prodCartelesPorIds(env, [pid], false) } };
 }
 // Productor "extra" (otro rol) de esta sesión: usa los endpoints de producción para SUS carteles, sin el muro del rol productor.
@@ -29397,25 +29503,34 @@ const handler = {
         if ('instalacion' in body)    { cSets.push('instalacion = ?');    cArgs.push(String(body.instalacion || '').trim()); }
         // Repartida entre productores: la cantidad no puede quedar por debajo de lo ya repartido (ni dejar a uno solo con todas,
         // que es una línea normal). Si sube, las de más quedan libres ("sin asignar").
-        let _repTexto = null;
+        let _rep = null;
         if ('cantidad' in body) {
-          const _rl = await env.DB.prepare('SELECT productor_id, cantidad FROM pedidos WHERE id = ?').bind(id).first();
+          const _rl = await env.DB.prepare('SELECT productor_id, cantidad, prod_estado, prod_pagado_at FROM pedidos WHERE id = ?').bind(id).first();
           if (_rl && _rl.productor_id === PROD_VARIOS) {
             const nuevo = Number(_numOrNull(body.cantidad));
             const ps = (await prodPartesDe(env, [id]))[id] || [], suma = ps.reduce((s, p) => s + p.unidades, 0);
-            if (Math.round(nuevo) !== Math.round(+_rl.cantidad || 1)) {
+            if (nuevo !== (+_rl.cantidad || 1)) {
               const _txt = prodTextoPartes(ps, await prodNombres(env), Math.round(+_rl.cantidad || 1) - suma);
               if (!(nuevo >= 1) || !Number.isInteger(nuevo) || nuevo < suma || (ps.length === 1 && suma === nuevo)) return json({ error: `Está repartido (${_txt}): cambiá el reparto primero`, campo: 'cantidad' }, 409);
-              _repTexto = prodTextoPartes(ps, await prodNombres(env), nuevo - suma);
+              _rep = { texto: prodTextoPartes(ps, await prodNombres(env), nuevo - suma), libres: nuevo - suma, firma: prodFirma(_rl, ps), antes: String(_rl.prod_estado || '') };
             }
           }
         }
         if (cSets.length) {
           cSets.push('mirror_dirty = 1', 'mirror_attempts = 0', 'mirror_error = NULL', 'updated_at = ?');
           cArgs.push(now, id);
-          await env.DB.prepare(`UPDATE pedidos SET ${cSets.join(', ')} WHERE id = ?`).bind(...cArgs).run();
+          const _upd = env.DB.prepare(`UPDATE pedidos SET ${cSets.join(', ')} WHERE id = ?`).bind(...cArgs);
+          if (_rep) {
+            // Repartida: la cantidad, el texto de PRODUCTOR, el resumen (con libres la línea deja de estar terminada, pagada y llegada)
+            // y la pieza de Neyen (con libres no está toda entregada) en UN batch, entre la firma de lo que se leyó y la guarda del
+            // invariante: si otra pantalla cambió el reparto en el medio, no queda nada a medias.
+            const _st = [prodFirmaStmt(env, id, _rep.firma), _upd, env.DB.prepare('UPDATE pedidos SET productor = ? WHERE id = ? AND productor_id = ?').bind(_rep.texto, id, PROD_VARIOS), prodResumenStmt(env, id)];
+            if (_rep.libres > 0) _st.push(env.DB.prepare("UPDATE corte_pedidos SET prod_entregado_at = NULL, prod_entregado_por = NULL WHERE pedido_id = ? AND producto = 'NEON' AND prod_entregado_at IS NOT NULL").bind(id));
+            _st.push(prodGuardaStmt(env, id));
+            try { await env.DB.batch(_st); }
+            catch (e) { if (prodErrGuarda(e)) return json({ error: 'El reparto de este cartel cambió mientras tanto: actualizá y probá de nuevo', campo: 'cantidad' }, 409); throw e; }
+          } else await _upd.run();
           touched = true;
-          if (_repTexto !== null) { try { await env.DB.batch([env.DB.prepare('UPDATE pedidos SET productor = ? WHERE id = ? AND productor_id = ?').bind(_repTexto, id, PROD_VARIOS), prodResumenStmt(env, id)]); } catch (_) {} }
           // Si cambió algo que ve Emma (nombre/medida/cantidad/colores/base/aclaración), re-sincronizar
           // la pieza de corte de este cartel — solo si todavía no la diseñó (estado 'pedido').
           if (['cartel', 'alto', 'ancho', 'cantidad', 'colores', 'base', 'aclaracion', 'cm_neon'].some(k => k in body)) {
@@ -29423,6 +29538,11 @@ const handler = {
           }
           // Cambió algo que entra en la mano de obra → recalcularla (no si ya se le pagó al productor).
           if (['precio', 'cantidad', 'alto', 'ancho', 'cm_neon', 'tramos'].some(k => k in body)) { try { await moActualizar(env, [id]); } catch (_) {} }
+          // Repartida terminada a la que le subieron la cantidad (quedan libres): el 'para enviar' del tablero vuelve a 'En produccion'.
+          if (_rep && _rep.antes === 'terminado') {
+            const _des = await env.DB.prepare('SELECT prod_estado FROM pedidos WHERE id = ?').bind(id).first().catch(() => null);
+            if (_des && String(_des.prod_estado || '') !== 'terminado') await prodReabrirSiTablero(env, id);
+          }
         }
 
         // 2) Campos del PEDIDO → UPDATE todas las filas del numero+fecha DEL MISMO VENDEDOR. Recalcula el
@@ -30675,7 +30795,7 @@ const handler = {
             const partes = await prodPartesDe(env, rep.map(r => r.pedido_id)), nombres = await prodNombres(env);
             for (const r of rep) {
               const ps = partes[r.pedido_id] || [];
-              r.ped_partes = ps.map(p => ({ id: p.id, productor_id: p.productor_id, nombre: nombres[p.productor_id] || p.productor_id, unidades: p.unidades, prod_estado: p.prod_estado, entregado_at: p.entregado_at || null, entregado_por: p.entregado_por || null }));
+              r.ped_partes = ps.map(p => ({ id: p.id, productor_id: p.productor_id, nombre: nombres[p.productor_id] || p.productor_id, unidades: p.unidades, prod_estado: p.prod_estado, entregado_at: p.entregado_at || null, entregado_por: p.entregado_por || null, entregadas_u: +p.entregadas_u || 0 }));
               r.ped_libres = Math.max(0, Math.max(1, Math.round(+r.ped_cantidad || +r.cantidad || 1)) - ps.reduce((s, p) => s + p.unidades, 0));
             }
           }
@@ -31000,6 +31120,12 @@ const handler = {
             // La línea queda llegada (resumen) recién cuando llegaron todas y no quedan unidades libres.
             const pIds = [...new Set((Array.isArray(body.parte_ids) ? body.parte_ids : []).map(x => parseInt(x, 10)).filter(n => n > 0))].slice(0, 90);
             const repL = ((await env.DB.prepare('SELECT id FROM pedidos WHERE id IN (' + ph + ') AND productor_id = ?').bind(...ids, PROD_VARIOS).all()).results || []).map(x => x.id);
+            // Con parte_ids ("Llegó lo de GONZALO") todo tiene que seguir repartido así: si mientras tanto Gaspar juntó la línea en un
+            // productor (o cambió las partes), no se marca la línea entera ni nada: que actualice.
+            if (pIds.length) {
+              const nP = +((await env.DB.prepare('SELECT COUNT(*) AS n FROM pedido_prod_partes WHERE id IN (' + pIds.map(() => '?').join(',') + ') AND pedido_id IN (' + ph + ')').bind(...pIds, ...ids).first()) || {}).n || 0;
+              if (repL.length !== ids.length || nP !== pIds.length) return json({ error: 'el reparto cambió mientras tanto, actualizá' }, 409);
+            }
             const st = [acc === 'recibido'
               ? env.DB.prepare('UPDATE pedidos SET recibido_at = COALESCE(recibido_at, ?), recibido_por = COALESCE(recibido_por, ?) WHERE id IN (' + ph + ') AND IFNULL(es_corporeo,0) = 0 AND IFNULL(productor_id,\'\') <> ?').bind(now, ctx.quien, ...ids, PROD_VARIOS)
               : env.DB.prepare('UPDATE pedidos SET recibido_at = NULL, recibido_por = NULL WHERE id IN (' + ph + ') AND IFNULL(es_corporeo,0) = 0 AND IFNULL(productor_id,\'\') <> ?').bind(...ids, PROD_VARIOS)];
@@ -31700,14 +31826,17 @@ const handler = {
           const _rep = `pedido_id IN (SELECT id FROM pedidos WHERE productor_id = '${PROD_VARIOS}')`;
           const _dePiezas = `pedido_id IN (SELECT pedido_id FROM corte_pedidos WHERE id IN (${ph}) AND producto='NEON' AND pedido_id IS NOT NULL)`;
           const _sel = pIds.length ? ` AND id IN (${pIds.map(() => '?').join(',')})` : '';
+          // Entregar: igual que una pieza normal, solo si la pieza está cortada o separada (una pantalla vieja no entrega una que Emma
+          // volvió a matriz lista).
+          const _dePiezasOk = `pedido_id IN (SELECT pedido_id FROM corte_pedidos WHERE id IN (${ph}) AND producto='NEON' AND estado IN ('cortado','embalado') AND pedido_id IS NOT NULL)`;
           try {
             let rr;
             if (action === 'entregado_prod') {
               const st = [
                 env.DB.prepare(`UPDATE corte_pedidos SET estado='embalado', prod_entregado_at=COALESCE(prod_entregado_at, ?), prod_entregado_por=COALESCE(prod_entregado_por, ?), updated_at=? WHERE id IN (${ph}) AND producto='NEON' AND estado IN ('cortado','embalado') AND IFNULL(pedido_id, 0) NOT IN (SELECT id FROM pedidos WHERE productor_id = '${PROD_VARIOS}')`).bind(nowIso, _slug, nowIso, ...ids),
                 env.DB.prepare(`UPDATE corte_pedidos SET estado='embalado', updated_at=? WHERE id IN (${ph}) AND producto='NEON' AND estado IN ('cortado','embalado') AND ${_rep}`).bind(nowIso, ...ids),
-                env.DB.prepare(`UPDATE pedido_prod_partes SET entregado_at = COALESCE(entregado_at, ?), entregado_por = COALESCE(entregado_por, ?), updated_at = ? WHERE ${_dePiezas}${_sel}`).bind(nowIso, _slug, nowIso, ...ids, ...pIds),
-                env.DB.prepare(`UPDATE corte_pedidos SET prod_entregado_at=COALESCE(prod_entregado_at, ?), prod_entregado_por=COALESCE(prod_entregado_por, ?) WHERE id IN (${ph}) AND producto='NEON' AND ${_rep}
+                env.DB.prepare(`UPDATE pedido_prod_partes SET entregado_at = COALESCE(entregado_at, ?), entregado_por = COALESCE(entregado_por, ?), updated_at = ? WHERE ${_dePiezasOk}${_sel}`).bind(nowIso, _slug, nowIso, ...ids, ...pIds),
+                env.DB.prepare(`UPDATE corte_pedidos SET prod_entregado_at=COALESCE(prod_entregado_at, ?), prod_entregado_por=COALESCE(prod_entregado_por, ?) WHERE id IN (${ph}) AND producto='NEON' AND estado IN ('cortado','embalado') AND ${_rep}
                     AND NOT EXISTS (SELECT 1 FROM pedido_prod_partes pp WHERE pp.pedido_id = corte_pedidos.pedido_id AND pp.entregado_at IS NULL)
                     AND (SELECT IFNULL(SUM(pp.unidades),0) FROM pedido_prod_partes pp WHERE pp.pedido_id = corte_pedidos.pedido_id) >= (SELECT CAST(ROUND(IFNULL(x.cantidad,1)) AS INTEGER) FROM pedidos x WHERE x.id = corte_pedidos.pedido_id)`).bind(nowIso, _slug, ...ids)
               ];
@@ -33027,15 +33156,18 @@ const handler = {
           try { await moActualizar(env, ids); } catch (_) {}
           return json({ ok: true, cambiados, saltados, carteles: await prodCartelesPorIds(env, ids) });
         }
-        // POST /admin/prod/partes {pedido_id, partes:[{productor_id, unidades}], forzar?, dry_run?} → reparte las unidades de UNA
-        // línea entre productores (admin). Ver prodRepartir. Con el kill-switch apagado (kv prod_partes_on) solo responde dry_run.
+        // POST /admin/prod/partes {pedido_id, partes:[{productor_id, unidades}], forzar?, dry_run?, firma?} → reparte las unidades de
+        // UNA línea entre productores (admin). Ver prodRepartir. firma = la que devolvió el dry_run (si el reparto cambió desde ahí,
+        // 409). Con el kill-switch apagado (kv prod_partes_on) solo se puede juntar todo en un productor o en ninguno: así las
+        // repartidas que existan se pueden deshacer. VOLVER ATRÁS: primero juntar cada línea '*' (SELECT id FROM pedidos WHERE
+        // productor_id = '*' tiene que dar vacío) y recién después volver al worker anterior; el anterior no conoce las partes (su
+        // barrido borraría PRODUCTOR de esas filas en la planilla, sus productores no las verían y su /pagar pagaría la línea entera).
         if (request.method === 'POST' && path === '/admin/prod/partes') {
           const no = _soloAdmin(); if (no) return no;
           let body; try { body = await request.json(); } catch { body = {}; }
-          if (!body.dry_run && !(await prodPartesOn(env))) return json({ error: 'Repartir está apagado' }, 403);
           const pidN = Number(body.pedido_id) || 0;
           if (!pidN) return json({ error: 'falta el cartel' }, 400);
-          const r = await prodRepartir(env, pidN, body.partes, { seco: !!body.dry_run, forzar: !!body.forzar, quien: _quien });
+          const r = await prodRepartir(env, pidN, body.partes, { seco: !!body.dry_run, forzar: !!body.forzar, firma: body.firma == null ? null : String(body.firma), soloUnir: !(await prodPartesOn(env)), quien: _quien });
           return json(r.j, r.st);
         }
         // POST /admin/prod/pagar {pedido_ids:[], parte_ids:[], pagado:true|false} → marca la producción como pagada (o lo deshace)
@@ -33134,7 +33266,9 @@ const handler = {
           // quedaba trabada en Montando).
           if (w.pagado && !_esAdm && !(est === 'terminado' && String(w.estado || '') !== 'terminado')) return json({ error: 'ese cartel ya está pagado, no se puede cambiar' }, 409);
           if (est === 'terminado') {
-            const nf = +(await (pt ? env.DB.prepare('SELECT COUNT(*) AS n FROM pedido_prod_fotos WHERE parte_id = ?').bind(pt.id) : env.DB.prepare('SELECT COUNT(*) AS n FROM pedido_prod_fotos WHERE pedido_id = ?').bind(pidN)).first()).n || 0;
+            // Las fotos de SU trabajo: las de su parte o, en una línea normal, las de la línea (las que quedaron de partes de otros
+            // productores no cuentan).
+            const nf = +(await (pt ? env.DB.prepare('SELECT COUNT(*) AS n FROM pedido_prod_fotos WHERE parte_id = ?').bind(pt.id) : env.DB.prepare('SELECT COUNT(*) AS n FROM pedido_prod_fotos WHERE pedido_id = ? AND parte_id IS NULL').bind(pidN)).first()).n || 0;
             const req = prodFotosRequeridas({ cantidad: w.cantidad });
             if (nf < req && !(_esAdm && body.forzar)) return json({ error: req > 1 ? `subí una foto de cada cartel terminado (${req}) antes de marcarlo` : 'subí la foto del cartel terminado antes de marcarlo', faltan: req - nf }, 400);
           }
@@ -33153,22 +33287,9 @@ const handler = {
             await env.DB.prepare('UPDATE pedidos SET prod_estado = ?, prod_estado_at = ?, prod_terminado_at = CASE WHEN ? = \'terminado\' THEN ? ELSE NULL END WHERE id = ? AND IFNULL(productor_id,\'\') <> ?').bind(est, now, est, now, pidN, PROD_VARIOS).run();
           }
           await prodLog(env, [{ pedido_id: pidN, parte_id: pt ? pt.id : null, campo: 'estado', de: w.estado || '', a: est, por: _quien }]);
-          // Reabrió un cartel terminado y el pedido estaba 'para enviar' porque lo puso el tablero (sync): vuelve a 'En produccion'
-          // (todo el grupo, con espejo y log) para que Pedidos y la planilla no digan 'para enviar' mientras lo rehacen. En una
+          // Reabrió un cartel terminado: el 'para enviar' que puso el tablero vuelve a 'En produccion' (prodReabrirSiTablero). En una
           // repartida mira el resumen: la línea deja de estar terminada en cuanto una parte se reabre.
-          if (reabre) {
-            try {
-              const gq = await neonGrupoDe(env, pidN);
-              const ids = [...new Set([pidN, ...(gq.fr || []).map(x => x.id), ...(gq.serv || []).map(x => x.id)])];
-              const pe = await env.DB.prepare("SELECT estado_pedido FROM pedidos WHERE id = ?").bind(pidN).first();
-              const lg = await env.DB.prepare("SELECT por FROM pedido_estado_log WHERE pedido_id IN (" + ids.map(() => '?').join(',') + ") AND lower(a) LIKE 'para enviar%' ORDER BY ts DESC LIMIT 1").bind(...ids).first();
-              const sigueParaEnviar = (gq.fr || []).length && gq.fr.every(x => ['enviar', 'enviado'].includes(x._etapa));
-              if (pe && /^para enviar/i.test(String(pe.estado_pedido || '')) && lg && String(lg.por || '') === 'tablero' && !sigueParaEnviar) {
-                const u = await env.DB.prepare("UPDATE pedidos SET estado_pedido = 'En produccion', mirror_dirty = 1, mirror_attempts = 0, mirror_error = NULL, updated_at = ? WHERE id IN (" + ids.map(() => '?').join(',') + ") AND lower(IFNULL(estado_pedido,'')) LIKE 'para enviar%'").bind(now, ...ids).run();
-                if (((u.meta && u.meta.changes) || 0) && gq.base) await env.DB.prepare('INSERT INTO pedido_estado_log (pedido_id, numero, fecha, comercial_id, telefono, de, a, por, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(pidN, gq.base.numero, gq.base.fecha, gq.base.comercial_id || 'joaco', gq.base.telefono || '', 'para enviar', 'En produccion', 'tablero', now).run();
-              }
-            } catch (_) {}
-          }
+          if (reabre) await prodReabrirSiTablero(env, pidN);
           return json({ ok: true, carteles: await prodCarteles(env, 'WHERE p.id = ?', [pidN], !_esAdm, _prodId) });
         }
         // PUT /admin/prod/foto?pedido_id=N[&parte_id=M] (imagen cruda) → foto del cartel terminado (el productor de ese cartel o el
@@ -33193,7 +33314,7 @@ const handler = {
             : (_asc(4, 8) === 'ftyp' && /^(heic|heix|hevc|mif1|msf1|heim|heis)$/.test(_asc(8, 12))) ? 'image/heic' : '';
           if (!ct) return json({ error: 'eso no es una foto (JPG, PNG, WEBP o HEIC)' }, 400);
           // Tope de 12 fotos: por parte en una repartida (si no, tres partes de 5 no entraban).
-          const nYa = +(await (pt ? env.DB.prepare('SELECT COUNT(*) AS n FROM pedido_prod_fotos WHERE parte_id = ?').bind(pt.id) : env.DB.prepare('SELECT COUNT(*) AS n FROM pedido_prod_fotos WHERE pedido_id = ?').bind(pidN)).first()).n || 0;
+          const nYa = +(await (pt ? env.DB.prepare('SELECT COUNT(*) AS n FROM pedido_prod_fotos WHERE parte_id = ?').bind(pt.id) : env.DB.prepare('SELECT COUNT(*) AS n FROM pedido_prod_fotos WHERE pedido_id = ? AND parte_id IS NULL').bind(pidN)).first()).n || 0;
           if (nYa >= 12) return json({ error: 'ya tiene 12 fotos' }, 400);
           const ext = (ct.split('/')[1] || 'jpg').replace(/[^a-z0-9]/gi, '').slice(0, 8) || 'jpg';
           const ym = new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 7).replace('-', '');
@@ -33203,24 +33324,29 @@ const handler = {
           return json({ ok: true, key, carteles: await prodCarteles(env, 'WHERE p.id = ?', [pidN], !_esAdm, _prodId) });
         }
         // POST /admin/prod/foto/borrar {foto_id} → saca una foto (no si el cartel ya está terminado y quedaría sin las que pide).
-        // En una repartida el productor solo saca las de SU parte; las que quedaron de la línea (sin parte) solo el admin.
+        // El productor solo saca las de SU trabajo (su parte, o la línea normal que es suya); las que quedaron de partes que se
+        // sacaron o se juntaron, solo el admin.
         if (request.method === 'POST' && path === '/admin/prod/foto/borrar') {
           let body; try { body = await request.json(); } catch { body = {}; }
           const f = await env.DB.prepare('SELECT id, pedido_id, parte_id, r2_key FROM pedido_prod_fotos WHERE id = ?').bind(Number(body.foto_id) || 0).first();
           if (!f) return json({ error: 'foto no encontrada' }, 404);
           let q;
-          if (_esAdm && !f.parte_id) {   // foto de la línea (también la que quedó de una parte que se sacó)
+          if (_esAdm) {
             const r0 = await env.DB.prepare('SELECT id, productor_id, prod_estado, prod_pagado_at, cantidad, es_corporeo FROM pedidos WHERE id = ?').bind(f.pedido_id).first();
             if (!r0 || +r0.es_corporeo) return json({ error: 'cartel no encontrado' }, 404);
-            q = { linea: r0, parte: null };
-          } else q = await _parteDe(f.pedido_id, f.parte_id);
+            q = { linea: r0, parte: null };   // el admin saca cualquiera (de una parte, de la línea o del historial)
+          } else {
+            // Una foto que no es de su trabajo contesta igual que una que no existe: los foto_id son correlativos y un "no es tuya"
+            // distinto del "no es tu cartel" le dejaba adivinar que su cartel está repartido (y cuántas fotos subió el otro).
+            q = await _parteDe(f.pedido_id, null);
+            if (q instanceof Response || (q.parte ? +f.parte_id !== +q.parte.id : !!f.parte_id)) return json({ error: 'foto no encontrada' }, 404);
+          }
           if (q instanceof Response) return q;
           const r = q.linea, pt = q.parte;
-          if (String(r.productor_id || '') === PROD_VARIOS && !_esAdm && (!pt || +f.parte_id !== +pt.id)) return json({ error: 'esa foto no es tuya' }, 403);
           const w = pt ? { estado: pt.prod_estado, pagado: pt.pagado_at, cantidad: pt.unidades } : { estado: r.prod_estado, pagado: r.prod_pagado_at, cantidad: r.cantidad };
           if (w.pagado && !_esAdm && String(w.estado || '') === 'terminado') return json({ error: 'ese cartel ya está pagado' }, 409);
           if (w.estado === 'terminado' && !_esAdm) {
-            const nf = +(await (pt ? env.DB.prepare('SELECT COUNT(*) AS n FROM pedido_prod_fotos WHERE parte_id = ?').bind(pt.id) : env.DB.prepare('SELECT COUNT(*) AS n FROM pedido_prod_fotos WHERE pedido_id = ?').bind(f.pedido_id)).first()).n || 0;
+            const nf = +(await (pt ? env.DB.prepare('SELECT COUNT(*) AS n FROM pedido_prod_fotos WHERE parte_id = ?').bind(pt.id) : env.DB.prepare('SELECT COUNT(*) AS n FROM pedido_prod_fotos WHERE pedido_id = ? AND parte_id IS NULL').bind(f.pedido_id)).first()).n || 0;
             if (nf - 1 < prodFotosRequeridas({ cantidad: w.cantidad })) return json({ error: 'el cartel está terminado: subí otra foto antes de sacar esta' }, 400);
           }
           await env.DB.prepare('DELETE FROM pedido_prod_fotos WHERE id = ?').bind(f.id).run();
@@ -33234,8 +33360,9 @@ const handler = {
           if (!_esAdm) {
             let ok = false;
             if (_pzYo) {
-              // Líneas repartidas: el diseño lo ven todos los que tienen una parte; las fotos del terminado, solo las de SU parte.
-              const a = await env.DB.prepare('SELECT 1 AS x FROM pedido_prod_fotos f JOIN pedidos p ON p.id = f.pedido_id WHERE f.r2_key = ? AND (p.productor_id = ? OR (p.productor_id = ? AND EXISTS (SELECT 1 FROM pedido_prod_partes pp WHERE pp.id = f.parte_id AND pp.productor_id = ?))) LIMIT 1').bind(key, _pzYo.id, PROD_VARIOS, _pzYo.id).first();
+              // Líneas repartidas: el diseño lo ven todos los que tienen una parte; las fotos del terminado, solo las de SU parte (en una
+              // línea normal, las de la línea: no las que quedaron de partes de otros).
+              const a = await env.DB.prepare('SELECT 1 AS x FROM pedido_prod_fotos f JOIN pedidos p ON p.id = f.pedido_id WHERE f.r2_key = ? AND ((p.productor_id = ? AND f.parte_id IS NULL) OR (p.productor_id = ? AND EXISTS (SELECT 1 FROM pedido_prod_partes pp WHERE pp.id = f.parte_id AND pp.productor_id = ?))) LIMIT 1').bind(key, _pzYo.id, PROD_VARIOS, _pzYo.id).first();
               const b = a ? null : await env.DB.prepare('SELECT 1 AS x FROM corte_pedidos c JOIN pedidos p ON p.id = c.pedido_id WHERE c.foto_key = ? AND (p.productor_id = ? OR EXISTS (SELECT 1 FROM pedido_prod_partes pp WHERE pp.pedido_id = p.id AND pp.productor_id = ?)) LIMIT 1').bind(key, _pzYo.id, _pzYo.id).first();
               const d = (a || b) ? null : await env.DB.prepare('SELECT 1 AS x FROM pedidos WHERE foto_diseno_key = ? AND (productor_id = ? OR EXISTS (SELECT 1 FROM pedido_prod_partes pp WHERE pp.pedido_id = pedidos.id AND pp.productor_id = ?)) LIMIT 1').bind(key, _pzYo.id, _pzYo.id).first();
               ok = !!(a || b || d);
