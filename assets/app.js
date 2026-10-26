@@ -7398,7 +7398,8 @@ function sfUrl(qs) { return CONFIG.trackerUrl + '/admin/sinfrontera/archivo?' + 
 async function sfFetch(path, body) {
   const r = await fetch(CONFIG.trackerUrl + path, body === undefined ? { headers: authHeaders() } : { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   let j = {}; try { j = await r.json(); } catch (_) {}
-  if (!r.ok || j.ok === false) throw new Error(j.motivo || j.error || ('Error ' + r.status));
+  // El error lleva el código y la respuesta (p. ej. el 409 de la edición de un corte trae el pedido como quedó).
+  if (!r.ok || j.ok === false) { const e = new Error(j.motivo || j.error || ('Error ' + r.status)); e.code = String(j.error || ''); e.status = r.status; e.data = j; throw e; }
   return j;
 }
 // Carga la pantalla actual (Producción o Mis pedidos). silent: refresco de fondo, no pisa lo que se está tocando.
@@ -9214,29 +9215,65 @@ const SFC_ESTADOS = [['pedido', 'Pedido', '#94a3b8'], ['en_corte', 'En corte', '
 const SFC_MAX_BYTES = 95 * 1024 * 1024;
 function sfcLbl(lista, v) { const x = lista.find(y => y[0] === v); return x ? x[1] : String(v || ''); }
 function sfcEstado(v) { return SFC_ESTADOS.find(y => y[0] === v) || SFC_ESTADOS[0]; }
+// Sin Frontera edita sus pedidos mientras no estén cortados (Gaspar 26-oct); Gaspar y Fran, siempre. En corte, Sin Frontera solo
+// les cambia el nombre (Fran ya bajó los archivos; tampoco lo puede cancelar). El worker es la barrera (SF_CORTE_EDITA_SF).
+const SFC_EDITA_SF = ['pedido', 'en_corte'], SFC_SF_SOLO_NOMBRE = ['en_corte'];
+function sfcPuedeEditar(c) { return isAdmin() || isFranOnly() || (isSinFronteraOnly() && !!c && SFC_EDITA_SF.includes(c.estado)); }
+function sfcSoloNombre(c) { return isSinFronteraOnly() && !!c && SFC_SF_SOLO_NOMBRE.includes(c.estado); }
+function sfcCorte(id) { return ((STATE.sfCortes && STATE.sfCortes.cortes) || []).find(x => x.id === id) || null; }
+// Nombre del pedido o del cartel: obligatorio desde el 26-oct (Gaspar: "que le tengan que poner un nombre al pedido").
+function sfcNombreOk(s) { const n = String(s || '').replace(/\s+/g, ' ').trim(); return n.length >= 2 && /[0-9a-záéíóúñü]/i.test(n); }
+// Título de un pedido: su nombre. Los cargados antes de que fuera obligatorio no tienen: va el nombre de sus archivos sin la
+// extensión, marcado "sin nombre", hasta que alguien se lo ponga.
+function sfcTitulo(c) {
+  const n = String((c && c.nombre) || '').replace(/\s+/g, ' ').trim();
+  if (n) return { txt: n, sinNombre: false };
+  const vistos = [];
+  ((c && c.archivos) || []).forEach(a => {
+    const s = String((a && a.nombre) || '').replace(/\.[a-z0-9]{1,6}$/i, '').replace(/[_\s]+/g, ' ').trim();
+    if (s && !vistos.some(v => sfcNorm(v) === sfcNorm(s))) vistos.push(s);
+  });
+  const txt = vistos.slice(0, 3).join(' · ') + (vistos.length > 3 ? ' +' + (vistos.length - 3) : '');
+  return { txt: txt || 'Pedido #' + ((c && c.id) || ''), sinNombre: true };
+}
 // El formulario vive en STATE (sobrevive a los redibujos y a cambiar de pantalla).
-function sfcFormVacio() { return { material: '', color: '', colorHex: '', creandoColor: false, nuevoHex: '#e11d48', nuevoNom: '', espesor: '', fecha: '', acl: '', archivos: [] }; }
+function sfcFormVacio() { return { nombre: '', material: '', color: '', colorHex: '', creandoColor: false, nuevoHex: '#e11d48', nuevoNom: '', espesor: '', fecha: '', acl: '', archivos: [] }; }
 function sfcForm() {
   if (STATE.sfcEditId) return STATE.sfcEditForm || (STATE.sfcEditForm = sfcFormVacio());
   return STATE.sfcForm || (STATE.sfcForm = sfcFormVacio());
 }
 function sfcPeso(b) { b = +b || 0; return b >= 1048576 ? (b / 1048576).toFixed(b >= 10485760 ? 0 : 1).replace('.', ',') + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB'; }
 function sfcHoyYmd() { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
-async function sfcCargar(opts) {
+// Carga la lista de pedidos de corte. Si ya hay una carga en vuelo, se encadena otra para cuando termine (la que está en vuelo
+// puede traer la lista de antes de algo que se acaba de guardar) y se devuelve esa: quien la espera recibe la lista nueva.
+// STATE._sfcGen sube con cada cambio guardado desde acá: una respuesta que se pidió antes no pisa la lista (vuelve el nombre
+// viejo y la próxima edición daba un 409 falso), la trae bien la encadenada.
+function sfcCargar(opts) {
   const silent = !!(opts && opts.silent);
-  if (STATE._sfcCargando) return;
-  STATE._sfcCargando = true;
-  const user = STATE.user;
+  if (STATE._sfcCargando) {
+    STATE._sfcOtraSilent = (STATE._sfcOtra ? STATE._sfcOtraSilent : true) && silent;
+    const otra = () => { STATE._sfcOtra = null; return sfcCargar({ silent: STATE._sfcOtraSilent }); };
+    if (!STATE._sfcOtra) STATE._sfcOtra = STATE._sfcCargando.then(otra, otra);
+    return STATE._sfcOtra;
+  }
+  const p = sfcCargarYa(silent);
+  STATE._sfcCargando = p;
+  return p;
+}
+function sfcCambioGuardado() { STATE._sfcGen = (STATE._sfcGen || 0) + 1; }
+async function sfcCargarYa(silent) {
+  const user = STATE.user, gen = STATE._sfcGen || 0;
   try {
     const j = await sfFetch('/admin/sinfrontera/cortes');
     if (STATE.user !== user) return;
+    if ((STATE._sfcGen || 0) !== gen) { sfcCargar({ silent: true }); return; }   // vieja: se pidió antes de un cambio guardado
     const antes = JSON.stringify((STATE.sfCortes && STATE.sfCortes.colores) || []);
     STATE.sfCortes = { cortes: j.cortes || [], colores: Array.isArray(j.colores) ? j.colores : [], at: Date.now() };
     if (antes !== JSON.stringify(STATE.sfCortes.colores)) STATE._sfcColoresCambio = true;
   } catch (e) {
     if (STATE.user !== user) return;
     if (!silent || !STATE.sfCortes || STATE.sfCortes.error) STATE.sfCortes = { error: e.message || 'No se pudo cargar', at: Date.now() };
-  } finally { STATE._sfcCargando = false; }
+  } finally { STATE._sfcCargando = null; }
   if (STATE.view === 'sf-cortes') { sfcPintarLista(); if (STATE._sfcColoresCambio) { STATE._sfcColoresCambio = false; sfcPintarColores(true); } }
 }
 function renderSfCortes() {
@@ -9252,7 +9289,7 @@ function renderSfCortes() {
       <button class="btn btn-ghost" data-sfc-refresh>Actualizar</button>
       ${sfAdminBarra()}${adm ? '<button class="btn btn-ghost" data-sfc-fran title="El usuario de Fran, que hace estos cortes, y su WhatsApp para los avisos">Usuario de Fran</button>' : ''}
     </div>
-    ${gestiona ? sfcCargarHtml() : sfcFormHtml()}
+    ${STATE.sfcEditId ? sfcEditarHtml() : gestiona ? sfcCargarHtml() : sfcFormHtml()}
     <div data-sfc-lista>${sfcListaHtml()}</div>
   </div>`;
 }
@@ -9261,7 +9298,19 @@ function sfcChips(attr, lista, sel) {
 }
 function sfcFormHtml() {
   const F = sfcForm(), espChip = SFC_ESPESORES.includes(F.espesor) ? F.espesor : '';
+  const soloNombre = !!STATE.sfcEditId && sfcSoloNombre(sfcCorte(STATE.sfcEditId));
+  const nombre = `<label class="sfc-campo"><span class="sfc-lbl">Nombre del pedido o del cartel</span><input class="nc-input sfc-nombre" data-sfc-nombre maxlength="80" autocomplete="off" enterkeyhint="${soloNombre ? 'done' : 'next'}" placeholder="Por ejemplo: Molino, cartel escalera Gbs" value="${escapeHtml(F.nombre || '')}"></label>`;
+  // Sin Frontera y el pedido ya en corte: solo el nombre (lo demás, "hablalo con Gaspar", como cancelar).
+  if (soloNombre) {
+    return `<form class="sfc-form" data-sfc-form novalidate>
+    ${nombre}
+    <div class="sfc-cargar-nota">Ya se empezó a cortar: acá solo le podés cambiar el nombre. Para cambiar los archivos, el material, el color, el espesor, la fecha o las aclaraciones, hablalo con Gaspar.</div>
+    <div class="sfc-err" data-sfc-err role="alert"></div>
+    <button type="submit" class="btn btn-cyan sfc-enviar" data-sfc-enviar>${sfcBotonTxt()}</button>
+  </form>`;
+  }
   return `<form class="sfc-form" data-sfc-form novalidate>
+    ${nombre}
     <input type="file" multiple data-sfc-file hidden>
     <div class="sfc-drop" data-sfc-drop tabindex="0" role="button" aria-label="Elegir los archivos del corte">
       <div class="sfc-drop-t">📎 Arrastrá el archivo acá o tocá para elegirlo</div>
@@ -9277,26 +9326,74 @@ function sfcFormHtml() {
     <button type="submit" class="btn btn-cyan sfc-enviar" data-sfc-enviar>${sfcBotonTxt()}</button>
   </form>`;
 }
-// Editar un pedido (Gaspar y Fran; Gaspar 22-oct: "permitime editar los pedidos"). Usa el mismo formulario, precargado: mientras
-// se edita, sfcForm() devuelve STATE.sfcEditForm (el pedido a medio cargar de STATE.sfcForm queda guardado aparte).
-function sfcEditar(id) {
-  const c = ((STATE.sfCortes && STATE.sfCortes.cortes) || []).find(x => x.id === id); if (!c) return;
+// Editar un pedido (Gaspar 22-oct: "permitime editar los pedidos"; 26-oct: también Sin Frontera, mientras no esté cortado).
+// Usa el mismo formulario, precargado: mientras se edita, sfcForm() devuelve STATE.sfcEditForm (el pedido a medio cargar de
+// STATE.sfcForm queda guardado aparte). foco 'nombre': viene de "poner nombre" de un pedido que no tiene.
+// base: el formulario de un intento que el worker rechazó porque el pedido cambió en el medio (sfcEditarReabrir); lo que se había
+// cambiado ahí pasa al formulario nuevo (sfcEditarMezclar). Devuelve true si algo de eso no se pudo pasar.
+function sfcEditar(id, foco, base) {
+  const c = sfcCorte(id); if (!c || !sfcPuedeEditar(c)) return false;
   STATE.sfcEditId = id;
-  STATE.sfcEditForm = Object.assign(sfcFormVacio(), {
-    material: c.material, color: c.color, colorHex: c.color_hex || '', espesor: String(c.espesor || ''), fecha: c.fecha || '', fechaOrig: c.fecha || '',
+  const F = STATE.sfcEditForm = Object.assign(sfcFormVacio(), {
+    nombre: c.nombre || '', material: c.material, color: c.color, colorHex: c.color_hex || '', espesor: String(c.espesor || ''), fecha: c.fecha || '', fechaOrig: c.fecha || '',
     acl: c.aclaraciones || '', archivos: (c.archivos || []).map((a, i) => ({ id: 'e' + i, idx: i, nombre: a.nombre, bytes: a.bytes, estado: 'ok' })),
+    editadoAt: c.editado_at || '',   // la versión que se está editando (el worker rechaza si alguien lo editó en el medio)
   });
+  // Cómo estaba al abrirlo: con esto, si el guardado choca con el cambio de otro, se sabe qué había tocado cada uno.
+  F.orig = { nombre: F.nombre, material: F.material, color: F.color, colorHex: F.colorHex, espesor: F.espesor, fecha: F.fecha, acl: F.acl, nArch: F.archivos.length };
+  const quedaron = base ? sfcEditarMezclar(F, base, sfcSoloNombre(c)) : false;
   STATE.sfcFormAbierto = true;
   const m = document.getElementById('main'); if (m && STATE.view === 'sf-cortes') { m.innerHTML = renderSinFrontera(); bindSinFrontera(); }
   const f = document.querySelector('.sfc-wrap .sfc-cargar'); if (f) { try { f.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (_) {} }
+  const n = document.querySelector('.sfc-wrap [data-sfc-nombre]');
+  if (n && (foco === 'nombre' || !c.nombre || sfcSoloNombre(c))) { try { n.focus({ preventScroll: true }); } catch (_) { n.focus(); } }
+  return quedaron;
+}
+// Lo que el que edita había cambiado en base (contra base.orig) pasa al formulario nuevo N, campo por campo, salvo donde el otro
+// también cambió ese campo (ahí queda lo del otro, que es lo que tiene que ver) o donde ya no se puede (en corte, solo el nombre).
+// Los archivos nuevos que había subido se suman; los que había sacado vuelven (las posiciones eran de la lista vieja).
+// true = algo de lo suyo no se pasó.
+function sfcEditarMezclar(N, base, soloNombre) {
+  const O = base.orig || {}, val = (o, g) => g.map(k => String(o[k] == null ? '' : o[k])).join('\u0001');
+  let quedaron = false;
+  [['nombre'], ['material'], ['color', 'colorHex'], ['espesor'], ['fecha'], ['acl']].forEach(g => {
+    if (val(base, g) === val(O, g)) return;                                                          // eso no lo había tocado
+    if ((g[0] === 'nombre' || !soloNombre) && val(N, g) === val(O, g)) g.forEach(k => { N[k] = base[k]; });   // el otro no: va lo suyo
+    else quedaron = true;
+  });
+  const nuevos = (base.archivos || []).filter(a => a.idx == null && a.estado === 'ok' && a.key);
+  if (nuevos.length) { if (soloNombre) quedaron = true; else N.archivos = N.archivos.concat(nuevos.map(a => Object.assign({}, a))); }
+  if ((base.archivos || []).filter(a => a.idx != null).length < (O.nArch || 0)) quedaron = true;
+  return quedaron;
+}
+// El worker no guardó la edición porque el pedido cambió en el medio: alguien lo editó (409 'cambio') o Gaspar lo pasó a En corte
+// y Sin Frontera ya solo puede cambiarle el nombre (403 'cortando'). Se pone en la lista el pedido como quedó (viene con el error;
+// si no, se recarga) y se vuelve a abrir el editor con eso y con lo que había cambiado el que edita.
+async function sfcEditarReabrir(id, base, e) {
+  const D = STATE.sfCortes, c = e && e.data && e.data.corte;
+  if (c && c.id === id && D && !D.error) { sfcCambioGuardado(); D.cortes = (D.cortes || []).map(x => x.id === id ? c : x); sfcCargar({ silent: true }); }
+  else await sfcCargar({ silent: true });
+  if (STATE.sfcEditId !== id) return;   // cerró el editor mientras se recargaba
+  const act = sfcCorte(id);
+  if (!act || !sfcPuedeEditar(act)) { sfcEditarCancelar(); niToast(String((e && e.message) || 'Ese pedido ya no se puede editar.'), { error: true }); return; }
+  const quedaron = sfcEditar(id, null, base);
+  const msg = e && e.code === 'cortando'
+    ? 'Ya se empezó a cortar: ahora solo le podés cambiar el nombre. Para lo demás, hablalo con Gaspar.'
+    : 'Alguien lo editó recién: te lo abrimos de nuevo como quedó' + (quedaron ? '. Algo de lo que habías cambiado no se pudo pasar: revisalo y guardá.' : ', con tus cambios. Revisalo y guardá.');
+  const er = document.querySelector('.sfc-wrap [data-sfc-err]'); if (er) er.textContent = msg;
+  niToast(msg, { error: true });
 }
 function sfcEditarCancelar() {
   STATE.sfcEditId = null; STATE.sfcEditForm = null; STATE.sfcFormAbierto = false;
   const m = document.getElementById('main'); if (m && STATE.view === 'sf-cortes') { m.innerHTML = renderSinFrontera(); bindSinFrontera(); }
 }
+function sfcEditarHtml() {
+  const c = sfcCorte(STATE.sfcEditId), t = sfcTitulo(c || { id: STATE.sfcEditId });
+  const nota = isSinFronteraOnly() && !sfcSoloNombre(c) ? '<div class="sfc-cargar-nota">A Gaspar y a Fran les llega un aviso con lo que cambies (si cambiás solo el nombre, no).</div>' : '';
+  return '<div class="sfc-cargar"><div class="sfc-cargar-h"><b>Editar el pedido #' + STATE.sfcEditId + (t.sinNombre ? '' : ' · ' + escapeHtml(t.txt)) + '</b><button type="button" class="logi-link" data-sfc-cancelar-edit>cancelar</button></div>' + nota + sfcFormHtml() + '</div>';
+}
 // Fran (y Gaspar) también cargan pedidos, por si Sin Frontera no lo hizo (Gaspar 22-oct): el formulario va plegado.
 function sfcCargarHtml() {
-  if (STATE.sfcEditId) return '<div class="sfc-cargar"><div class="sfc-cargar-h"><b>Editar el pedido #' + STATE.sfcEditId + '</b><button type="button" class="logi-link" data-sfc-cancelar-edit>cancelar</button></div>' + sfcFormHtml() + '</div>';
   if (!STATE.sfcFormAbierto) return '<div><button type="button" class="btn btn-ghost sfc-abrir" data-sfc-abrir-form>＋ Cargar un pedido (si Sin Frontera no lo cargó)</button></div>';
   return '<div class="sfc-cargar"><div class="sfc-cargar-h"><b>Cargar un pedido de Sin Frontera</b><button type="button" class="logi-link" data-sfc-cerrar-form>cerrar</button></div>' + sfcFormHtml() + '</div>';
 }
@@ -9356,17 +9453,25 @@ async function sfcEnviar() {
   const F = sfcForm();
   const err = m => { const e = document.querySelector('.sfc-wrap [data-sfc-err]'); if (e) e.textContent = m; if (m) niToast(m, { error: true }); };
   if (STATE._sfcEnviando) return;
-  if (!F.archivos.length) return err('Subí el archivo del corte.');
-  if (F.archivos.some(a => a.estado === 'subiendo')) return err('Esperá a que terminen de subir los archivos.');
-  if (F.archivos.some(a => a.estado === 'error')) return err('Hay un archivo que no se subió: reintentalo o quitalo.');
-  if (!F.material) return err('Elegí el material: acrílico o PVC.');
-  if (F.creandoColor && String(F.nuevoNom || '').trim()) sfcUsarColorNuevo(true);
-  if (!F.color) return err(F.creandoColor ? 'Poné el nombre del color nuevo y tocá "Usar este color".' : 'Elegí el color.');
+  const nombre = String(F.nombre || '').replace(/\s+/g, ' ').trim();
+  if (!sfcNombreOk(nombre)) {
+    const n = document.querySelector('.sfc-wrap [data-sfc-nombre]'); if (n) n.focus();
+    return err(nombre ? 'Poné un nombre más largo: el del cartel o el del pedido.' : 'Poné el nombre del pedido o del cartel (por ejemplo: Molino).');
+  }
   const esp = String(F.espesor || '').trim();
-  if (!esp) return err('Elegí o escribí el espesor.');
-  if (!/^\d{1,2}([.,]\d{1,2})?\s*(mm)?$/i.test(esp)) return err('El espesor va en milímetros, por ejemplo 3 o 2,5.');
-  if (!F.fecha) return err('Poné para cuándo lo necesitan.');
-  if (F.fecha < sfcHoyYmd() && !(STATE.sfcEditId && F.fecha === F.fechaOrig)) return err('Esa fecha ya pasó.');
+  // Solo el nombre (Sin Frontera, pedido en corte): lo demás va tal cual estaba, no se revisa (no lo puede tocar).
+  if (!(STATE.sfcEditId && sfcSoloNombre(sfcCorte(STATE.sfcEditId)))) {
+    if (!F.archivos.length) return err('Subí el archivo del corte.');
+    if (F.archivos.some(a => a.estado === 'subiendo')) return err('Esperá a que terminen de subir los archivos.');
+    if (F.archivos.some(a => a.estado === 'error')) return err('Hay un archivo que no se subió: reintentalo o quitalo.');
+    if (!F.material) return err('Elegí el material: acrílico o PVC.');
+    if (F.creandoColor && String(F.nuevoNom || '').trim()) sfcUsarColorNuevo(true);
+    if (!F.color) return err(F.creandoColor ? 'Poné el nombre del color nuevo y tocá "Usar este color".' : 'Elegí el color.');
+    if (!esp) return err('Elegí o escribí el espesor.');
+    if (!/^\d{1,2}([.,]\d{1,2})?\s*(mm)?$/i.test(esp)) return err('El espesor va en milímetros, por ejemplo 3 o 2,5.');
+    if (!F.fecha) return err('Poné para cuándo lo necesitan.');
+    if (F.fecha < sfcHoyYmd() && !(STATE.sfcEditId && F.fecha === F.fechaOrig)) return err('Esa fecha ya pasó.');
+  }
   err('');
   let quien = isSinFronteraOnly() ? sfOperador() : '';
   if (isSinFronteraOnly() && !quien && !STATE._sfOpPreguntado) { STATE._sfOpPreguntado = true; quien = await sfPedirOperador(); }
@@ -9374,26 +9479,32 @@ async function sfcEnviar() {
     const id = STATE.sfcEditId;
     STATE._sfcEnviando = true; sfcPintarArchivos();
     try {
-      const j = await sfFetch('/admin/sinfrontera/corte/editar', { id, material: F.material, color: F.color, color_hex: F.colorHex || '', espesor: esp, fecha: F.fecha, aclaraciones: F.acl,
-        archivos: F.archivos.filter(a => a.estado === 'ok').map(a => a.idx != null ? { idx: a.idx } : { key: a.key, nombre: a.nombre }) });
+      const j = await sfFetch('/admin/sinfrontera/corte/editar', { id, nombre, material: F.material, color: F.color, color_hex: F.colorHex || '', espesor: esp, fecha: F.fecha, aclaraciones: F.acl,
+        archivos: F.archivos.filter(a => a.estado === 'ok').map(a => a.idx != null ? { idx: a.idx } : { key: a.key, nombre: a.nombre }),
+        editado_at: F.editadoAt || '', quien });
       const Dc = STATE.sfCortes;
+      sfcCambioGuardado();
       if (Dc && !Dc.error && j.corte) Dc.cortes = (Dc.cortes || []).map(c => c.id === id ? j.corte : c);
       STATE._sfcEnviando = false; STATE.sfcEditId = null; STATE.sfcEditForm = null; STATE.sfcFormAbierto = false;
       const m = document.getElementById('main'); if (m && STATE.view === 'sf-cortes') { m.innerHTML = renderSinFrontera(); bindSinFrontera(); }
-      niToast('Listo, pedido #' + id + ' actualizado');
+      niToast(j.sin_cambios ? 'No cambiaste nada del pedido #' + id : 'Listo, pedido #' + id + ' actualizado' + (j.avisado ? '. Le avisamos a Gaspar.' : ''));
       sfcCargar({ silent: true });
     } catch (e) {
-      STATE._sfcEnviando = false; sfcPintarArchivos();
+      STATE._sfcEnviando = false;
+      // Cambió en el medio (otro lo editó, pasó a En corte o ya no se puede editar): se reabre con cómo quedó.
+      if (e && (e.code === 'cambio' || e.code === 'cortando' || (e.code === 'forbidden' && e.data && e.data.corte))) { sfcEditarReabrir(id, F, e); return; }
+      sfcPintarArchivos();
       err(String((e && e.message) || 'No se pudo guardar. Probá de nuevo.'));
     }
     return;
   }
   STATE._sfcEnviando = true; sfcPintarArchivos();
   try {
-    const j = await sfFetch('/admin/sinfrontera/corte', { material: F.material, color: F.color, color_hex: F.colorHex || '', espesor: esp, fecha: F.fecha, aclaraciones: F.acl,
+    const j = await sfFetch('/admin/sinfrontera/corte', { nombre, material: F.material, color: F.color, color_hex: F.colorHex || '', espesor: esp, fecha: F.fecha, aclaraciones: F.acl,
       archivos: F.archivos.filter(a => a.estado === 'ok').map(a => ({ key: a.key, nombre: a.nombre })), quien });
     STATE.sfcForm = null; STATE.sfcFormAbierto = false;
     const D = STATE.sfCortes;
+    sfcCambioGuardado();
     if (D && !D.error && j.corte && j.corte.estado) D.cortes = [j.corte].concat((D.cortes || []).filter(c => c.id !== j.corte.id));
     STATE._sfcEnviando = false;
     const m = document.getElementById('main'); if (m && STATE.view === 'sf-cortes') { m.innerHTML = renderSinFrontera(); bindSinFrontera(); }
@@ -9420,19 +9531,26 @@ function sfcFilaHtml(c) {
   const adm = isAdmin() || isFranOnly(), E = sfcEstado(c.estado), cerrado = c.estado === 'entregado' || c.estado === 'cancelado', dias = sfDias(c.fecha);
   const plazo = cerrado ? `<span class="logi-pill g">Para el ${escapeHtml(sfFecha(c.fecha))}</span>`
     : `<span class="logi-pill ${dias < 0 ? 'r' : dias <= 1 ? 'a' : 'g'}">${dias < 0 ? 'Vencido: era para el ' + escapeHtml(sfFecha(c.fecha)) : dias === 0 ? 'Es para hoy' : dias === 1 ? 'Para mañana' : 'Para el ' + escapeHtml(sfFecha(c.fecha)) + ' · faltan ' + dias + ' días'}</span>`;
-  const arch = (c.archivos || []).map((a, i) => `<a class="sfc-arch" href="${escapeHtml(sfUrl('c=' + c.id + '&i=' + i + '&dl=1'))}" target="_blank" rel="noopener" title="Bajar ${escapeHtml(a.nombre)} (${sfcPeso(a.bytes)})">${/^image\//.test(a.tipo) ? '🖼' : '📄'} ${escapeHtml(a.nombre)}</a>`).join('');
+  // v = la versión de cada archivo: si una edición lo cambia, cambia el link (el navegador no da el viejo de su caché).
+  const arch = (c.archivos || []).map((a, i) => `<a class="sfc-arch" href="${escapeHtml(sfUrl('c=' + c.id + '&i=' + i + (a.v ? '&v=' + encodeURIComponent(a.v) : '') + '&dl=1'))}" target="_blank" rel="noopener" title="Bajar ${escapeHtml(a.nombre)} (${sfcPeso(a.bytes)})">${/^image\//.test(a.tipo) ? '🖼' : '📄'} ${escapeHtml(a.nombre)}</a>`).join('');
+  const ed = sfcPuedeEditar(c), tit = sfcTitulo(c);
+  const editar = ed ? `<button type="button" class="btn btn-ghost sfc-editar" data-sfc-editar="${c.id}">Editar</button>` : '';
   const acc = adm
-    ? `<button type="button" class="btn btn-ghost sfc-editar" data-sfc-editar="${c.id}">Editar</button><select class="lb-sel sfc-est" data-sfc-estado="${c.id}" style="--c:${E[2]}" aria-label="Estado del pedido #${c.id}">${SFC_ESTADOS.map(([v, t]) => `<option value="${v}"${v === c.estado ? ' selected' : ''}>${t}</option>`).join('')}</select>`
-    : `<span class="sfc-est-pill" style="--c:${E[2]}">${E[1]}</span>${c.estado === 'pedido' ? `<button type="button" class="btn btn-ghost sfc-cancelar" data-sfc-cancelar="${c.id}">Cancelar</button>` : ''}`;
+    ? `${editar}<select class="lb-sel sfc-est" data-sfc-estado="${c.id}" style="--c:${E[2]}" aria-label="Estado del pedido #${c.id}">${SFC_ESTADOS.map(([v, t]) => `<option value="${v}"${v === c.estado ? ' selected' : ''}>${t}</option>`).join('')}</select>`
+    : `<span class="sfc-est-pill" style="--c:${E[2]}">${E[1]}</span>${editar}${c.estado === 'pedido' ? `<button type="button" class="btn btn-ghost sfc-cancelar" data-sfc-cancelar="${c.id}">Cancelar</button>` : ''}`;
+  // Sin nombre (los cargados antes del 26-oct): quien lo puede editar lo toca y va directo al campo del nombre.
+  const sinNom = !tit.sinNombre ? '' : ed ? `<button type="button" class="sfc-sinnom" data-sfc-nombrar="${c.id}" title="Ponerle nombre" aria-label="Ponerle nombre al pedido #${c.id}">sin nombre ✎</button>`
+    : '<span class="sfc-sinnom">sin nombre</span>';
   const cambio = (c.estado !== 'pedido' && c.estado_at ? ' · ' + E[1].toLowerCase() + ' ' + sfFechaHora(c.estado_at) + (c.estado_por ? ' (' + nkbNom(c.estado_por) + ')' : '') : '')
     + (c.editado_at ? ' · editado ' + sfFechaHora(c.editado_at) + (c.editado_por ? ' (' + nkbNom(c.editado_por) + ')' : '') : '');
   return `<div class="lb-row sfc-row${cerrado ? ' r-enviado' : ''}" data-sfc-row="${c.id}">
     <div class="lb-head sfc-head">
       <span class="ln-num">#${c.id}</span>
-      <span class="lb-nom"><span class="n">${escapeHtml(sfcLbl(SFC_MATERIALES, c.material))} ${sfcMuestra(c.color, c.color_hex)}${escapeHtml(sfcLbl(SFC_COLORES, c.color).toLowerCase() + ' · ' + c.espesor + ' mm')}</span>${plazo}</span>
+      <span class="lb-nom"><span class="n${tit.sinNombre ? ' sin-nombre' : ''}" title="${escapeHtml(tit.txt)}">${escapeHtml(tit.txt)}</span>${sinNom}${plazo}</span>
       <span class="sfc-acc">${acc}</span>
     </div>
     <div class="sfc-det">
+      <div class="sfc-mat">${escapeHtml(sfcLbl(SFC_MATERIALES, c.material))} ${sfcMuestra(c.color, c.color_hex)}${escapeHtml(sfcLbl(SFC_COLORES, c.color).toLowerCase() + ' · ' + c.espesor + ' mm')}</div>
       <div class="sfc-archs">${arch || '<span class="muted">Sin archivos</span>'}</div>
       ${c.aclaraciones ? `<div class="sfc-acl-txt">${escapeHtml(c.aclaraciones)}</div>` : ''}
       <div class="sfc-meta">Pedido el ${escapeHtml(sfFechaHora(c.created_at))}${c.creado_por ? ' por ' + escapeHtml(c.creado_por) : ''}${escapeHtml(cambio)}</div>
@@ -9451,11 +9569,12 @@ async function sfcCambiarEstado(id, estado, el) {
   if (el) el.disabled = true;
   try {
     const j = await sfFetch('/admin/sinfrontera/corte/estado', { id, estado, quien: isSinFronteraOnly() ? sfOperador() : '' });
-    if (j.corte) Object.assign(c, j.corte);
+    if (j.corte) { sfcCambioGuardado(); Object.assign(c, j.corte); }
     niToast('#' + id + ': ' + sfcEstado(c.estado)[1].toLowerCase());
   } catch (e) { volver(); niToast('No se guardó: ' + String((e && e.message) || 'error'), { error: true }); }
   if (el) el.disabled = false;
-  sfcPintarLista();
+  // Sin Frontera canceló el pedido que tenía abierto para editar: ya no se puede editar, se cierra el formulario.
+  if (STATE.sfcEditId === id && !sfcPuedeEditar(c)) sfcEditarCancelar(); else sfcPintarLista();
   sfcCargar({ silent: true });
 }
 // Usuario de Fran (router y láser; Gaspar 22-oct): la contraseña crea o cambia su usuario y el WhatsApp es para avisarle cada
@@ -9505,13 +9624,16 @@ function sfcMarcar(form, attr, v) { form.querySelectorAll('[' + attr + ']').forE
 function sfcBind(root) {
   const F = sfcForm(), form = root.querySelector('[data-sfc-form]');
   if (form) {
+    // Con el formulario de solo el nombre (Sin Frontera, pedido en corte) no están los archivos, el espesor, la fecha ni las aclaraciones.
     const file = form.querySelector('[data-sfc-file]'), drop = form.querySelector('[data-sfc-drop]');
-    drop.addEventListener('click', () => file.click());
-    drop.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); file.click(); } });
-    file.addEventListener('change', () => { sfcAgregar(file.files); file.value = ''; });
-    ['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('sobre'); }));
-    ['dragleave', 'dragend'].forEach(ev => drop.addEventListener(ev, () => drop.classList.remove('sobre')));
-    drop.addEventListener('drop', e => { e.preventDefault(); drop.classList.remove('sobre'); if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) sfcAgregar(e.dataTransfer.files); });
+    if (drop && file) {
+      drop.addEventListener('click', () => file.click());
+      drop.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); file.click(); } });
+      file.addEventListener('change', () => { sfcAgregar(file.files); file.value = ''; });
+      ['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('sobre'); }));
+      ['dragleave', 'dragend'].forEach(ev => drop.addEventListener(ev, () => drop.classList.remove('sobre')));
+      drop.addEventListener('drop', e => { e.preventDefault(); drop.classList.remove('sobre'); if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) sfcAgregar(e.dataTransfer.files); });
+    }
     form.addEventListener('click', e => {
       const b = e.target.closest && e.target.closest('button'); if (!b || !form.contains(b)) return;
       if (b.hasAttribute('data-sfc-material')) { F.material = b.getAttribute('data-sfc-material'); sfcMarcar(form, 'data-sfc-material', F.material); }
@@ -9525,12 +9647,19 @@ function sfcBind(root) {
       else if (b.hasAttribute('data-sfc-quitar')) sfcQuitar(b.getAttribute('data-sfc-quitar'));
       else if (b.hasAttribute('data-sfc-reintentar')) { const a = F.archivos.find(x => x.id === b.getAttribute('data-sfc-reintentar')); if (a && a.file) { sfcSubir(a); sfcPintarArchivos(); } }
     });
+    // Nombre del pedido: Enter no manda el pedido (todavía faltan los archivos y lo demás), pasa al archivo. Si es lo único que
+    // hay (solo el nombre), Enter guarda.
+    const nom = form.querySelector('[data-sfc-nombre]');
+    if (nom) {
+      nom.addEventListener('input', () => { F.nombre = nom.value; });
+      nom.addEventListener('keydown', e => { if (e.key === 'Enter' && drop) { e.preventDefault(); if (!F.archivos.length) drop.focus(); else nom.blur(); } });
+    }
     const otro = form.querySelector('[data-sfc-esp-otro]');
-    otro.addEventListener('input', () => { F.espesor = otro.value.trim(); otro.classList.toggle('on', !!F.espesor); sfcMarcar(form, 'data-sfc-esp', ''); });
+    if (otro) otro.addEventListener('input', () => { F.espesor = otro.value.trim(); otro.classList.toggle('on', !!F.espesor); sfcMarcar(form, 'data-sfc-esp', ''); });
     const fecha = form.querySelector('[data-sfc-fecha]');
-    ['input', 'change'].forEach(ev => fecha.addEventListener(ev, () => { F.fecha = fecha.value; }));
+    if (fecha) ['input', 'change'].forEach(ev => fecha.addEventListener(ev, () => { F.fecha = fecha.value; }));
     const acl = form.querySelector('[data-sfc-acl]');
-    acl.addEventListener('input', () => { F.acl = acl.value; });
+    if (acl) acl.addEventListener('input', () => { F.acl = acl.value; });
     form.addEventListener('submit', e => { e.preventDefault(); sfcEnviar(); });
     // Color nuevo: el selector y el nombre quedan en el formulario; Enter en el nombre = "Usar este color" (no manda el pedido).
     ['input', 'change'].forEach(ev => form.addEventListener(ev, e => {
@@ -9547,6 +9676,7 @@ function sfcBind(root) {
   root.addEventListener('click', e => {
     if (e.target.closest('[data-sfc-fran]')) { sfcFranUI(); return; }
     const ed = e.target.closest('[data-sfc-editar]'); if (ed) { sfcEditar(+ed.getAttribute('data-sfc-editar')); return; }
+    const nb = e.target.closest('[data-sfc-nombrar]'); if (nb) { sfcEditar(+nb.getAttribute('data-sfc-nombrar'), 'nombre'); return; }
     if (e.target.closest('[data-sfc-cancelar-edit]')) { sfcEditarCancelar(); return; }
     const abrir = e.target.closest('[data-sfc-abrir-form], [data-sfc-cerrar-form]');
     if (abrir) {
