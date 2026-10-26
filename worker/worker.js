@@ -6762,6 +6762,132 @@ async function corteFrenosAbiertos(env, cfgIn) {
   return m;
 }
 async function corteFrenosAbiertosOFail(env) { try { return await corteFrenosAbiertos(env); } catch (_) { return new Map(); } } // fail-open (embalar)
+// ===== COBRO DE UN CLIENTE (cuerpo de /admin/corte/cobrar) =====
+// Contexto del cobro (una vez por pedido): control de teléfono (LTV + asignaciones), tablas del candado y del detalle y la
+// etiqueta "Servicio de corte" (se asegura en cada cobro → el filtro rápido de la bandeja siempre los incluye). Lo usan
+// /admin/corte/cobrar y la aprobación de un freno del corte (sumar al pedido → re-cobro con el total nuevo).
+async function corteCobrarCtx(env) {
+  const [ltvGuard, ovGuard] = await Promise.all([corteLtv(env), corteTelOverrides(env)]);
+  const dueniosGuard = ltvGuard.ok ? await corteDuenios(env, ltvGuard.rows, ovGuard) : {};
+  try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_cobro_lock (phone TEXT PRIMARY KEY, ts TEXT)").run(); } catch (_) {}
+  try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_detalle_sent (phone TEXT PRIMARY KEY, cobro_at TEXT, sent_at TEXT)").run(); } catch (_) {}
+  let corteLabelId = null;
+  try { corteLabelId = await ensureLabelId(env, 'Servicio de corte', '#14b8a6'); } catch (_) {}
+  return { ltvGuard, dueniosGuard, corteLabelId };
+}
+// El cobro de UN cliente: candado por cliente, piezas a cobrar, control de teléfono, seña, texto o plantilla y el paso a
+// 'cobrando' por id. opt = { recobrar (re-envío: entran también las 'cobrando'), forzar (teléfono confirmado por el admin),
+// tandaId (0 = todas), nowIso, nowMs, ltvGuard, dueniosGuard, corteLabelId }. Devuelve el ítem del resultado:
+// { tel, ok, total, via, recobro, sena } o { tel, ok: false, error, conflicto? }.
+async function corteCobrarUno(env, tel, opt) {
+  const { ltvGuard, dueniosGuard, corteLabelId, nowIso, nowMs } = opt;
+  const tandaId = parseInt(opt.tandaId, 10) || 0;
+  const tf = tandaId ? ' AND tanda_id=?' : '';
+  const tb = tandaId ? [tandaId] : [];
+  // CANDADO POR CLIENTE (90s): si corren dos pedidos de cobro a la vez (doble click, o el botón vuelve a
+  // habilitarse por un refresco mientras se envía), solo UNO le manda el cobro a cada cliente. Caso real:
+  // 5-oct, 19 clientes recibieron la plantilla de cobro DOS veces. FAIL-CLOSED: si el candado mismo falla,
+  // NO se manda (mejor que el admin reintente a que el cliente reciba el cobro dos veces).
+  const lockNow = new Date().toISOString(), lockStale = new Date(Date.now() - 90 * 1000).toISOString();
+  let lk = null;
+  try { lk = await env.DB.prepare("INSERT INTO corte_cobro_lock (phone, ts) VALUES (?, ?) ON CONFLICT(phone) DO UPDATE SET ts=excluded.ts WHERE corte_cobro_lock.ts < ? RETURNING phone").bind(tel, lockNow, lockStale).first(); }
+  catch (_) { return { tel, ok: false, error: 'no se pudo tomar el candado (reintentá)' }; }
+  if (!lk) { return { tel, ok: false, error: 'ya se le mandó el cobro hace instantes (esperá un minuto)' }; }
+  const soltarLock = async () => { try { await env.DB.prepare("DELETE FROM corte_cobro_lock WHERE phone=? AND ts=?").bind(tel, lockNow).run(); } catch (_) {} };
+  // RE-COBRO SIN PASAR POR 'pendiente': si está en recobrar_tels, entran también las filas que ya estaban
+  // 'cobrando' (nunca pagado/parcial). Antes se bajaban a 'pendiente' durante el envío y, si el comprobante
+  // llegaba justo en ese hueco, el vigía no encontraba qué marcar y el pago se perdía.
+  const estados = opt.recobrar ? "('pendiente','cobrando')" : "('pendiente')";
+  let rows = [];
+  try { rows = (await env.DB.prepare("SELECT id, cliente_nombre, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, precio, estado_pago, sena_id, hoja_fila, hoja_cliente, hoja_fecha FROM corte_pedidos WHERE telefono=? AND precio>0 AND estado_pago IN " + estados + " AND estado IN ('cortado','embalado','despachado','entregado') AND IFNULL(producto,'TRANS')!='NEON'" + tf).bind(tel, ...tb).all()).results || []; } catch (_) {}
+  if (!rows.length) { await soltarLock(); return { tel, ok: false, error: opt.recobrar ? 'nada para cobrar' : 'nada pendiente (si ya se le cobró, usá re-envío)' }; }
+  // Se controlan TODOS los nombres del cobro (si un teléfono tiene piezas de dos clientes, eso mismo es un conflicto)
+  // contra todos los dueños conocidos del número (LTV + asignaciones + otros clientes del corte). Si LTV no se pudo
+  // leer, NO se manda sin confirmar.
+  let confl = null, nomConfl = rows[0].cliente_nombre;
+  if (!ltvGuard.ok) confl = { nombre: 'NO VERIFICADO (no pude leer LTV_Alumnos: ' + ltvGuard.error + ')', fuente: 'LTV' };
+  else {
+    const nombresCob = [...new Set(rows.map(x => String(x.cliente_nombre || '').trim()).filter(Boolean))];
+    for (const n of nombresCob) {
+      const otroCob = nombresCob.find(o => !corteMismaPersona(o, n));
+      const o = otroCob ? { nombre: otroCob, fuente: 'mismo cobro' } : corteTelDeOtro(tel, n, dueniosGuard);
+      if (o) { confl = o; nomConfl = n; break; }
+    }
+  }
+  if (confl && !opt.forzar) { await soltarLock(); return { tel, ok: false, conflicto: confl.nombre, fuente: confl.fuente, nombre: nomConfl, error: 'NO SE MANDÓ: ese teléfono figura a nombre de ' + confl.nombre + ' (' + confl.fuente + ')' }; }
+  const esRecobro = rows.some(x => x.estado_pago === 'cobrando');
+  const g = { telefono: tel, cliente_nombre: rows[0].cliente_nombre, piezas: rows.map(r => ({ diseno: r.diseno_nombre, medida: corteMedidaCobro(r), cantidad: r.cantidad, precio: r.precio })), total: rows.reduce((s, r) => s + (Number(r.precio) || 0), 0) };
+  // SEÑA WEB (24-oct): lo que pagó de seña por estas piezas se descuenta. Si la seña cubre todo, no se le cobra nada.
+  const senaCr = await corteSenaCredito(env, rows);
+  if (senaCr.monto > 0) g.sena = senaCr.monto;
+  if (g.sena && g.sena >= g.total * 0.99) {
+    const cubIds = rows.map(x => x.id);
+    let ch = 0;
+    try { const u = await env.DB.prepare("UPDATE corte_pedidos SET estado_pago='pagado', pago_metodo='seña web', pago_nota=?, updated_at=? WHERE estado_pago IN ('pendiente','cobrando') AND id IN (" + cubIds.map(() => '?').join(',') + ")").bind('Cubierto con la seña web', nowIso, ...cubIds).run(); ch = (u && u.meta && u.meta.changes) || 0; } catch (_) {}
+    if (ch) {
+      await corteSenaAplicar(env, senaCr.ids, g.total, nowIso);
+      let sheetMsg = '';
+      if ((await kvGet(env, 'corte_sheet_pago_on', '1')) === '1') { try { sheetMsg = corteSheetMsg(await corteMarcarPagadoSheet(env, g.cliente_nombre, Math.round(g.total), senaCr.caja, '', rows)); } catch (_) {} }
+      const nom = String(g.cliente_nombre || '').trim().split(/\s+/)[0] || '';
+      let ven = false; try { const li = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone=? AND direction='inbound'").bind(tel).first(); ven = !!(li && li.t && (nowMs - new Date(li.t).getTime()) < 23 * 3600 * 1000); } catch (_) {}
+      if (ven) { try { await corteSend(env, tel, (nom ? 'Hola ' + nom + ', ' : 'Hola, ') + 'tu corte de esta semana ($' + Math.round(g.total).toLocaleString('es-AR') + ') ya quedó cubierto con la seña que pagaste. Gracias!'); } catch (_) {} }
+      const sobra = Math.round(g.sena - g.total);
+      try { await precotizNotifyGaspar(env, 'Corte · ' + (g.cliente_nombre || tel) + ': el cobro de esta semana ($' + Math.round(g.total).toLocaleString('es-AR') + ') quedó cubierto con la seña web ($' + Math.round(g.sena).toLocaleString('es-AR') + '). Lo marqué PAGADO' + (ven ? ' y se lo avisé.' : ' (no le escribí: no tiene la ventana de 24 h abierta).') + (sobra > 1 ? ' Le sobran $' + sobra.toLocaleString('es-AR') + ' de seña: devolvelos o dejalos a cuenta.' : '') + sheetMsg, { tipo: 'corte_sena', prioridad: sobra > 1 ? 'P2' : 'P3', refPhone: tel }); } catch (_) {}
+    }
+    await soltarLock(); return { tel, ok: !!ch, total: g.total, sena: g.sena, via: 'seña', error: ch ? undefined : 'no se pudo marcar' };
+  }
+  let ventana = false;
+  try { const li = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone=? AND direction='inbound'").bind(tel).first(); ventana = !!(li && li.t && (nowMs - new Date(li.t).getTime()) < 23 * 3600 * 1000); } catch (_) {}
+  // El texto libre YA ES el desglose → marcamos el detalle como enviado ANTES de mandarlo: si el vigía corre
+  // mientras sale el mensaje, no manda un segundo desglose. Si el envío falla, se restaura la marca previa.
+  let prevDet = null, detMarcado = false;
+  if (ventana) {
+    try { prevDet = await env.DB.prepare("SELECT cobro_at, sent_at FROM corte_detalle_sent WHERE phone=?").bind(tel).first(); } catch (_) {}
+    try { await env.DB.prepare("INSERT INTO corte_detalle_sent (phone, cobro_at, sent_at) VALUES (?,?,?) ON CONFLICT(phone) DO UPDATE SET cobro_at=excluded.cobro_at, sent_at=excluded.sent_at").bind(tel, lockNow, lockNow).run(); detMarcado = true; } catch (_) {}
+  }
+  const restaurarDet = async () => {
+    if (!detMarcado) return;
+    try {
+      if (prevDet) await env.DB.prepare("UPDATE corte_detalle_sent SET cobro_at=?, sent_at=? WHERE phone=? AND sent_at=?").bind(prevDet.cobro_at, prevDet.sent_at, tel, lockNow).run();
+      else await env.DB.prepare("DELETE FROM corte_detalle_sent WHERE phone=? AND sent_at=?").bind(tel, lockNow).run();
+    } catch (_) {}
+  };
+  // En ventana → texto libre (desglose completo). Fuera de ventana → plantilla aprobada
+  // corte_cobro_semanal ({{1}}=nombre, {{2}}=total). Ambas dejan los pedidos en 'cobrando' (para el vigía).
+  let r, via;
+  try {
+    if (ventana) { via = 'texto'; r = await corteSend(env, tel, corteCobroMsg(g)); }
+    else {
+      const _nom = String(g.cliente_nombre || '').trim().split(/\s+/)[0] || '';
+      const _tot = g.sena ? '$' + Math.round(g.total - g.sena).toLocaleString('es-AR') + ' (ya descontamos tu seña de $' + Math.round(g.sena).toLocaleString('es-AR') + ')' : '$' + Number(g.total || 0).toLocaleString('es-AR');
+      via = 'plantilla';
+      const _tpl = await corteCobroTpl(env);
+      r = await waSendTemplate(env, tel, _tpl, 'es_AR', [_nom, _tot]);
+      if (r && r.ok) { try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '', 1)").bind(new Date().toISOString(), r.id || ('corte-cobro-tpl:' + tel + ':' + Date.now()), tel, '[plantilla ' + _tpl + '] total ' + _tot).run(); } catch (_) {} }
+    }
+  } catch (_) { r = { ok: false }; } // una excepción del envío no puede dejar el candado tomado
+  if (r && r.ok) {
+    // Pasan a 'cobrando' EXACTAMENTE las filas que se cobraron en este mensaje (por id). Las que el vigía haya
+    // marcado pagado/parcial mientras salía el mensaje NO se tocan.
+    const cobIds = rows.map(x => x.id);
+    if (g.sena) {
+      // Con seña: arranca como pago parcial con la seña anotada (sin comprobantes): corteVigiaParcial suma el resto.
+      try { await env.DB.prepare("UPDATE corte_pedidos SET estado_pago='parcial', updated_at=? WHERE estado_pago IN ('pendiente','cobrando') AND id IN (" + cobIds.map(() => '?').join(',') + ")").bind(nowIso, ...cobIds).run(); } catch (_) {}
+      try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_pago_parcial (phone TEXT PRIMARY KEY, total REAL, pagado REAL, montos TEXT, wamids TEXT, desde TEXT, updated_at TEXT)").run(); } catch (_) {}
+      try { await env.DB.prepare("INSERT INTO corte_pago_parcial (phone, total, pagado, montos, wamids, desde, updated_at) VALUES (?, ?, ?, '[]', '[]', ?, ?) ON CONFLICT(phone) DO UPDATE SET total=excluded.total, pagado=excluded.pagado, montos='[]', wamids='[]', desde=excluded.desde, updated_at=excluded.updated_at").bind(tel, g.total, g.sena, nowIso, nowIso).run(); } catch (_) {}
+      await corteSenaAplicar(env, senaCr.ids, g.total, nowIso);
+    } else {
+      try { await env.DB.prepare("UPDATE corte_pedidos SET estado_pago='cobrando', updated_at=? WHERE estado_pago IN ('pendiente','cobrando') AND id IN (" + cobIds.map(() => '?').join(',') + ")").bind(nowIso, ...cobIds).run(); } catch (_) {}
+    }
+    // Dedup del DETALLE para este cobro:
+    //  · salió como TEXTO → ya quedó marcado ANTES del envío (ese mensaje ES el desglose; caso Daniel, 5-oct).
+    //  · salió como PLANTILLA (solo total) → borramos la marca: el desglose sale cuando conteste.
+    if (via !== 'texto') { try { await env.DB.prepare("DELETE FROM corte_detalle_sent WHERE phone=?").bind(tel).run(); } catch (_) {} }
+    else if (!detMarcado) { try { await env.DB.prepare("INSERT INTO corte_detalle_sent (phone, cobro_at, sent_at) VALUES (?,?,?) ON CONFLICT(phone) DO UPDATE SET cobro_at=excluded.cobro_at, sent_at=excluded.sent_at").bind(tel, nowIso, nowIso).run(); } catch (_) {} }
+    if (corteLabelId) { try { await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, datetime('now'))").bind(tel, corteLabelId).run(); } catch (_) {} }
+    return { tel, ok: true, total: g.total, via, recobro: esRecobro, sena: g.sena || 0 };
+  } else { await restaurarDet(); await soltarLock(); return { tel, ok: false, error: 'no se pudo enviar', total: g.total, via }; }
+}
 // ===== Google Drive (cuenta de servicio) — respaldo de archivos del corte =====
 const DRIVE_FOLDER_MATRICES = '1B9APyJdXQa5M9BxZ32Ct7jq8EEudNID_'; // matrices (sube Emma)
 const DRIVE_FOLDER_ANIBAL = '1PohYYIec4pidCjJt42lzfod4vUWkjAsj';   // placas anidadas (sube Aníbal)
@@ -32281,126 +32407,14 @@ const handler = {
         // confirmación); el viejo flag global recobrar:true se ignora a propósito. tanda_id: acota todo a esa tanda.
         const recobrarSet = new Set(Array.isArray(body.recobrar_tels) ? body.recobrar_tels.map(t => String(t).replace(/\D/g, '')).filter(Boolean) : []);
         const tandaId = parseInt(body.tanda_id, 10) || 0;
-        const tf = tandaId ? ' AND tanda_id=?' : '';
-        const tb = tandaId ? [tandaId] : [];
         // CONTROL DE TELÉFONO: si el número figura en LTV a nombre de OTRA persona, ese cobro NO sale (caso real 5-oct:
         // "Gonzalo Alganaraz" tenía el teléfono de "Gonzalo Martin Forns Herrera"). forzar_tels = los que el admin confirmó.
         const forzarSet = new Set(Array.isArray(body.forzar_tels) ? body.forzar_tels.map(t => String(t).replace(/\D/g, '')).filter(Boolean) : []);
-        const [ltvGuard, ovGuard] = await Promise.all([corteLtv(env), corteTelOverrides(env)]);
-        const dueniosGuard = ltvGuard.ok ? await corteDuenios(env, ltvGuard.rows, ovGuard) : {};
-        try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_cobro_lock (phone TEXT PRIMARY KEY, ts TEXT)").run(); } catch (_) {}
-        try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_detalle_sent (phone TEXT PRIMARY KEY, cobro_at TEXT, sent_at TEXT)").run(); } catch (_) {}
-        // Etiqueta "Servicio de corte": se asegura en cada cobro → el filtro rápido de la bandeja siempre los incluye.
-        let corteLabelId = null;
-        try { corteLabelId = await ensureLabelId(env, 'Servicio de corte', '#14b8a6'); } catch (_) {}
+        const { ltvGuard, dueniosGuard, corteLabelId } = await corteCobrarCtx(env);
         // El loop corre en ctx.waitUntil: si el admin cierra la pestaña o se corta la conexión a mitad del envío,
         // el worker igual lo termina (no quedan candados tomados ni clientes a medio procesar).
         const work = (async () => {
-        for (const tel of [...new Set(tels)]) {
-          // CANDADO POR CLIENTE (90s): si corren dos pedidos de cobro a la vez (doble click, o el botón vuelve a
-          // habilitarse por un refresco mientras se envía), solo UNO le manda el cobro a cada cliente. Caso real:
-          // 5-oct, 19 clientes recibieron la plantilla de cobro DOS veces. FAIL-CLOSED: si el candado mismo falla,
-          // NO se manda (mejor que el admin reintente a que el cliente reciba el cobro dos veces).
-          const lockNow = new Date().toISOString(), lockStale = new Date(Date.now() - 90 * 1000).toISOString();
-          let lk = null;
-          try { lk = await env.DB.prepare("INSERT INTO corte_cobro_lock (phone, ts) VALUES (?, ?) ON CONFLICT(phone) DO UPDATE SET ts=excluded.ts WHERE corte_cobro_lock.ts < ? RETURNING phone").bind(tel, lockNow, lockStale).first(); }
-          catch (_) { res.push({ tel, ok: false, error: 'no se pudo tomar el candado (reintentá)' }); continue; }
-          if (!lk) { res.push({ tel, ok: false, error: 'ya se le mandó el cobro hace instantes (esperá un minuto)' }); continue; }
-          const soltarLock = async () => { try { await env.DB.prepare("DELETE FROM corte_cobro_lock WHERE phone=? AND ts=?").bind(tel, lockNow).run(); } catch (_) {} };
-          // RE-COBRO SIN PASAR POR 'pendiente': si está en recobrar_tels, entran también las filas que ya estaban
-          // 'cobrando' (nunca pagado/parcial). Antes se bajaban a 'pendiente' durante el envío y, si el comprobante
-          // llegaba justo en ese hueco, el vigía no encontraba qué marcar y el pago se perdía.
-          const estados = recobrarSet.has(tel) ? "('pendiente','cobrando')" : "('pendiente')";
-          let rows = [];
-          try { rows = (await env.DB.prepare("SELECT id, cliente_nombre, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, precio, estado_pago, sena_id, hoja_fila, hoja_cliente, hoja_fecha FROM corte_pedidos WHERE telefono=? AND precio>0 AND estado_pago IN " + estados + " AND estado IN ('cortado','embalado','despachado','entregado') AND IFNULL(producto,'TRANS')!='NEON'" + tf).bind(tel, ...tb).all()).results || []; } catch (_) {}
-          if (!rows.length) { await soltarLock(); res.push({ tel, ok: false, error: recobrarSet.has(tel) ? 'nada para cobrar' : 'nada pendiente (si ya se le cobró, usá re-envío)' }); continue; }
-          // Se controlan TODOS los nombres del cobro (si un teléfono tiene piezas de dos clientes, eso mismo es un conflicto)
-          // contra todos los dueños conocidos del número (LTV + asignaciones + otros clientes del corte). Si LTV no se pudo
-          // leer, NO se manda sin confirmar.
-          let confl = null, nomConfl = rows[0].cliente_nombre;
-          if (!ltvGuard.ok) confl = { nombre: 'NO VERIFICADO (no pude leer LTV_Alumnos: ' + ltvGuard.error + ')', fuente: 'LTV' };
-          else {
-            const nombresCob = [...new Set(rows.map(x => String(x.cliente_nombre || '').trim()).filter(Boolean))];
-            for (const n of nombresCob) {
-              const otroCob = nombresCob.find(o => !corteMismaPersona(o, n));
-              const o = otroCob ? { nombre: otroCob, fuente: 'mismo cobro' } : corteTelDeOtro(tel, n, dueniosGuard);
-              if (o) { confl = o; nomConfl = n; break; }
-            }
-          }
-          if (confl && !forzarSet.has(tel)) { await soltarLock(); res.push({ tel, ok: false, conflicto: confl.nombre, fuente: confl.fuente, nombre: nomConfl, error: 'NO SE MANDÓ: ese teléfono figura a nombre de ' + confl.nombre + ' (' + confl.fuente + ')' }); continue; }
-          const esRecobro = rows.some(x => x.estado_pago === 'cobrando');
-          const g = { telefono: tel, cliente_nombre: rows[0].cliente_nombre, piezas: rows.map(r => ({ diseno: r.diseno_nombre, medida: corteMedidaCobro(r), cantidad: r.cantidad, precio: r.precio })), total: rows.reduce((s, r) => s + (Number(r.precio) || 0), 0) };
-          // SEÑA WEB (24-oct): lo que pagó de seña por estas piezas se descuenta. Si la seña cubre todo, no se le cobra nada.
-          const senaCr = await corteSenaCredito(env, rows);
-          if (senaCr.monto > 0) g.sena = senaCr.monto;
-          if (g.sena && g.sena >= g.total * 0.99) {
-            const cubIds = rows.map(x => x.id);
-            let ch = 0;
-            try { const u = await env.DB.prepare("UPDATE corte_pedidos SET estado_pago='pagado', pago_metodo='seña web', pago_nota=?, updated_at=? WHERE estado_pago IN ('pendiente','cobrando') AND id IN (" + cubIds.map(() => '?').join(',') + ")").bind('Cubierto con la seña web', nowIso, ...cubIds).run(); ch = (u && u.meta && u.meta.changes) || 0; } catch (_) {}
-            if (ch) {
-              await corteSenaAplicar(env, senaCr.ids, g.total, nowIso);
-              let sheetMsg = '';
-              if ((await kvGet(env, 'corte_sheet_pago_on', '1')) === '1') { try { sheetMsg = corteSheetMsg(await corteMarcarPagadoSheet(env, g.cliente_nombre, Math.round(g.total), senaCr.caja, '', rows)); } catch (_) {} }
-              const nom = String(g.cliente_nombre || '').trim().split(/\s+/)[0] || '';
-              let ven = false; try { const li = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone=? AND direction='inbound'").bind(tel).first(); ven = !!(li && li.t && (nowMs - new Date(li.t).getTime()) < 23 * 3600 * 1000); } catch (_) {}
-              if (ven) { try { await corteSend(env, tel, (nom ? 'Hola ' + nom + ', ' : 'Hola, ') + 'tu corte de esta semana ($' + Math.round(g.total).toLocaleString('es-AR') + ') ya quedó cubierto con la seña que pagaste. Gracias!'); } catch (_) {} }
-              const sobra = Math.round(g.sena - g.total);
-              try { await precotizNotifyGaspar(env, 'Corte · ' + (g.cliente_nombre || tel) + ': el cobro de esta semana ($' + Math.round(g.total).toLocaleString('es-AR') + ') quedó cubierto con la seña web ($' + Math.round(g.sena).toLocaleString('es-AR') + '). Lo marqué PAGADO' + (ven ? ' y se lo avisé.' : ' (no le escribí: no tiene la ventana de 24 h abierta).') + (sobra > 1 ? ' Le sobran $' + sobra.toLocaleString('es-AR') + ' de seña: devolvelos o dejalos a cuenta.' : '') + sheetMsg, { tipo: 'corte_sena', prioridad: sobra > 1 ? 'P2' : 'P3', refPhone: tel }); } catch (_) {}
-            }
-            await soltarLock(); res.push({ tel, ok: !!ch, total: g.total, sena: g.sena, via: 'seña', error: ch ? undefined : 'no se pudo marcar' }); continue;
-          }
-          let ventana = false;
-          try { const li = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone=? AND direction='inbound'").bind(tel).first(); ventana = !!(li && li.t && (nowMs - new Date(li.t).getTime()) < 23 * 3600 * 1000); } catch (_) {}
-          // El texto libre YA ES el desglose → marcamos el detalle como enviado ANTES de mandarlo: si el vigía corre
-          // mientras sale el mensaje, no manda un segundo desglose. Si el envío falla, se restaura la marca previa.
-          let prevDet = null, detMarcado = false;
-          if (ventana) {
-            try { prevDet = await env.DB.prepare("SELECT cobro_at, sent_at FROM corte_detalle_sent WHERE phone=?").bind(tel).first(); } catch (_) {}
-            try { await env.DB.prepare("INSERT INTO corte_detalle_sent (phone, cobro_at, sent_at) VALUES (?,?,?) ON CONFLICT(phone) DO UPDATE SET cobro_at=excluded.cobro_at, sent_at=excluded.sent_at").bind(tel, lockNow, lockNow).run(); detMarcado = true; } catch (_) {}
-          }
-          const restaurarDet = async () => {
-            if (!detMarcado) return;
-            try {
-              if (prevDet) await env.DB.prepare("UPDATE corte_detalle_sent SET cobro_at=?, sent_at=? WHERE phone=? AND sent_at=?").bind(prevDet.cobro_at, prevDet.sent_at, tel, lockNow).run();
-              else await env.DB.prepare("DELETE FROM corte_detalle_sent WHERE phone=? AND sent_at=?").bind(tel, lockNow).run();
-            } catch (_) {}
-          };
-          // En ventana → texto libre (desglose completo). Fuera de ventana → plantilla aprobada
-          // corte_cobro_semanal ({{1}}=nombre, {{2}}=total). Ambas dejan los pedidos en 'cobrando' (para el vigía).
-          let r, via;
-          try {
-            if (ventana) { via = 'texto'; r = await corteSend(env, tel, corteCobroMsg(g)); }
-            else {
-              const _nom = String(g.cliente_nombre || '').trim().split(/\s+/)[0] || '';
-              const _tot = g.sena ? '$' + Math.round(g.total - g.sena).toLocaleString('es-AR') + ' (ya descontamos tu seña de $' + Math.round(g.sena).toLocaleString('es-AR') + ')' : '$' + Number(g.total || 0).toLocaleString('es-AR');
-              via = 'plantilla';
-              const _tpl = await corteCobroTpl(env);
-              r = await waSendTemplate(env, tel, _tpl, 'es_AR', [_nom, _tot]);
-              if (r && r.ok) { try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '', 1)").bind(new Date().toISOString(), r.id || ('corte-cobro-tpl:' + tel + ':' + Date.now()), tel, '[plantilla ' + _tpl + '] total ' + _tot).run(); } catch (_) {} }
-            }
-          } catch (_) { r = { ok: false }; } // una excepción del envío no puede dejar el candado tomado
-          if (r && r.ok) {
-            // Pasan a 'cobrando' EXACTAMENTE las filas que se cobraron en este mensaje (por id). Las que el vigía haya
-            // marcado pagado/parcial mientras salía el mensaje NO se tocan.
-            const cobIds = rows.map(x => x.id);
-            if (g.sena) {
-              // Con seña: arranca como pago parcial con la seña anotada (sin comprobantes): corteVigiaParcial suma el resto.
-              try { await env.DB.prepare("UPDATE corte_pedidos SET estado_pago='parcial', updated_at=? WHERE estado_pago IN ('pendiente','cobrando') AND id IN (" + cobIds.map(() => '?').join(',') + ")").bind(nowIso, ...cobIds).run(); } catch (_) {}
-              try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_pago_parcial (phone TEXT PRIMARY KEY, total REAL, pagado REAL, montos TEXT, wamids TEXT, desde TEXT, updated_at TEXT)").run(); } catch (_) {}
-              try { await env.DB.prepare("INSERT INTO corte_pago_parcial (phone, total, pagado, montos, wamids, desde, updated_at) VALUES (?, ?, ?, '[]', '[]', ?, ?) ON CONFLICT(phone) DO UPDATE SET total=excluded.total, pagado=excluded.pagado, montos='[]', wamids='[]', desde=excluded.desde, updated_at=excluded.updated_at").bind(tel, g.total, g.sena, nowIso, nowIso).run(); } catch (_) {}
-              await corteSenaAplicar(env, senaCr.ids, g.total, nowIso);
-            } else {
-              try { await env.DB.prepare("UPDATE corte_pedidos SET estado_pago='cobrando', updated_at=? WHERE estado_pago IN ('pendiente','cobrando') AND id IN (" + cobIds.map(() => '?').join(',') + ")").bind(nowIso, ...cobIds).run(); } catch (_) {}
-            }
-            // Dedup del DETALLE para este cobro:
-            //  · salió como TEXTO → ya quedó marcado ANTES del envío (ese mensaje ES el desglose; caso Daniel, 5-oct).
-            //  · salió como PLANTILLA (solo total) → borramos la marca: el desglose sale cuando conteste.
-            if (via !== 'texto') { try { await env.DB.prepare("DELETE FROM corte_detalle_sent WHERE phone=?").bind(tel).run(); } catch (_) {} }
-            else if (!detMarcado) { try { await env.DB.prepare("INSERT INTO corte_detalle_sent (phone, cobro_at, sent_at) VALUES (?,?,?) ON CONFLICT(phone) DO UPDATE SET cobro_at=excluded.cobro_at, sent_at=excluded.sent_at").bind(tel, nowIso, nowIso).run(); } catch (_) {} }
-            if (corteLabelId) { try { await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, datetime('now'))").bind(tel, corteLabelId).run(); } catch (_) {} }
-            res.push({ tel, ok: true, total: g.total, via, recobro: esRecobro, sena: g.sena || 0 });
-          } else { await restaurarDet(); await soltarLock(); res.push({ tel, ok: false, error: 'no se pudo enviar', total: g.total, via }); }
-        }
+        for (const tel of [...new Set(tels)]) res.push(await corteCobrarUno(env, tel, { recobrar: recobrarSet.has(tel), forzar: forzarSet.has(tel), tandaId, nowIso, nowMs, ltvGuard, dueniosGuard, corteLabelId }));
         return res;
         })();
         ctx.waitUntil(work.catch(() => {}));
