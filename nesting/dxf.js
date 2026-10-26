@@ -196,7 +196,9 @@
     return { pts, cerrado: entera };
   }
 
-  // Una entidad a subtrazos (puntos [x, y] o [x, y, z] del universal del bloque); null si no dibuja nada que se corte.
+  // Una entidad a subtrazos (puntos [x, y] o [x, y, z] del universal del bloque); null si no dibuja nada que se corte. curva:
+  // si es una curva pasada a tramos rectos (un arco corto puede quedar en un solo tramo) o son tramos exactos (LINE, una
+  // polilínea sin curvas): unir() lo usa para la tolerancia de una T.
   function geometria(e, tol, av) {
     const tr = enOcs(ocs(e), num(e, 38, num(e, 30, 0))); // ARC, CIRCLE y LWPOLYLINE: en su OCS, a su elevación
     switch (e.tipo) {
@@ -209,17 +211,17 @@
         let vuelta = mod(num(e, 51, 360) - d0, 360);
         if (vuelta < 1e-9) vuelta = 360;
         const pts = []; arco(pts, cx, cy, r, a0, a0 + vuelta * Math.PI / 180, tol, true);
-        return [{ pts: tr(pts), cerrado: false }];
+        return [{ pts: tr(pts), cerrado: false, curva: true }];
       }
       case 'CIRCLE': {
         const cx = num(e, 10, 0), cy = num(e, 20, 0), r = num(e, 40, 0);
         if (!(r > 0)) return null;
         const pts = []; arco(pts, cx, cy, r, 0, 2 * Math.PI, tol, true); pts.pop();
         if (pts.length < 8) { pts.length = 0; for (let i = 0; i < 8; i++) pts.push([cx + r * Math.cos(i * Math.PI / 4), cy + r * Math.sin(i * Math.PI / 4)]); }
-        return [{ pts: tr(pts), cerrado: true, circulo: true }];
+        return [{ pts: tr(pts), cerrado: true, circulo: true, curva: true }];
       }
-      case 'ELLIPSE': return [elipse(e, tol)];
-      case 'SPLINE': { const s = spline(e, tol, av); return s ? [s] : null; }
+      case 'ELLIPSE': return [Object.assign(elipse(e, tol), { curva: true })];
+      case 'SPLINE': { const s = spline(e, tol, av); return s ? [Object.assign(s, { curva: true })] : null; }
       case 'LWPOLYLINE': {
         const flag = Math.round(num(e, 70, 0)), vs = [];
         let v = null;
@@ -238,7 +240,7 @@
     const pts = [vs[0].p];
     for (let i = 1; i < vs.length; i++) bulge(pts, vs[i - 1].p, vs[i].p, vs[i - 1].b, tol);
     if (cerrado) { bulge(pts, vs[vs.length - 1].p, vs[0].p, vs[vs.length - 1].b, tol); pts.pop(); }
-    return [{ pts: tr(pts), cerrado: cerrado && pts.length >= 3 }];
+    return [{ pts: tr(pts), cerrado: cerrado && pts.length >= 3, curva: vs.some((v) => Math.abs(v.b) >= 1e-9) }];
   }
 
   // Lee el DXF. tol = error máximo de las curvas, en mm. Devuelve { els, unidades, unidadConocida, factor, textos,
@@ -375,7 +377,7 @@
       for (const s of subs) {
         const pts = s.pts.filter((p) => isFinite(p[0]) && isFinite(p[1])).map(([x, y, z]) => f(x, y, isFinite(z) ? z : 0));
         puntos += pts.length;
-        if (pts.length >= 2) out.push({ pts, cerrado: s.cerrado && pts.length >= 3, circulo: !!s.circulo, ent: e.tipo });
+        if (pts.length >= 2) out.push({ pts, cerrado: s.cerrado && pts.length >= 3, circulo: !!s.circulo, curva: !!s.curva, ent: e.tipo });
       }
       if (puntos > MAX_PUNTOS) throw new Error('El DXF es demasiado grande para leerlo acá (más de 5 millones de puntos). Puede estar roto.');
       if (out.length) els.push({ subs: out, capa, rgb });
@@ -394,34 +396,44 @@
   }
 
   // ───────────── unir trazos sueltos ─────────────
-  // abiertos: [{pts}] (trazos abiertos de un mismo tipo). Arma un grafo: cada trazo es una arista entre sus dos puntas (nodos).
+  // abiertos: [{pts, curva}] (trazos abiertos de un mismo tipo; curva: si es una curva pasada a tramos rectos; si no viene, es
+  // curva el trazo de más de dos puntos). Arma un grafo: cada trazo es una arista entre sus dos puntas (nodos).
   //  1. Las puntas prácticamente iguales (a 0,0001 mm o menos) son el mismo nodo, y los trazos repetidos (entre los mismos
   //     nodos y por el mismo camino) se toman una vez.
-  //  2. Las puntas que quedan sueltas se juntan de a dos, las más cercanas primero, si están a tol o menos.
+  //  2. Las puntas que quedan sueltas se juntan por grupos, las más cercanas primero: un grupo son puntas que están todas a tol
+  //     o menos entre sí (dos puntas que no se tocan, o tres o cuatro brazos que llegan casi al centro de una cruz).
   //  3. Una punta que cae a tol o menos del medio de otro trazo lo parte ahí: una T (Fusion no parte una recta cuando otra
-  //     termina en su medio). Vale también para un nodo donde ya se juntan dos o más trazos (un "+": dos trazos que terminan
-  //     en el mismo punto del medio de una recta entera). Contra una curva vale tol + curva (el error de cuerda con el que se
-  //     pasó a tramos rectos): la punta está sobre la curva de verdad, no sobre los tramos.
-  //  4. Cada zona que encierran los trazos es una figura cerrada (las caras del dibujo): dos piezas pegadas por un lado salen
-  //     como dos figuras y el lado compartido va en las dos. Un hueco que toca el borde en una punta sale aparte. No depende
-  //     del orden de los trazos en el archivo.
+  //     termina en su medio). Si cae a tol o menos de una punta de ese trazo donde ya se juntan otros, se pega a ese nodo (no
+  //     deja un pedacito). Vale también para un nodo donde ya se juntan dos o más trazos (un "+": dos trazos que terminan en el
+  //     mismo punto del medio de una recta entera), y dos nodos así del mismo dibujo, de cadenas distintas, a tol o menos son
+  //     uno. Contra una curva vale tol + curva (el error de cuerda con el que se pasó a tramos rectos): la punta está sobre la
+  //     curva de verdad, no sobre los tramos.
+  //  4. Las puntas de los trazos van al lugar de su nodo (así salen todos del mismo punto, sin cruces microscópicos) y se
+  //     vuelven a buscar los repetidos. Cada zona que encierran los trazos es una figura cerrada (las caras del dibujo): dos
+  //     piezas pegadas por un lado salen como dos figuras y el lado compartido va en las dos. Un hueco que toca el borde en
+  //     una punta sale aparte. No depende del orden de los trazos en el archivo.
   //  5. Lo que no encierra nada (colas, líneas sueltas, puentes entre figuras) queda abierto, en cadenas que siguen por donde
   //     va más derecho, sin pasar por las figuras.
   //  6. Dos trazos que se cruzan sin una punta ahí no se parten solos. Solo si son del mismo dibujo conectado y uno de los dos
   //     va de un nodo a otro distinto (una divisoria, como las dos rectas enteras de una ventana pegadas al borde): ahí hace
   //     falta para cerrar las figuras. Dos letras superpuestas (dibujos aparte, o contornos que se tocan en un punto) o una
   //     línea suelta que cruza una pieza siguen enteras, y el cruce se marca (cruzan).
-  // Ningún trazo se tira por corto. Devuelve { cerradas: [pts], abiertas: [{pts, falta, toca}], sueltas: [[x, y]],
-  // cruces: [[x, y]], cruzan: [[x, y]], repetidos, partidos, cruzadas, usados, nodos }. falta: lo que le falta a una abierta
-  // para cerrar; toca: sale de una figura cerrada (ahí falta no es un hueco). cruces: nodos donde se juntan más de dos trazos;
-  // cruzan: cruces que no se partieron; cruzadas: cruces que se partieron. usados: cuántos trazos forman parte de alguna
-  // figura cerrada.
+  // Ningún trazo se tira por corto (sí uno que queda entero adentro del nodo donde se juntaron sus dos puntas). Devuelve {
+  // cerradas: [pts], abiertas: [{pts, falta, toca}], sueltas: [[x, y]], cruces: [[x, y]], cruzan: [[x, y]], repetidos,
+  // partidos, cruzadas, usados, nodos, cerradasPorPartir, crucesSinBuscar, finas }. falta: lo que le falta a una abierta para cerrar;
+  // toca: sale de una figura cerrada (ahí falta no es un hueco). cruces: nodos donde se juntan más de dos trazos; cruzan:
+  // cruces que no se partieron; cruzadas: cruces que se partieron. usados: cuántos trazos forman parte de alguna figura
+  // cerrada. cerradasPorPartir: figuras cerradas que usan un pedazo de un trazo partido (por una T o un cruce).
+  // crucesSinBuscar: el dibujo es demasiado grande y los cruces no se buscaron. finas: figuras cerradas más finas que tol (2 ×
+  // área / perímetro: el ancho, en una tira; en una astilla en punta, la mitad), como el lado de una pieza dibujado dos veces,
+  // corrido más de 0,5 mm: conviene mirarlas.
   function unir(abiertos, tol, curva) {
     tol = Math.max(1e-6, +tol || 0); curva = Math.max(0, +curva || 0);
     const eps = Math.min(tol, 1e-4), d2 = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1]), ck = (x, y) => x + ',' + y;
     const largoDe = (p) => { let L = 0; for (let i = 1; i < p.length; i++) L += d2(p[i], p[i - 1]); return L; };
     // Aristas sin puntos repetidos seguidos (con un vértice doble no se puede medir para dónde sale). P: puntas; padre: qué
     // puntas son el mismo nodo (unión de conjuntos); cpadre: qué puntas están en el mismo dibujo conectado.
+    const esCurva = (e) => (e.curva != null ? !!e.curva : e.pts.length > 2);
     let E = [];
     const P = [], padre = [], cpadre = [];
     const punta = (p) => { P.push(p); padre.push(P.length - 1); cpadre.push(P.length - 1); return P.length - 1; };
@@ -436,7 +448,7 @@
       if (p.length < 2) return; // un punto: no dibuja nada
       const ia = punta(p[0]), ib = punta(p[p.length - 1]);
       juntar(cpadre, ia, ib);
-      E.push({ pts: p, L: largoDe(p), ia, ib, src: k });
+      E.push({ pts: p, L: largoDe(p), ia, ib, src: k, curva: s.curva });
     });
     // 1. puntas prácticamente iguales (grilla de celdas de eps; en cada celda queda una punta por nodo)
     const celdas = new Map();
@@ -484,7 +496,7 @@
     };
     sacarRepetidos();
     const grados = () => { const g = new Map(); for (const e of E) for (const n of [nodo(e.ia), nodo(e.ib)]) g.set(n, (g.get(n) || 0) + 1); return g; };
-    // 2. puntas sueltas: de a dos, las más cercanas primero, a tol o menos
+    // 2. puntas sueltas: por grupos, las más cercanas primero; en un grupo están todas a tol o menos entre sí
     let gr = grados();
     const largoComp = new Map();
     for (const e of E) { const c = raizDe(cpadre, e.ia); largoComp.set(c, (largoComp.get(c) || 0) + e.L); }
@@ -503,13 +515,16 @@
       }
     }
     pares.sort((u, v) => u[0] - v[0] || u[1] - v[1] || u[2] - v[2]);
-    const tomada = new Set();
+    const grupo = new Map(); // nodo → las puntas sueltas que junta
+    for (const n of sueltas0) grupo.set(n, [n]);
     for (const [, n, m] of pares) {
-      if (tomada.has(n) || tomada.has(m)) continue;
+      const a = nodo(n), b = nodo(m);
+      if (a === b) continue;
       const cn = raizDe(cpadre, n), cm = raizDe(cpadre, m);
       if (cn === cm && largoComp.get(cn) <= 3 * tol) continue; // las dos puntas de un trazo cortito: cerrarlo no da una figura
-      tomada.add(n); tomada.add(m);
-      juntar(padre, n, m);
+      const A = grupo.get(a), B = grupo.get(b);
+      if (A.length * B.length > 4096 || !A.every((i) => B.every((j) => d2(P[i], P[j]) <= tol))) continue;
+      const r = juntar(padre, a, b); grupo.set(r, A.concat(B)); grupo.delete(r === a ? b : a);
       if (cn !== cm) largoComp.set(juntar(cpadre, cn, cm), largoComp.get(cn) + largoComp.get(cm));
     }
     // Cadenas: los trazos seguidos por nodos donde se juntan solo dos (e.cad). Devuelve, de cada cadena, los nodos de sus
@@ -523,7 +538,7 @@
       return puntas;
     };
     // 3. T: una punta (suelta, o un nodo donde ya se juntan trazos) a tol o menos del medio de otro trazo, o de su propio
-    //    trazo lejos de esa punta
+    //    trazo lejos de esa punta; o, si es un nodo donde se juntan trazos, a tol o menos de otro nodo así
     let partidos = 0;
     gr = grados();
     // grilla de trazos: cada uno en las celdas que toca su caja (agrandada en tolT) o, si la caja es grande (una recta larga
@@ -560,9 +575,15 @@
       let mejor = null;
       for (const e of cand) {
         if (!e.bb) caja(e);
-        const lim = tol + (e.pts.length > 2 ? curva : 0); // un tramo recto suelto (LINE) es exacto; una polilínea puede ser una curva
+        const lim = tol + (esCurva(e) ? curva : 0); // un tramo recto (LINE) es exacto; una curva pasada a tramos, no
         if (p[0] < e.bb[0] - lim || p[0] > e.bb[2] + lim || p[1] < e.bb[1] - lim || p[1] > e.bb[3] + lim) continue;
         if (g > 1 && (raizDe(cpadre, e.ia) !== comp || propias.has(e.cad))) continue;
+        // un nodo donde se juntan trazos a tol o menos de la punta de otra cadena del mismo dibujo (un nodo que no está en sus
+        // cadenas): es el mismo nodo (los cuatro brazos de una cruz que se juntaron de a dos)
+        if (g > 1) for (const [j, q] of [[e.ia, e.pts[0]], [e.ib, e.pts[e.pts.length - 1]]]) {
+          const m = nodo(j), d = d2(p, q);
+          if (m !== n && d <= tol && (!mejor || d < mejor.d) && !cand.some((o) => (nodo(o.ia) === m || nodo(o.ib) === m) && propias.has(o.cad))) mejor = { d, m };
+        }
         const llegaA = nodo(e.ia) === n, llegaB = nodo(e.ib) === n;
         let acum = 0;
         for (let i = 1; i < e.pts.length; i++) {
@@ -576,23 +597,28 @@
           const noT = (llegaA && s <= 3 * lim) || (llegaB && e.L - s <= 3 * lim) || (g === 1
             ? (s <= 2 * lim && grado(e.ia) === 1) || (e.L - s <= 2 * lim && grado(e.ib) === 1)
             : s <= 2 * lim || e.L - s <= 2 * lim);
-          if (d <= lim && (!mejor || d < mejor.d) && !noT) mejor = { d, e, i, q };
+          if (d <= lim && (!mejor || d < mejor.d) && !noT) mejor = { d, e, i, q, lim };
           acum += L;
         }
       }
       if (!mejor) return;
-      const { e, i, q } = mejor, m = e.pts.length;
       let destino;
-      if (i === 1 && d2(q, e.pts[0]) <= eps) destino = e.ia; // cae en una punta: es ese nodo
-      else if (i === m - 1 && d2(q, e.pts[m - 1]) <= eps) destino = e.ib;
-      else { // parte el trazo ahí
-        const k = d2(q, e.pts[i - 1]) <= eps ? i - 1 : d2(q, e.pts[i]) <= eps ? i : -1;
-        const A = k >= 0 ? e.pts.slice(0, k + 1) : e.pts.slice(0, i).concat([q]), B = k >= 0 ? e.pts.slice(k) : [q].concat(e.pts.slice(i));
-        destino = punta(A[A.length - 1]); gr.set(destino, 2); juntar(cpadre, destino, e.ia);
-        const nueva = { pts: B, L: largoDe(B), ia: destino, ib: e.ib, src: e.src, cad: e.cad };
-        E.push(nueva); indexar(nueva);
-        Object.assign(e, { pts: A, L: largoDe(A), ib: destino, bb: null }); // queda en las celdas de antes: sobra, no falta
-        partidos++;
+      if (mejor.m != null) destino = mejor.m; // otro nodo
+      else {
+        const { e, i, q, lim } = mejor, m = e.pts.length;
+        // cae en una punta, o una punta suelta cae a lim o menos de una punta donde ya se juntan trazos: es ese nodo (partir
+        // ahí dejaría un pedacito, y el lado de una pieza dibujado dos veces no se tomaría como repetido)
+        if ((i === 1 && d2(q, e.pts[0]) <= eps) || (g === 1 && grado(e.ia) > 1 && d2(q, e.pts[0]) <= lim)) destino = e.ia;
+        else if ((i === m - 1 && d2(q, e.pts[m - 1]) <= eps) || (g === 1 && grado(e.ib) > 1 && d2(q, e.pts[m - 1]) <= lim)) destino = e.ib;
+        else { // parte el trazo ahí
+          const k = d2(q, e.pts[i - 1]) <= eps ? i - 1 : d2(q, e.pts[i]) <= eps ? i : -1;
+          const A = k >= 0 ? e.pts.slice(0, k + 1) : e.pts.slice(0, i).concat([q]), B = k >= 0 ? e.pts.slice(k) : [q].concat(e.pts.slice(i));
+          destino = punta(A[A.length - 1]); gr.set(destino, 2); juntar(cpadre, destino, e.ia);
+          const cv = esCurva(e), nueva = { pts: B, L: largoDe(B), ia: destino, ib: e.ib, src: e.src, cad: e.cad, curva: cv, partido: true };
+          E.push(nueva); indexar(nueva);
+          Object.assign(e, { pts: A, L: largoDe(A), ib: destino, bb: null, curva: cv, partido: true }); // queda en las celdas de antes: sobra, no falta
+          partidos++;
+        }
       }
       pegar(n, destino); mirados.add(nodo(n));
     };
@@ -605,7 +631,39 @@
         buscarT(n);
       }
     }
-    if (partidos || tomada.size) sacarRepetidos();
+    // Las puntas de cada trazo van al lugar de su nodo (donde coinciden más puntas: en una T, el punto del trazo partido; en una
+    // esquina con una punta corrida, la esquina; si no coinciden ningunas, el promedio) y se sacan los puntos del trazo que
+    // quedan a 2·r o menos del nodo (r: lo más lejos que estaba una punta). Así todos salen del mismo punto en su dirección de
+    // verdad: puntas que no coincidían dejaban cruces microscópicos que desordenaban las caras. Un trazo que queda entero
+    // adentro del nodo se saca.
+    const asentar = () => {
+      const llegan = new Map();
+      for (const e of E) for (const [i, q] of [[e.ia, e.pts[0]], [e.ib, e.pts[e.pts.length - 1]]]) { const n = nodo(i), l = llegan.get(n); if (l) l.push(q); else llegan.set(n, [q]); }
+      const lugar = new Map();
+      for (const [n, l] of llegan) {
+        if (l.every((q) => d2(q, l[0]) <= 1e-9)) continue; // coinciden: no se toca
+        let c = null, k0 = 1;
+        if (l.length <= 64) for (const a of l) { let k = 0; for (const b of l) if (d2(a, b) <= eps) k++; if (k > k0) { k0 = k; c = a; } }
+        if (!c) { let x = 0, y = 0; for (const q of l) { x += q[0]; y += q[1]; } c = [x / l.length, y / l.length]; }
+        let r = 0; for (const q of l) r = Math.max(r, d2(q, c));
+        lugar.set(n, { c, R: 2 * r });
+      }
+      if (!lugar.size) return;
+      E = E.filter((e) => {
+        const a = lugar.get(nodo(e.ia)), b = lugar.get(nodo(e.ib));
+        if (!a && !b) return true;
+        let p = e.pts;
+        if (a) { let k = 1; while (k < p.length - 1 && d2(p[k], a.c) <= a.R) k++; p = [a.c].concat(p.slice(k)); }
+        if (b) { let k = p.length - 2; while (k > 0 && d2(p[k], b.c) <= b.R) k--; p = p.slice(0, k + 1).concat([b.c]); }
+        const q = [p[0]];
+        for (let i = 1; i < p.length; i++) if (d2(p[i], q[q.length - 1]) > 1e-9) q.push(p[i]);
+        if (q.length < 2) return false; // quedó adentro del nodo
+        Object.assign(e, { pts: q, L: largoDe(q), bb: null });
+        return true;
+      });
+    };
+    asentar();
+    sacarRepetidos();
     const caras = () => {
       // 4. caras. Por cada nodo, los trazos que salen ordenados por ángulo; cada cara se recorre dejándola a la izquierda: al
       // llegar a un nodo se sigue por el trazo que sale justo antes (en sentido horario) del que vuelve por donde se llegó.
@@ -641,11 +699,13 @@
       const sig = (h) => { const t = h ^ 1, gi = nodos[origen(t)].giro; return gi[(pos[t] - 1 + gi.length) % gi.length].h; };
       const area = (p) => { let s = 0; for (let i = 0, j = p.length - 1; i < p.length; j = i++) s += p[j][0] * p[i][1] - p[i][0] * p[j][1]; return s / 2; };
       const vista = new Uint8Array(2 * nE), enFigura = new Uint8Array(nE), cerradas = [];
+      let porPartir = 0;
       const guardar = (pts, ars) => {
         if (pts.length > 1 && d2(pts[0], pts[pts.length - 1]) <= eps) pts.pop();
         if (pts.length < 3 || !(area(pts) > 1e-6)) return; // horaria: el borde de afuera, o un hueco que toca el borde
         cerradas.push(pts);
         for (const k of ars) enFigura[k] = 1;
+        if (ars.some((k) => E[k].partido)) porPartir++;
       };
       for (let h0 = 0; h0 < 2 * nE; h0++) {
         if (vista[h0] || fuera[h0 >> 1]) continue;
@@ -689,7 +749,7 @@
           h = pareja.get(h ^ 1); // sigue por la pareja del que vuelve
         }
         if (largoDe(pts) <= 2 * eps) return; // un punto: no dibuja nada
-        if (n === n0 && pareja.has(h0)) { if (d2(pts[0], pts[pts.length - 1]) <= eps) pts.pop(); if (pts.length >= 3) { cerradas.push(pts); for (const k of ars) enFigura[k] = 1; return; } } // una vuelta que se cruza a sí misma (un 8): queda cerrada, como vino
+        if (n === n0 && pareja.has(h0)) { if (d2(pts[0], pts[pts.length - 1]) <= eps) pts.pop(); if (pts.length >= 3) { cerradas.push(pts); for (const k of ars) enFigura[k] = 1; if (ars.some((k) => E[k].partido)) porPartir++; return; } } // una vuelta que se cruza a sí misma (un 8): queda cerrada, como vino
         abiertas.push({ pts, falta: d2(pts[0], pts[pts.length - 1]), toca: !!(toca[n0] || toca[n]) });
       };
       salLibre.forEach((l) => { for (const h of l) if (!hecha[h >> 1] && !pareja.has(h)) camino(h); });
@@ -697,17 +757,17 @@
       const sueltas = [], cruces = [], usados = new Set();
       nodos.forEach((nd) => { if (nd.sal.length === 1) sueltas.push(nd.p); else if (nd.sal.length > 2) cruces.push(nd.p); });
       E.forEach((e, k) => { if (enFigura[k]) usados.add(e.src); });
-      return { cerradas, abiertas, sueltas, cruces, usados: usados.size, nodos: nodos.length, enFigura, abLargo: abiertas.reduce((s, o) => s + largoDe(o.pts), 0) };
+      return { cerradas, abiertas, sueltas, cruces, usados: usados.size, nodos: nodos.length, enFigura, porPartir, abLargo: abiertas.reduce((s, o) => s + largoDe(o.pts), 0) };
     };
-    let R = caras(), cruzadas = 0, partidas = new Set();
+    let R = caras(), cruzadas = 0, partidas = new Set(), sinBuscar = false;
     // 6. cruces: dos tramos de trazos distintos que se cruzan lejos de sus puntas (a más de 2·tol: si no, es una T o una
     //    esquina) y en un ángulo de 15° o más (más cerrado son dos trazos casi encimados, como la misma curva pasada dos veces
     //    a tramos rectos de distinto largo, que se cruzan a cada rato). Grilla de tramos de C de lado; cada cruce se cuenta en
-    //    la celda donde cae.
+    //    la celda donde cae. Con un dibujo desmedido no se buscan y se avisa (sinBuscar).
     const cruzamientos = () => {
       const celdas = new Map(), out = [];
       let total = 0; for (const e of E) total += e.pts.length;
-      if (total > 4e5) return out; // demasiado grande para buscarlos
+      if (total > 4e5) { sinBuscar = true; return out; } // demasiado grande para buscarlos
       let pares = 3e6; // como mucho (una estrella de miles de rayos cae entera en una celda): si no alcanza, no se buscan
       const anotar = (key, r) => { const l = celdas.get(key); if (l) l.push(r); else celdas.set(key, [r]); };
       E.forEach((e, k) => {
@@ -732,7 +792,7 @@
         for (let u = 0; u < l.length; u++) for (let v = u + 1; v < l.length; v++) {
           const A = l[u], B = l[v];
           if (A.k === B.k) continue;
-          if (--pares < 0) return [];
+          if (--pares < 0) { sinBuscar = true; return []; } // partir solo algunos dejaría el dibujo a medias (y tarda mucho más)
           const ea = E[A.k], eb = E[B.k], p = ea.pts[A.i - 1], p2 = ea.pts[A.i], q = eb.pts[B.i - 1], q2 = eb.pts[B.i];
           const rx = p2[0] - p[0], ry = p2[1] - p[1], sx = q2[0] - q[0], sy = q2[1] - q[1], den = rx * sy - ry * sx;
           if (Math.abs(den) < 0.2588 * A.L * B.L) continue; // |sen| < sen 15°: paralelos o casi encimados, no es un cruce
@@ -779,16 +839,17 @@
             if (d2(x, pts[m - 1]) <= eps) { juntar(padre, n, e.ib); continue; }
             if (d2(x, pts[0]) <= eps) { juntar(padre, n, e.ia); continue; }
             const j = d2(x, pts[i - 1]) <= eps ? i - 1 : i < m && d2(x, pts[i]) <= eps ? i : -1;
-            const A = j >= 0 ? pts.slice(0, j + 1) : pts.slice(0, i).concat([x]), B = j >= 0 ? pts.slice(j) : [x].concat(pts.slice(i));
-            E.push({ pts: B, L: largoDe(B), ia: n, ib: e.ib, src: e.src });
-            Object.assign(e, { pts: A, L: largoDe(A), ib: n, bb: null });
+            const A = j >= 0 ? pts.slice(0, j + 1) : pts.slice(0, i).concat([x]), B = j >= 0 ? pts.slice(j) : [x].concat(pts.slice(i)), cv = esCurva(e);
+            E.push({ pts: B, L: largoDe(B), ia: n, ib: e.ib, src: e.src, curva: cv, partido: true });
+            Object.assign(e, { pts: A, L: largoDe(A), ib: n, bb: null, curva: cv, partido: true });
           }
         }
-        R = caras(); cruzadas = aPartir.length; partidas = new Set(aPartir);
+        asentar(); R = caras(); cruzadas = aPartir.length; partidas = new Set(aPartir);
       }
     }
     const cruzan = cr.filter((c) => !partidas.has(c)).map((c) => c.x);
-    return { cerradas: R.cerradas, abiertas: R.abiertas, sueltas: R.sueltas, cruces: R.cruces, cruzan, repetidos, partidos, cruzadas, usados: R.usados, nodos: R.nodos };
+    const fina = (p) => { let a = 0; for (let i = 0, j = p.length - 1; i < p.length; j = i++) a += p[j][0] * p[i][1] - p[i][0] * p[j][1]; return Math.abs(a) < tol * (largoDe(p) + d2(p[0], p[p.length - 1])); };
+    return { cerradas: R.cerradas, abiertas: R.abiertas, sueltas: R.sueltas, cruces: R.cruces, cruzan, repetidos, partidos, cruzadas, usados: R.usados, nodos: R.nodos, cerradasPorPartir: R.porPartir, crucesSinBuscar: sinBuscar, finas: R.cerradas.filter(fina) };
   }
 
   const api = { leer, unir, aciRgb };

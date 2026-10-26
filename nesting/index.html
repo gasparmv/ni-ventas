@@ -281,8 +281,8 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" integrity="sha384-/1qUCSGwTur9vjf/z9lmu/eCUYbpOTgSjmpbMQZ1/CtX2v/WcAIKqRv+U1DUCG6e" crossorigin="anonymous"></script>
 <script src="nest-core.js?v=4"></script>
 <script src="clipper.js?v=1"></script>
-<script src="gcode.js?v=4"></script>
-<script src="dxf.js?v=3"></script>
+<script src="gcode.js?v=5"></script>
+<script src="dxf.js?v=4"></script>
 <script>
 'use strict';
 // Nesting de placas para el corte (Gaspar 25-oct-2026). Lee los .ai/.pdf de Emma con pdf.js, separa por color (corte rojo,
@@ -301,7 +301,7 @@ const VERSION_MOTOR = '4'; // subirla (y la de nest-core.js?v= arriba) cada vez 
 const TOLS_UNION = [0.001, 0.01, 0.05, 0.1, 0.5, 1, 2]; // mm: a cuánto se toman como la misma las puntas de dos trazos sueltos
 const TOL_UNION = 0.01;
 const CIERRE_SOLO = 2;       // mm: un contorno de corte abierto (3 puntos o más) que no cierra por esto o menos se cierra solo
-const S = { archivos: [], sec: 0, mapa: {}, revZoom: new Map(), piezas: [], grandes: [], cfg: cargarCfg(), recortes: cargarRecortes(), recNest: [], perfiles: cargarPerfiles(), gcodeCache: new Map(), mejor: null, firmaMejor: '', workers: [], firmaWorkers: '', vivos: 0, corridas: 0, t0: 0, ronda: 0, corriendo: false, timer: null, nest: null, cfgNest: null, pintarPend: false };
+const S = { archivos: [], sec: 0, mapa: {}, mapaDef: {}, revZoom: new Map(), piezas: [], grandes: [], cfg: cargarCfg(), recortes: cargarRecortes(), recNest: [], perfiles: cargarPerfiles(), gcodeCache: new Map(), mejor: null, firmaMejor: '', workers: [], firmaWorkers: '', vivos: 0, corridas: 0, t0: 0, ronda: 0, corriendo: false, timer: null, nest: null, cfgNest: null, pintarPend: false };
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const fmt = (n, d = 0) => Number(n).toLocaleString('es-AR', { minimumFractionDigits: d, maximumFractionDigits: d });
@@ -465,7 +465,7 @@ async function leerArchivo(file, a) {
 function leerDxf(buf, a) {
   if (!window.NestDxf) throw new Error('No se pudo cargar el lector de DXF. Recargá la página.');
   const r = NestDxf.leer(new TextDecoder('utf-8').decode(buf), TOL_CURVA);
-  const els = r.els.map((el) => ({ subs: el.subs.map((s) => ({ pts: s.pts, cerrado: s.cerrado, lw: 0 })), trazo: true, relleno: false, sc: el.rgb, fc: el.rgb, capa: el.capa, base: 'dxf ' + hex(el.rgb) + ' ' + el.capa }));
+  const els = r.els.map((el) => ({ subs: el.subs.map((s) => ({ pts: s.pts, cerrado: s.cerrado, lw: 0, curva: s.curva })), trazo: true, relleno: false, sc: el.rgb, fc: el.rgb, capa: el.capa, base: 'dxf ' + hex(el.rgb) + ' ' + el.capa }));
   if (!els.length) throw new Error('El DXF no tiene nada que se pueda cortar: ni líneas, ni arcos, ni círculos, ni curvas.');
   const libres = els.filter((el) => !claseCapa(el.capa)), colores = new Set(libres.map((el) => hex(el.sc)));
   const hayRojo = libres.some((el) => claseDefecto(el.sc) === 'corte'), corteNombrado = els.some((el) => claseCapa(el.capa) === 'corte');
@@ -498,7 +498,11 @@ function claseCapa(nom) {
 // Fila del paso 2 (clave) de cada capa y color de los DXF. El valor por defecto sale de cada archivo (depende de si viene todo
 // de un color, de si hay rojo, de si alguna capa se llama corte): si dos archivos traen la misma capa y color con distinto valor
 // por defecto (un DXF de Fusion y uno de AutoCAD), la fila va por archivo, con su nombre, así se corrige cada uno. Lo que
-// Gaspar eligió sigue a sus trazos cuando una fila se parte en una por archivo o vuelve a juntarse.
+// Gaspar eligió sigue a sus trazos cuando una fila se parte en una por archivo o vuelve a juntarse. Con cada elección se guarda
+// el valor por defecto que tenía la fila (S.mapaDef) y vale solo para trazos con ese mismo valor por defecto: lo que eligió
+// para la capa 0 blanca de un AutoCAD no pasa a la de un Fusion que se carga después (revisión 26-oct). La fila por archivo va
+// por el nombre del archivo: si lo quita y lo vuelve a cargar, recupera lo que había elegido.
+const elegido = (k, def) => (S.mapa[k] != null && (S.mapaDef[k] == null || S.mapaDef[k] === def) ? S.mapa[k] : null);
 function calcularClaves() {
   const grupos = new Map(); // capa y color → archivo → { a, def, antes: la clave que tenía, els }
   for (const a of S.archivos) if (a.estado === 'ok') for (const pg of a.paginas) for (const el of pg.els) {
@@ -508,21 +512,24 @@ function calcularClaves() {
     x.els.push(el);
   }
   for (const [b, g] of grupos) {
-    const xs = [...g.values()], propia = (x) => 'dxf ' + x.a.id + ' ' + b.slice(4), eraPropia = (x) => x.antes != null && x.antes !== b;
+    const xs = [...g.values()], eraPropia = (x) => x.antes != null && x.antes !== b;
+    const propia = (x) => 'dxf ' + (S.archivos.some((o) => o !== x.a && o.estado === 'ok' && o.nombre === x.a.nombre) ? x.a.nombre + ' #' + x.a.id : x.a.nombre) + ' | ' + b.slice(4);
     // por archivo: si los valores por defecto no coinciden, o si ya iba por archivo y en cada uno quedó otra cosa
-    const vale = (x) => S.mapa[eraPropia(x) ? x.antes : b] || x.def;
+    const vale = (x) => elegido(eraPropia(x) ? x.antes : b, x.def) || x.def;
     const porArchivo = new Set(xs.map((x) => x.def)).size > 1 || (xs.some(eraPropia) && new Set(xs.map(vale)).size > 1);
     const viejas = new Set();
+    const pasar = (de, k, def) => { const v = elegido(de, def); if (v != null && elegido(k, def) == null) { S.mapa[k] = v; S.mapaDef[k] = def; } };
     for (const x of xs) {
       const k = porArchivo ? propia(x) : b;
-      if (x.antes != null && x.antes !== k) { if (S.mapa[x.antes] != null && S.mapa[k] == null) S.mapa[k] = S.mapa[x.antes]; viejas.add(x.antes); } // lo que eligió en la fila de antes
+      if (x.antes != null && x.antes !== k) { pasar(x.antes, k, x.def); viejas.add(x.antes); } // lo que eligió en la fila de antes
+      else if (x.antes == null && k !== b) pasar(b, k, x.def); // recién cargado y por archivo: lo que eligió en la fila de todos
       for (const el of x.els) { el.clave = k; el.archivo = porArchivo ? x.a.nombre : null; }
     }
-    for (const k of viejas) delete S.mapa[k]; // que no reviva si la fila vuelve a cambiar
+    for (const k of viejas) { delete S.mapa[k]; delete S.mapaDef[k]; } // que no reviva si la fila vuelve a cambiar
   }
 }
 function claseDe(el) {
-  if (el.base) return { cl: S.mapa[el.clave] || el.def || 'ignorar', porTrazo: true }; // DXF: por capa y color (y archivo, si hace falta)
+  if (el.base) return { cl: elegido(el.clave, el.def) || el.def || 'ignorar', porTrazo: true }; // DXF: por capa y color (y archivo, si hace falta)
   if (el.trazo) { const k = claseColor(el.sc); if (k !== 'ignorar') return { cl: k, porTrazo: true }; }
   if (el.relleno) { const k = claseColor(el.fc); if (k !== 'ignorar') return { cl: k, porTrazo: false }; }
   return { cl: 'ignorar', porTrazo: false };
@@ -584,6 +591,33 @@ function contiene(A, B) {
 // Un contorno de corte abierto con 3 puntos o más al que le faltan CIERRE_SOLO mm o menos para cerrar se cierra solo (armar,
 // la revisión del paso 1 y los recortes dibujados usan la misma regla).
 const cierraSola = (pts) => pts.length >= 3 && dist(pts[0], pts[pts.length - 1]) <= CIERRE_SOLO;
+// Cuánto de un trazo (calado, agujero o línea de corte abierta) queda a más de SALE_PIEZA mm por fuera del contorno de su
+// pieza. El acomodo reserva solo el contorno y el código G corta el trazo entero: lo que sale cae sobre la pieza de al lado
+// (revisión 26-oct). Si ninguna arista del contorno pasa cerca del trazo, está entero adentro (duenio ya vio que la mayor parte
+// está adentro); si no, lo mide Clipper: lo que queda del trazo afuera del contorno agrandado SALE_PIEZA. cache: pieza → ese
+// contorno agrandado.
+const SALE_PIEZA = 0.5;
+function largoAfuera(pts, cerrado, pz, cache) {
+  const bb = caja(pts), P = pz.poly, m = SALE_PIEZA;
+  let cerca = false;
+  for (let i = 0, j = P.length - 1; i < P.length && !cerca; j = i++) {
+    cerca = Math.max(P[i][0], P[j][0]) >= bb.x0 - m && Math.min(P[i][0], P[j][0]) <= bb.x1 + m && Math.max(P[i][1], P[j][1]) >= bb.y0 - m && Math.min(P[i][1], P[j][1]) <= bb.y1 + m;
+  }
+  if (!cerca || !window.ClipperLib) return 0;
+  const E = 1000, aInt = (q) => q.map(([x, y]) => ({ X: Math.round(x * E), Y: Math.round(y * E) }));
+  let grande = cache.get(pz);
+  if (!grande) {
+    const co = new ClipperLib.ClipperOffset(2, 0.005 * E); grande = [];
+    co.AddPath(aInt(P), ClipperLib.JoinType.jtRound, ClipperLib.EndType.etClosedPolygon); co.Execute(grande, m * E); cache.set(pz, grande);
+  }
+  const c = new ClipperLib.Clipper(), t = new ClipperLib.PolyTree();
+  c.AddPath(aInt(cerrado ? pts.concat([pts[0]]) : pts), ClipperLib.PolyType.ptSubject, false);
+  c.AddPaths(grande, ClipperLib.PolyType.ptClip, true);
+  c.Execute(ClipperLib.ClipType.ctDifference, t, ClipperLib.PolyFillType.pftNonZero, ClipperLib.PolyFillType.pftNonZero);
+  let L = 0;
+  for (const q of ClipperLib.Clipper.OpenPathsFromPolyTree(t)) for (let i = 1; i < q.length; i++) L += Math.hypot(q[i].X - q[i - 1].X, q[i].Y - q[i - 1].Y) / E;
+  return L;
+}
 // Arma las piezas de cada página: los contornos rojos forman un árbol (cada uno adentro del más chico que lo contiene); los de
 // profundidad par son piezas y los impares, cortes de adentro de su pieza. Calados, agujeros y líneas rojas abiertas van a la
 // pieza más chica que los contiene.
@@ -591,7 +625,7 @@ function armar() {
   const piezas = [];
   for (const a of S.archivos) {
     if (a.estado !== 'ok') continue;
-    const r = a.res = { piezas: 0, calados: 0, agujeros: 0, sueltos: 0, abiertosSueltos: 0, cerrados: 0, repetidos: 0, chicos: 0, fondos: 0, ignorados: 0, anillos: 0, unidas: 0 };
+    const r = a.res = { piezas: 0, calados: 0, agujeros: 0, sueltos: 0, abiertosSueltos: 0, cerrados: 0, repetidos: 0, chicos: 0, fondos: 0, ignorados: 0, anillos: 0, unidas: 0, salen: 0 };
     for (const pg of a.paginas) {
       const cortes = [], abiertos = [], detalles = [], ignorados = [];
       const meter = (cl, s, porTrazo) => {
@@ -649,14 +683,21 @@ function armar() {
         }
         return mejor;
       };
-      const sueltos = [];
+      // lo que cruza el contorno de su pieza (más de SALE_PIEZA mm) no se corta: queda suelto, con un aviso grave
+      const sueltos = [], grandes = new Map(), sale = (s, pz) => largoAfuera(s.pts, s.cerrado, pz, grandes) > 0.01;
       for (const d of detalles) {
         const pz = duenio(d.s.pts);
-        if (pz) { if (d.cl === 'calado') { pz.calados.push(d.s); r.calados++; } else { pz.agujeros.push(d.s); r.agujeros++; } }
+        if (pz && sale(d.s, pz)) { sueltos.push(d.s); r.salen++; }
+        else if (pz) { if (d.cl === 'calado') { pz.calados.push(d.s); r.calados++; } else { pz.agujeros.push(d.s); r.agujeros++; } }
         else if (d.cl === 'calado' && !d.porTrazo) r.fondos++; // relleno blanco por fuera de las piezas: un fondo, no se corta
         else { sueltos.push(d.s); r.sueltos++; }
       }
-      for (const s of abiertos) { const pz = duenio(s.pts); if (pz) pz.abiertos.push(s.pts); else { sueltos.push(s); r.abiertosSueltos++; } }
+      for (const s of abiertos) {
+        const pz = duenio(s.pts);
+        if (pz && sale(s, pz)) { sueltos.push(s); r.salen++; }
+        else if (pz) pz.abiertos.push(s.pts);
+        else { sueltos.push(s); r.abiertosSueltos++; }
+      }
       pg.dib = { piezas: pzs, sueltos, ignorados };
       r.piezas += pzs.length;
       piezas.push(...pzs);
@@ -689,7 +730,7 @@ const LETRA_CLASE = { corte: 'c', calado: 'k', agujero: 'a', ignorar: '-' };
 function cuentaUnion(a, t) {
   let v = a.revCache.porTol.get(t);
   if (v) return v;
-  v = { tol: t, trazos: 0, usados: 0, cerradas: 0, abiertas: [], solas: [], cruces: [], cruzan: [], repetidos: 0, partidos: 0, cruzadas: 0, pags: [] };
+  v = { tol: t, trazos: 0, usados: 0, cerradas: 0, abiertas: [], solas: [], cruces: [], cruzan: [], finas: [], repetidos: 0, partidos: 0, cruzadas: 0, porPartir: 0, sinBuscar: false, pags: [] };
   for (const pg of a.paginas) {
     const u = unirPagina(pg, t);
     if (!Object.keys(u).length) continue;
@@ -697,16 +738,19 @@ function cuentaUnion(a, t) {
     for (const cl of Object.keys(u)) {
       const x = u[cl];
       v.trazos += x.trazos.length; v.usados += x.usados; v.cerradas += x.cerradas.length; v.repetidos += x.repetidos; v.partidos += x.partidos || 0; v.cruzadas += x.cruzadas || 0;
+      v.porPartir += x.cerradasPorPartir || 0; if (x.crucesSinBuscar) v.sinBuscar = true;
       for (const o of x.abiertas) {
         o.sola = cl === 'corte' && cierraSola(o.pts); // armar() la cierra igual
         (o.sola ? v.solas : v.abiertas).push({ ...o, pg: pg.n });
       }
       for (const p of x.cruces) v.cruces.push({ p, pg: pg.n });
       for (const p of x.cruzan || []) v.cruzan.push({ p, pg: pg.n });
+      for (const pts of x.finas || []) v.finas.push({ pts, pg: pg.n });
     }
   }
-  // una T o un cruce partido que arma una figura también es unir (cerradas + abiertas puede llegar a los trazos, o pasarse)
-  v.hace = v.trazos >= 2 && (v.cerradas + v.abiertas.length + v.solas.length < v.trazos || (v.partidos + v.cruzadas > 0 && v.cerradas > 0));
+  // una T o un cruce partido que arma una figura también es unir (cerradas + abiertas puede llegar a los trazos, o pasarse); no
+  // cuenta una T que no cierra nada al lado de una figura que ya venía cerrada (una polilínea cerrada por puntos)
+  v.hace = v.trazos >= 2 && (v.cerradas + v.abiertas.length + v.solas.length < v.trazos || v.porPartir > 0);
   a.revCache.porTol.set(t, v);
   return v;
 }
@@ -999,8 +1043,10 @@ function pintarRevision() {
     if (v.cruzadas) html += `<p class="sutil">En ${plural(v.cruzadas, 'punto', 'puntos')} se cruzan dos trazos sin una punta ahí (una divisoria que atraviesa a otra, de borde a borde): se parten ahí para cerrar las figuras.</p>`;
     if (v.cruces.length) html += `<p class="sutil">En ${plural(v.cruces.length, 'punto', 'puntos')} se juntan más de dos trazos (cuadrado amarillo): cada zona cerrada sale como una figura aparte, y una línea que las separa se corta en las dos. Conviene mirarlos.</p>`;
     if (v.cruzan.length) html += `<p class="sutil">En ${plural(v.cruzan.length, 'punto', 'puntos')} se cruzan dos trazos que no se parten (rombo amarillo): por ejemplo dos letras superpuestas, que salen cada una entera, o una línea suelta que pasa por encima de una pieza. Conviene mirarlos.</p>`;
+    if (v.finas.length) html += `<p class="sutil">${plural(v.finas.length, 'figura cerrada es', 'figuras cerradas son')} más ${verbo(v.finas.length, 'fina', 'finas')} que ${fmtMm(v.tol)}: puede ser el lado de una pieza dibujado dos veces, un poco corrido, que al unir queda como una figura aparte. Conviene ${verbo(v.finas.length, 'mirarla', 'mirarlas')}.</p>`;
+    if (v.sinBuscar) html += `<p>El dibujo es muy grande y no se buscaron los cruces entre trazos sueltos: si dos rectas se cruzan sin una punta ahí (como las de una ventana), no se parten, y esas zonas no salen como figuras aparte.</p>`;
     if (est !== 'como_vino') {
-      const prob = [...libres.map((o) => ({ t: `Abierta: le falta ${fmtMm(o.falta)} para cerrar`, pg: o.pg, pts: [o.pts[0], o.pts[o.pts.length - 1]] })), ...pegadas.map((o) => ({ t: 'Línea que sale de una figura y no vuelve', pg: o.pg, pts: o.pts })), ...v.cruces.map((c) => ({ t: 'Se juntan más de dos trazos', pg: c.pg, pts: [c.p] })), ...v.cruzan.map((c) => ({ t: 'Se cruzan dos trazos (no se parten)', pg: c.pg, pts: [c.p] }))];
+      const prob = [...libres.map((o) => ({ t: `Abierta: le falta ${fmtMm(o.falta)} para cerrar`, pg: o.pg, pts: [o.pts[0], o.pts[o.pts.length - 1]] })), ...pegadas.map((o) => ({ t: 'Línea que sale de una figura y no vuelve', pg: o.pg, pts: o.pts })), ...v.cruces.map((c) => ({ t: 'Se juntan más de dos trazos', pg: c.pg, pts: [c.p] })), ...v.cruzan.map((c) => ({ t: 'Se cruzan dos trazos (no se parten)', pg: c.pg, pts: [c.p] })), ...v.finas.map((f) => ({ t: 'Figura muy fina', pg: f.pg, pts: f.pts }))];
       a.revProb = prob;
       if (prob.length) html += `<ul class="prob">${prob.slice(0, 10).map((p, i) => `<li><span>${p.t}${a.paginas.length > 1 ? ` · mesa ${p.pg}` : ''}</span><button class="chico" data-rev-ver="${a.id}:${i}">Ver</button></li>`).join('')}${prob.length > 10 ? `<li class="sutil">y ${fmt(prob.length - 10)} más</li>` : ''}</ul>`;
       for (const pr of v.pags) html += `<div class="lienzo" data-rev-lienzo="${a.id}:${pr.pg.n}"><canvas title="Tocá para acercar"></canvas>${S.revZoom.has(a.id + ':' + pr.pg.n) ? `<button class="chico" data-rev-todo="${a.id}:${pr.pg.n}">Ver todo</button>` : ''}</div>`;
@@ -1025,9 +1071,9 @@ function pintarColores() {
   const cols = inventarioColores();
   $('sec-colores').hidden = !cols.length;
   $('tabla-colores').innerHTML = cols.map((c) => {
-    const dxf = c.capa != null, k = dxf ? S.mapa[c.clave] || c.def : claseColor(c.rgb);
+    const dxf = c.capa != null, k = dxf ? elegido(c.clave, c.def) || c.def : claseColor(c.rgb);
     const donde = dxf ? `${plural(c.trazo, 'trazo', 'trazos')} del DXF, capa ${esc(c.capa)}${c.archivo ? `, en ${esc(c.archivo)}` : ''}` : [c.trazo ? fmt(c.trazo) + ' en trazo' : '', c.relleno ? fmt(c.relleno) + ' en relleno' : ''].filter(Boolean).join(' · ');
-    return `<tr><td><span class="muestra" style="background:${c.hex}"></span></td><td>${c.hex}</td><td class="mute">${donde}</td><td><select data-color="${esc(c.clave)}">${CLASES.map(([v, t]) => `<option value="${v}"${v === k ? ' selected' : ''}>${t}</option>`).join('')}</select></td></tr>`;
+    return `<tr><td><span class="muestra" style="background:${c.hex}"></span></td><td>${c.hex}</td><td class="mute">${donde}</td><td><select data-color="${esc(c.clave)}"${dxf ? ` data-def="${c.def}"` : ''}>${CLASES.map(([v, t]) => `<option value="${v}"${v === k ? ' selected' : ''}>${t}</option>`).join('')}</select></td></tr>`;
   }).join('');
 }
 // Nombres en castellano de lo que el DXF trae y no se lee (lo que no está acá sale con su nombre del DXF).
@@ -1046,6 +1092,7 @@ function avisosArchivos() {
     if (!r.piezas && !sinUnir) out.push({ grave: true, t: `${n}: no hay ningún contorno ${dxf ? 'de corte' : 'rojo'} cerrado, así que no salió ninguna pieza. ${a.rev && a.rev.trazos >= 2 ? `Tiene ${p(a.rev.trazos, 'trazo suelto', 'trazos sueltos')} que con ${fmtMm(a.union.tol)} no cierran ninguna figura: probá con más tolerancia en el paso 1, o revisá los colores del paso 2.` : 'Revisá los colores del paso 2.'}` });
     if (r.unidas) out.push({ t: `${n}: se unieron trazos sueltos en ${p(r.unidas, 'figura cerrada', 'figuras cerradas')} (paso 1).` });
     if (r.sueltos) out.push({ grave: true, t: `${n}: ${p(r.sueltos, 'calado o agujero quedó', 'calados o agujeros quedaron')} fuera de toda pieza (en naranja). No se van a cortar.` });
+    if (r.salen) out.push({ grave: true, t: `${n}: ${p(r.salen, 'calado, agujero o línea de corte cruza', 'calados, agujeros o líneas de corte cruzan')} el contorno de su pieza (en naranja). No se ${r.salen === 1 ? 'corta' : 'cortan'}: la fresa entraría en la pieza de al lado. Corregí el dibujo para que quede adentro.` });
     if (r.abiertosSueltos) out.push({ grave: true, t: `${n}: ${p(r.abiertosSueltos, `línea ${dxf ? 'de corte' : 'roja'} no cierra y no está`, `líneas ${dxf ? 'de corte' : 'rojas'} no cierran y no están`)} adentro de ninguna pieza (en naranja). No se ${r.abiertosSueltos === 1 ? 'corta' : 'cortan'}.` });
     if (a.dxf) {
       const u = a.dxf.unidades;
@@ -1526,7 +1573,8 @@ async function recorteDesdeArchivo(file) {
   let cerrados = [], aviso = '', falta = null;
   for (const t of abiertos.length && window.NestDxf ? [0.05, 0.1, 0.5, 1, 2] : [0]) {
     const u = t ? NestDxf.unir(abiertos, t, TOL_CURVA) : { cerradas: [], abiertas: [] };
-    cerrados = [...fijos, ...u.cerradas, ...u.abiertas.filter((o) => cierraSola(o.pts)).map((o) => o.pts)].map((pts) => ({ pts, area: areaPts(pts), bb: caja(pts) }));
+    cerrados = [...fijos.map((pts) => ({ pts })), ...u.cerradas.map((pts) => ({ pts, cara: true }))].map((c) => ({ ...c, area: areaPts(c.pts), bb: caja(c.pts) }))
+      .concat(u.abiertas.filter((o) => cierraSola(o.pts)).map((o) => ({ pts: o.pts, area: areaPts(o.pts), bb: caja(o.pts), sola: o.falta })));
     const mayor = cerrados.reduce((m, c) => Math.max(m, c.area), 0);
     const grande = u.abiertas.filter((o) => !cierraSola(o.pts)).map((o) => ({ o, bb: caja(o.pts) })).filter((x) => (x.bb.x1 - x.bb.x0) * (x.bb.y1 - x.bb.y0) > mayor);
     if (!grande.length) { if (t > 0.05) aviso = `El borde de ${file.name} no cerraba: se unieron las puntas a ${fmtMm(t)} o menos.`; falta = null; break; }
@@ -1535,12 +1583,36 @@ async function recorteDesdeArchivo(file) {
   if (falta != null) throw new Error(`El borde de ${file.name} no cierra${isFinite(falta) ? `: le faltan ${fmtMm(falta)}` : ''}. Revisá el dibujo.`);
   if (!cerrados.length) throw new Error('No encontré ningún contorno cerrado en ' + file.name + '.');
   cerrados.sort((u, v) => v.area - u.area);
-  const borde = cerrados[0], huecos = [];
-  for (const c of cerrados.slice(1)) {
-    if (c.area < 100 || (Math.abs(c.area - borde.area) <= 0.01 * borde.area && cajaParecida(c.bb, borde.bb, 0.5))) continue;
+  let borde = cerrados[0];
+  const igualBorde = (c) => Math.abs(c.area - borde.area) <= 0.01 * borde.area && cajaParecida(c.bb, borde.bb, 0.5);
+  // Una línea de lado a lado (una marca, un corte anterior) parte el borde en dos o más figuras pegadas (caras de unir, que no
+  // se superponen): el borde es el contorno de afuera de su unión (Clipper), y lo que no cubren adentro de él, huecos (revisión
+  // 26-oct). Antes quedaba la más grande. Una figura que ya venía cerrada no se une: podría ser un rótulo encima del borde.
+  const afuera = borde.cara ? cerrados.filter((c) => c.cara && c !== borde && c.area >= 100 && !igualBorde(c) && seTocan(c.bb, borde.bb) && !contiene(borde, c)) : [];
+  let huecosUnion = [], partido = false;
+  if (afuera.length && window.ClipperLib) {
+    const E = 1000, cl = new ClipperLib.Clipper(), sol = [];
+    for (const c of [borde, ...afuera]) {
+      const q = c.pts.map(([x, y]) => ({ X: Math.round(x * E), Y: Math.round(y * E) }));
+      cl.AddPath(ClipperLib.Clipper.Area(q) < 0 ? q.reverse() : q, ClipperLib.PolyType.ptSubject, true); // todas antihorarias: NonZero las suma
+    }
+    cl.Execute(ClipperLib.ClipType.ctUnion, sol, ClipperLib.PolyFillType.pftNonZero, ClipperLib.PolyFillType.pftNonZero);
+    const anillos = sol.map((q) => ({ pts: q.map((v) => [v.X / E, v.Y / E]), area: ClipperLib.Clipper.Area(q) / (E * E) }));
+    const mayor = anillos.filter((x) => x.area > 0).sort((x, y) => y.area - x.area)[0];
+    if (mayor && mayor.area > borde.area + 1) {
+      borde = { pts: mayor.pts, area: mayor.area, bb: caja(mayor.pts) }; partido = true;
+      huecosUnion = anillos.filter((x) => x.area < -100).map((x) => ({ pts: x.pts, area: -x.area, bb: caja(x.pts) })).filter((h) => contiene(borde, h));
+    }
+  }
+  const huecos = [...huecosUnion];
+  for (const c of cerrados) {
+    if (c === borde || afuera.includes(c) || c.area < 100 || igualBorde(c) || c === cerrados[0]) continue;
     if (contiene(borde, c) && !huecos.some((h) => contiene(h, c))) huecos.push(c);
   }
-  return { id: idNuevo(), nombre: file.name.replace(/\.(ai|pdf|dxf)$/i, ''), ...normalizarRings([borde.pts, ...huecos.map((h) => h.pts)]), origen: 'archivo', usar: true, aviso };
+  const avisos = [aviso];
+  if (partido) avisos.push(`El borde de ${file.name} venía partido por una línea de lado a lado: se tomó el contorno de afuera.`);
+  if (borde.sola != null) avisos.push(`El borde de ${file.name} no cerraba por ${fmtMm(borde.sola)}: se cerró solo.`);
+  return { id: idNuevo(), nombre: file.name.replace(/\.(ai|pdf|dxf)$/i, ''), ...normalizarRings([borde.pts, ...huecos.map((h) => h.pts)]), origen: 'archivo', usar: true, aviso: avisos.filter(Boolean).join(' ') };
 }
 
 // ───────────── sobrante de una lámina ─────────────
@@ -1706,7 +1778,9 @@ $('revision').addEventListener('change', (e) => {
 });
 $('tabla-colores').addEventListener('change', (e) => {
   const s = e.target.closest('select[data-color]'); if (!s) return;
-  S.mapa[s.getAttribute('data-color')] = s.value;
+  const k = s.getAttribute('data-color');
+  S.mapa[k] = s.value;
+  if (s.hasAttribute('data-def')) S.mapaDef[k] = s.getAttribute('data-def'); // DXF: vale para trazos con este valor por defecto
   invalidarResultado(S.mejor ? 'Cambiaron las piezas: volvé a acomodar.' : '');
   pintarTodo();
 });

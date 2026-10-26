@@ -6,6 +6,8 @@
 //  · cortes de adentro (huecos de una pieza): por dentro, corridos el radio de la fresa;
 //  · contornos: por fuera, corridos el radio de la fresa (si no, la pieza sale más chica); al final, para que la pieza se
 //    suelte cuando ya está todo hecho.
+//  · líneas de corte abiertas (adentro de una pieza): antes que los agujeros grandes, los cortes de adentro y los contornos;
+//    solas no sueltan nada, y después la fresa pasaría sobre el pedazo ya suelto de un hueco o de un agujero (revisión 26-oct).
 //  · pieza dentro de pieza (26-oct): los cortes de adentro y los contornos van del más adentro al más afuera. Una pieza metida
 //    en el hueco de otra se corta entera (sus huecos y su contorno) antes que ese hueco, y el hueco antes que el contorno de
 //    la de afuera: nunca se corta una pieza sobre un pedazo que ya quedó suelto. Lo mismo con un agujero grande que rodea
@@ -123,7 +125,7 @@
   }
   // Recorridos de una lámina: geos = piezas colocadas ({ poly, huecos, abiertos, calados, agujeros }). Los cortes de adentro y
   // los contornos quedan por nivel de la pieza (ops.huecos[k], ops.contornos[k]); las líneas rojas abiertas de una pieza van con
-  // sus cortes de adentro. Un agujero grande con piezas adentro va con su nivel (ops.agujerosNivel[k]), no al principio.
+  // sus cortes de adentro (cerrado: false), y escribir() las corta antes que todo lo pasante. Un agujero grande con piezas adentro va con su nivel (ops.agujerosNivel[k]), no al principio.
   function recorridos(geos, perfil) {
     const r = perfil.fresa / 2, trepado = perfil.sentido !== 'convencional';
     const ops = { calado: [], taladros: [], agujeros: [], agujerosNivel: [[]], huecos: [[]], contornos: [[]] };
@@ -245,6 +247,7 @@
         for (const c of ord.caminos) { g0(null, null, seg); g0(c.pts[0][0], c.pts[0][1], null); g1(null, null, -prof, o.bajada); g0(null, null, seg); }
       }
     }
+    op('Cortes de adentro - lineas abiertas', [].concat(...rec.ops.huecos.map((l) => l.filter((c) => !c.cerrado))), perfil.corte);
     op('Agujeros grandes', rec.ops.agujeros, { ...perfil.agujero });
     // Del nivel más adentro al de afuera: cada pieza metida en un hueco queda suelta (sus cortes de adentro y su contorno)
     // antes de cortar ese hueco. Sin piezas adentro de otras hay un solo nivel: cortes de adentro y después contornos.
@@ -252,7 +255,7 @@
     for (let k = nv - 1; k >= 0; k--) {
       const suf = k ? ' - piezas adentro de huecos' + (nv > 2 ? ' nivel ' + k : '') : '';
       op('Agujeros grandes con piezas adentro' + suf, agN[k] || [], { ...perfil.agujero });
-      op('Cortes de adentro' + suf, rec.ops.huecos[k], perfil.corte);
+      op('Cortes de adentro' + suf, rec.ops.huecos[k].filter((c) => c.cerrado), perfil.corte);
       op('Contornos' + suf, rec.ops.contornos[k], perfil.corte);
     }
     g0(null, null, home);
