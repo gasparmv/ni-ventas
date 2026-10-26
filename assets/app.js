@@ -9528,7 +9528,7 @@ function sfcListaHtml() {
 }
 function sfcFilaHtml(c) {
   const adm = isAdmin() || isFranOnly(), E = sfcEstado(c.estado), cerrado = c.estado === 'entregado' || c.estado === 'cancelado', dias = sfDias(c.fecha);
-  const plazo = cerrado ? `<span class="logi-pill g">Para el ${escapeHtml(sfFecha(c.fecha))}</span>`
+  const plazo = cerrado || c.estado === 'listo' ? `<span class="logi-pill g">Para el ${escapeHtml(sfFecha(c.fecha))}</span>` // ya cortado: no está vencido
     : `<span class="logi-pill ${dias < 0 ? 'r' : dias <= 1 ? 'a' : 'g'}">${dias < 0 ? 'Vencido: era para el ' + escapeHtml(sfFecha(c.fecha)) : dias === 0 ? 'Es para hoy' : dias === 1 ? 'Para mañana' : 'Para el ' + escapeHtml(sfFecha(c.fecha)) + ' · faltan ' + dias + ' días'}</span>`;
   // v = la versión de cada archivo: si una edición lo cambia, cambia el link (el navegador no da el viejo de su caché).
   const arch = (c.archivos || []).map((a, i) => `<a class="sfc-arch" href="${escapeHtml(sfUrl('c=' + c.id + '&i=' + i + (a.v ? '&v=' + encodeURIComponent(a.v) : '') + '&dl=1'))}" target="_blank" rel="noopener" title="Bajar ${escapeHtml(a.nombre)} (${sfcPeso(a.bytes)})">${/^image\//.test(a.tipo) ? '🖼' : '📄'} ${escapeHtml(a.nombre)}</a>`).join('');
