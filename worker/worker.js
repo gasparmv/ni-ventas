@@ -32533,6 +32533,26 @@ const handler = {
             [desde], false);
           return json({ carteles, productores: await prodProductores(env) });
         }
+        // GET/POST /admin/prod/reparto-cfg → lo que recuerda el reparto semanal (admin): tope de tamaño por productor (m² por
+        // cartel; sin tope = se lleva cualquiera), quiénes producen esta semana y las opciones. Topes de Gaspar (25-oct): Matías y
+        // David hasta 0,8 m², Mirna y Gonzalo hasta 1 m², Octavio sin tope. kv 'prod_reparto_cfg'.
+        if (path === '/admin/prod/reparto-cfg' && (request.method === 'GET' || request.method === 'POST')) {
+          const no = _soloAdmin(); if (no) return no;
+          const DEF = { max_m2: { matias: 0.8, david: 0.8, mirna: 1, gonzalo: 1 }, activos: null, juntos: true, curso: false };
+          let cfg = DEF;
+          try { const g = JSON.parse((await kvGet(env, 'prod_reparto_cfg', null)) || 'null'); if (g && typeof g === 'object') cfg = { ...DEF, ...g }; } catch (_) {}
+          if (request.method === 'GET') return json({ ok: true, cfg });
+          let body; try { body = await request.json(); } catch { body = {}; }
+          const max = {};
+          for (const [k, v] of Object.entries(body.max_m2 && typeof body.max_m2 === 'object' ? body.max_m2 : {})) {
+            const id = prodSlug(k).replace(/\s+/g, ''), n = Number(v);
+            if (id && n > 0 && n < 100) max[id] = Math.round(n * 100) / 100;
+          }
+          const activos = Array.isArray(body.activos) ? body.activos.map(x => prodSlug(x).replace(/\s+/g, '')).filter(Boolean).slice(0, 50) : null;
+          cfg = { max_m2: max, activos, juntos: body.juntos !== false, curso: !!body.curso };
+          await kvSet(env, 'prod_reparto_cfg', JSON.stringify(cfg));
+          return json({ ok: true, cfg });
+        }
         // POST /admin/prod/asignar {pedido_ids:[], productor_id} → asigna (o saca, con '') el productor de esos carteles (admin).
         if (request.method === 'POST' && path === '/admin/prod/asignar') {
           const no = _soloAdmin(); if (no) return no;

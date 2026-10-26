@@ -8137,6 +8137,7 @@ function renderNeonTablero() {
       <input id="nkb-q" class="logi-q sfk-q" type="search" autocomplete="off" spellcheck="false" placeholder="Buscar # o nombre" value="${escapeHtml(STATE.nkbQ || '')}" aria-label="Buscar por número o nombre">
       ${chip('mias', STATE.nkbMias, nMias, 'Mis tareas', 'Las tarjetas donde te toca hacer algo')}
       ${chip('dem', STATE.nkbDem, nDem, 'Demorados', 'Llevan más días de lo normal en su etapa')}
+      ${D.rol === 'admin' ? '<button class="btn btn-ghost" data-nkb-reparto title="Repartir los carteles sin productor entre los productores de la semana">Reparto semanal</button>' : ''}
       <button class="btn btn-ghost" data-nkb-refresh>Actualizar</button>
     </div>
     ${hay ? `<div data-nkb-zona data-sig="${escapeHtml(nkbBoardSig(cs, cel))}">${nkbTabsHtml(cs, cel)}${nkbBoardHtml(cs, cel)}</div><div class="logi-vacio-box sfk-nores" data-nkb-nores hidden></div>` : '<div class="logi-vacio-box">No hay carteles de neón en el tablero.</div>'}
@@ -8195,6 +8196,250 @@ function nkbFiltrarDom() {
   const zona = root.querySelector('[data-nkb-zona]'); if (zona) zona.classList.toggle('buscando', filtrando);
   const nr = root.querySelector('[data-nkb-nores]'); if (nr) { nr.hidden = !(filtrando && !tot); nr.textContent = 'No hay tarjetas con ese filtro.'; }
 }
+// ── Reparto semanal de neón (Gaspar 25-oct-2026) ──
+// El fin de semana Gaspar reparte los carteles de neón que todavía no tienen productor (estén en diseño, cortados o no) entre
+// los que producen la semana siguiente. La sugerencia equilibra la mano de obra (lo que cobra cada uno) y respeta el tamaño
+// máximo de cartel que se lleva cada productor; se edita antes de repartir. Repartir = /admin/prod/asignar por productor, lo
+// mismo que "Derivar": log, mano de obra, tablero, pantalla del productor, paquete de Neyen y columna PRODUCTOR del Excel.
+const REP_ETAPAS = ['confirmado', 'diseno', 'montando'];
+function repLunesAR() { const d = new Date(Date.now() - 3 * 3600e3); d.setUTCDate(d.getUTCDate() - (d.getUTCDay() + 6) % 7); return d.toISOString().slice(0, 10); }
+function repM2(c) { return Number(c.alto) > 0 && Number(c.ancho) > 0 ? Number(c.alto) * Number(c.ancho) / 10000 : 0; }
+const repCap = (p) => (+p.max > 0 ? +p.max : Infinity);
+const repFmtM2 = (v) => (Math.round((+v || 0) * 100) / 100).toLocaleString('es-AR') + ' m²';
+const repProd = (id) => ((STATE.rep && STATE.rep.prods) || []).find((p) => p.id === id) || null;
+async function repAbrir() {
+  STATE.rep = { cargando: true };
+  repModal();
+  try {
+    const get = (u) => fetch(CONFIG.trackerUrl + u, { headers: authHeaders() }).then((r) => r.json().then((j) => { if (!r.ok || j.error) throw new Error(j.error || 'error ' + r.status); return j; }));
+    const [pt, cf] = await Promise.all([get('/admin/prod/tablero'), get('/admin/prod/reparto-cfg'), nkbCargar({ silent: true })]);
+    const cfg = (cf && cf.cfg) || {}, mo = {}, curso = {};
+    for (const c of pt.carteles || []) {
+      mo[c.id] = c;
+      if (!c.productor_id || c.prod_pagado_at || !['pendiente', 'en_armado'].includes(String(c.prod_estado || ''))) continue;
+      const x = curso[c.productor_id] || (curso[c.productor_id] = { n: 0, mo: 0 });
+      x.n++; x.mo += +c.mo_monto || 0;
+    }
+    const cards = (STATE.nkb && STATE.nkb.carteles) || [];
+    // Grupos (mismo pedido) que ya tienen un cartel derivado: el resto va con el mismo productor si está en el reparto.
+    const grupoProd = {};
+    for (const c of cards) if (c.productor_id && c.grupo && !grupoProd[c.grupo]) grupoProd[c.grupo] = c.productor_id;
+    const tarjetas = cards.filter((c) => !c.productor_id && REP_ETAPAS.includes(c.etapa));
+    // Mano de obra de cada cartel (la que paga Gaspar). Sin mano de obra (faltan tramos o medidas) → la mediana, marcada "≈".
+    const conMo = tarjetas.map((c) => +((mo[c.id] || {}).mo_monto) || 0).filter((v) => v > 0).sort((a, b) => a - b);
+    const med = conMo.length ? conMo[Math.floor(conMo.length / 2)] : 0, lunes = repLunesAR();
+    const carteles = tarjetas.map((c) => {
+      const m = +((mo[c.id] || {}).mo_monto) || 0;
+      return { id: c.id, numero: c.numero, cartel: c.cartel, alto: c.alto, ancho: c.ancho, cantidad: Math.max(1, +c.cantidad || 1), m2: repM2(c), mo: m || med, moEst: !m, etapa: c.etapa, fecha: c.fecha, grupo: c.grupo, grupo_n: c.grupo_n, semana: String(c.fecha || '') >= lunes, on: true };
+    }).sort((a, b) => String(b.fecha).localeCompare(String(a.fecha)) || b.id - a.id);
+    const act = Array.isArray(cfg.activos) ? new Set(cfg.activos) : null;
+    const prods = (pt.productores || []).filter((p) => !p.baja).map((p) => ({ id: p.id, nombre: p.nombre, extra: !!p.extra, on: act ? act.has(p.id) : (!!+p.activo && !p.extra), max: (cfg.max_m2 || {})[p.id] || '', curso: curso[p.id] || { n: 0, mo: 0 } }));
+    STATE.rep = { carteles, prods, grupoProd, juntos: cfg.juntos !== false, curso: !!cfg.curso, lunes, asig: {}, fuera: [], sinLugar: [] };
+    repSugerir();
+  } catch (e) { STATE.rep = { error: e.message || 'No se pudo cargar' }; }
+  repPintar();
+}
+// Unidades a repartir: cada cartel o, con "mismo pedido, mismo productor", cada pedido entero. m2 = el cartel más grande.
+function repUnidades() {
+  const R = STATE.rep, sel = R.carteles.filter((c) => c.on), m = new Map();
+  for (const c of sel) {
+    const k = R.juntos && c.grupo ? c.grupo : 'c' + c.id;
+    const u = m.get(k) || { key: k, carteles: [], mo: 0, m2: 0, fijo: R.juntos ? R.grupoProd[c.grupo] || '' : '' };
+    u.carteles.push(c); u.mo += c.mo; u.m2 = Math.max(u.m2, c.m2); m.set(k, u);
+  }
+  return [...m.values()];
+}
+// Sugerencia: de la unidad con más mano de obra a la de menos, cada una al productor que menos lleva entre los que pueden
+// (tope de m²); después se emparejan moviendo o cambiando unidades entre productores.
+function repSugerir() {
+  const R = STATE.rep, prods = R.prods.filter((p) => p.on), carga = {}, asig = {}, sinLugar = [];
+  for (const p of prods) { carga[p.id] = R.curso ? +p.curso.mo || 0 : 0; asig[p.id] = []; }
+  const uds = repUnidades().sort((a, b) => b.mo - a.mo || b.m2 - a.m2), libres = [];
+  // El pedido que ya tiene un cartel derivado va con ese productor, si trabaja esta semana y el tamaño le da (el tope manda).
+  for (const u of uds) { const pf = u.fijo && asig[u.fijo] ? repProd(u.fijo) : null; if (pf && u.m2 <= repCap(pf) + 1e-9) { asig[u.fijo].push(u); carga[u.fijo] += u.mo; } else { u.fijo = ''; libres.push(u); } }
+  for (const u of libres) {
+    const ok = prods.filter((p) => u.m2 <= repCap(p) + 1e-9);
+    if (!ok.length) { sinLugar.push(u); continue; }
+    ok.sort((a, b) => carga[a.id] - carga[b.id] || asig[a.id].length - asig[b.id].length);
+    asig[ok[0].id].push(u); carga[ok[0].id] += u.mo;
+  }
+  // Mejora: entre cualquier par de productores, mover o cambiar la unidad que más achica su diferencia (el cuadrado: así
+  // baja la dispersión de todos), hasta que ningún cambio ayude.
+  const movible = (u) => !u.fijo;
+  for (let it = 0; it < 600 && prods.length > 1; it++) {
+    let mejor = null;
+    for (const A of prods) for (const B of prods) {
+      const gap = carga[A.id] - carga[B.id];
+      if (gap <= 1) continue;
+      const probar = (u, w) => { const d = u.mo - (w ? w.mo : 0); if (d <= 0) return; const v = gap - 2 * d, g = gap * gap - v * v; if (g > 1 && (!mejor || g > mejor.g)) mejor = { g, A, B, u, w }; };
+      for (const u of asig[A.id]) {
+        if (!movible(u)) continue;
+        if (u.m2 <= repCap(B) + 1e-9) probar(u, null);
+        for (const w of asig[B.id]) if (movible(w) && u.m2 <= repCap(B) + 1e-9 && w.m2 <= repCap(A) + 1e-9) probar(u, w);
+      }
+    }
+    if (!mejor) break;
+    const { A, B, u, w } = mejor;
+    asig[A.id] = asig[A.id].filter((x) => x !== u); asig[B.id].push(u); carga[A.id] -= u.mo; carga[B.id] += u.mo;
+    if (w) { asig[B.id] = asig[B.id].filter((x) => x !== w); asig[A.id].push(w); carga[B.id] -= w.mo; carga[A.id] += w.mo; }
+  }
+  for (const id of Object.keys(asig)) asig[id].sort((a, b) => b.mo - a.mo);
+  R.asig = asig; R.sinLugar = sinLugar; R.fuera = [];
+}
+function repModal() {
+  if (!document.getElementById('rep-css')) {
+    const st = document.createElement('style'); st.id = 'rep-css';
+    st.textContent = `.rep{display:grid;gap:16px}.rep-cab{display:flex;align-items:flex-start;gap:12px}.rep-tit{font-size:19px;font-weight:900}.rep-sub{font-size:12.5px;color:var(--fg-mute)}
+.rep-h{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--fg-subtle);margin:0 0 8px;font-weight:700}.rep-h span{text-transform:none;letter-spacing:0;font-weight:500;color:var(--fg-mute);margin-left:6px}
+.rep-prods{display:flex;flex-wrap:wrap;gap:8px}.rep-prod{display:flex;align-items:center;gap:8px;flex-wrap:wrap;border:1px solid var(--border);border-radius:10px;padding:7px 10px;background:var(--ink-100);font-size:13px;opacity:.6}.rep-prod.on{opacity:1;border-color:var(--border-strong)}
+.rep-prod input[type=number]{width:62px;background:var(--ink-200);border:1px solid var(--border);border-radius:6px;color:var(--fg);padding:3px 6px;font-size:12.5px}.rep-curso{font-size:11.5px;color:var(--fg-mute)}
+.rep-opts{display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:10px;font-size:13px}.rep-opts label{display:flex;align-items:center;gap:6px}
+.rep-lista{max-height:220px;overflow:auto;border:1px solid var(--border);border-radius:10px}.rep-c{display:grid;grid-template-columns:22px minmax(140px,1.6fr) 1fr 92px auto;gap:4px 10px;align-items:center;padding:6px 10px;border-top:1px solid var(--border);font-size:13px}.rep-c:first-child{border-top:0}.rep-c.off{opacity:.45}
+.rep-cn{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.rep-chips{display:flex;gap:4px;flex-wrap:wrap}.rep-chip{font-size:11px;padding:1px 6px;border-radius:6px;background:var(--ink-200);color:var(--fg-mute);white-space:nowrap}
+.rep-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px}.rep-col{border:1px solid var(--border);border-radius:12px;background:var(--ink-100);padding:10px;display:grid;gap:8px;align-content:start}
+.rep-col-h{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}.rep-col-h b{font-size:15px}.rep-mo{font-weight:800;font-variant-numeric:tabular-nums}.rep-dif{font-size:12px;font-weight:700}.rep-dif.ok{color:#22c55e}.rep-dif.mal{color:#f59e0b}.rep-col-s{font-size:12px;color:var(--fg-mute);margin-top:-4px}
+.rep-u{border:1px solid var(--border);border-radius:9px;padding:7px 9px;background:var(--ink-200);display:grid;gap:4px}.rep-u.exc{border-color:#f59e0b}.rep-u-t{font-size:13px;font-weight:700;line-height:1.3}.rep-u-s{font-size:12px;color:var(--fg-mute)}
+.rep-u select{background:var(--ink-100);border:1px solid var(--border);border-radius:6px;color:var(--fg);font-size:12.5px;padding:3px 6px}.rep-vacio{font-size:12.5px;color:var(--fg-mute);padding:6px 0}
+.rep-sin{border:1px solid #f59e0b;border-radius:12px;padding:10px;margin-top:10px;display:grid;gap:8px}.rep-pie{display:flex;align-items:center;gap:10px;flex-wrap:wrap;position:sticky;bottom:-1px;background:var(--ink-200);padding:10px 0 2px;border-top:1px solid var(--border)}.rep-pie-txt{flex:1;font-size:12.5px;color:var(--fg-mute);min-width:200px}
+@media (max-width:700px){.rep-c{grid-template-columns:22px 1fr;}.rep-c>:nth-child(n+3){grid-column:2}}`;
+    document.head.appendChild(st);
+  }
+  let bg = document.querySelector('.modal-bg[data-rep-modal]');
+  if (!bg) {
+    bg = document.createElement('div'); bg.className = 'modal-bg'; bg.setAttribute('data-rep-modal', '1');
+    bg.innerHTML = '<div class="modal" style="max-width:1180px;width:calc(100vw - 24px);max-height:94vh"><div class="modal-body" data-rep-body style="overflow:auto;padding:18px 20px 12px"></div></div>';
+    document.body.appendChild(bg); void bg.offsetWidth; bg.classList.add('open');
+    bg.addEventListener('click', (e) => { if (e.target === bg) repCerrar(); });
+    const body = bg.querySelector('[data-rep-body]');
+    body.addEventListener('click', repClick);
+    body.addEventListener('change', repCambio);
+    document.addEventListener('keydown', repTecla);
+  }
+  repPintar();
+}
+function repTecla(e) { if (e.key === 'Escape' && document.querySelector('.modal-bg[data-rep-modal]') && !document.querySelector('.modal-bg:not([data-rep-modal]).open')) repCerrar(); }
+function repCerrar() {
+  const bg = document.querySelector('.modal-bg[data-rep-modal]'); if (!bg) return;
+  document.removeEventListener('keydown', repTecla);
+  bg.classList.remove('open'); setTimeout(() => bg.remove(), 150);
+}
+function repUnidadHtml(u, pid) {
+  const R = STATE.rep, on = R.prods.filter((p) => p.on), p = pid ? repProd(pid) : null, exc = p && u.m2 > repCap(p) + 1e-9;
+  const nom = u.carteles.map((c) => `#${escapeHtml(String(c.numero))} ${escapeHtml(c.cartel || '')}`).join(' + ');
+  const cant = u.carteles.reduce((s, c) => s + c.cantidad, 0);
+  const opts = `<option value=""${pid ? '' : ' selected'}>Dejar para después</option>` + on.map((q) => `<option value="${escapeHtml(q.id)}"${q.id === pid ? ' selected' : ''}>${escapeHtml(q.nombre)}${u.m2 > repCap(q) + 1e-9 ? ' (pasa su tope)' : ''}</option>`).join('');
+  return `<div class="rep-u${exc ? ' exc' : ''}"><div class="rep-u-t">${nom}</div>
+    <div class="rep-u-s">${cant > 1 ? cant + ' carteles · ' : ''}${repFmtM2(u.m2)}${u.carteles.length > 1 ? ' el más grande' : ''} · ${u.carteles.some((c) => c.moEst) ? '≈ ' : ''}${fmtMoney(u.mo)}${exc ? ` · <b style="color:#f59e0b">pasa su tope de ${repFmtM2(+p.max)}</b>` : ''}${u.fijo ? ' · el pedido ya tiene un cartel con este productor' : ''}</div>
+    <select data-rep-mover="${escapeHtml(u.key)}" aria-label="A quién va">${opts}</select></div>`;
+}
+function repPintar() {
+  const body = document.querySelector('.modal-bg[data-rep-modal] [data-rep-body]'); if (!body) return;
+  const R = STATE.rep || {}, y = body.scrollTop;
+  const cab = (sub) => `<div class="rep-cab"><div style="flex:1"><div class="rep-tit">Reparto semanal</div><div class="rep-sub">${sub}</div></div><button type="button" class="btn btn-ghost" data-rep-cerrar style="padding:4px 10px">✕</button></div>`;
+  if (R.cargando) { body.innerHTML = cab('Cargando los carteles…'); return; }
+  if (R.error) { body.innerHTML = cab('') + `<div style="color:#ef4444">${escapeHtml(R.error)}</div>`; return; }
+  const on = R.prods.filter((p) => p.on), sel = R.carteles.filter((c) => c.on);
+  const totMo = sel.reduce((s, c) => s + c.mo, 0), totCurso = R.curso ? on.reduce((s, p) => s + (+p.curso.mo || 0), 0) : 0;
+  const cargaDe = (p) => (R.asig[p.id] || []).reduce((s, u) => s + u.mo, 0) + (R.curso ? +p.curso.mo || 0 : 0);
+  const prom = on.length ? (totMo + totCurso) / on.length : 0;
+  const fl = R.lunes.split('-');
+  const prodHtml = R.prods.map((p) => `<label class="rep-prod${p.on ? ' on' : ''}"><input type="checkbox" data-rep-on="${escapeHtml(p.id)}"${p.on ? ' checked' : ''}><b>${escapeHtml(p.nombre)}</b>
+    <span>hasta <input type="number" data-rep-max="${escapeHtml(p.id)}" value="${escapeHtml(String(p.max || ''))}" placeholder="sin tope" min="0.1" step="0.1" aria-label="Tamaño máximo de ${escapeHtml(p.nombre)} en m²"> m²</span>
+    <span class="rep-curso">${p.curso.n ? `en curso: ${p.curso.n} · ${fmtMoney(p.curso.mo)}` : 'sin nada en curso'}</span></label>`).join('');
+  const cartHtml = R.carteles.length ? R.carteles.map((c) => `<label class="rep-c${c.on ? '' : ' off'}"><input type="checkbox" data-rep-c="${c.id}"${c.on ? ' checked' : ''}>
+    <span class="rep-cn" title="${escapeHtml(c.cartel || '')}">#${escapeHtml(String(c.numero))} ${escapeHtml(c.cartel || '')}</span>
+    <span>${c.alto && c.ancho ? `${c.alto}×${c.ancho} cm` : 'sin medidas'}${c.cantidad > 1 ? ' ×' + c.cantidad : ''} · ${repFmtM2(c.m2)}</span>
+    <span style="font-variant-numeric:tabular-nums" title="${c.moEst ? 'Sin mano de obra cargada (faltan tramos o medidas): se usa la mediana para repartir' : 'Mano de obra'}">${c.moEst ? '≈ ' : ''}${fmtMoney(c.mo)}</span>
+    <span class="rep-chips"><span class="rep-chip">${escapeHtml(NKB_CORTO[c.etapa] || c.etapa)}</span>${c.semana ? '' : '<span class="rep-chip">de antes</span>'}${c.grupo_n > 1 ? `<span class="rep-chip">pedido de ${c.grupo_n}</span>` : ''}</span></label>`).join('')
+    : '<div class="rep-vacio" style="padding:12px">No hay carteles de neón sin productor.</div>';
+  const colHtml = (p) => {
+    const us = R.asig[p.id] || [], mo = cargaDe(p), n = us.reduce((s, u) => s + u.carteles.length, 0);
+    const m2 = us.reduce((s, u) => s + u.carteles.reduce((t, c) => t + c.m2 * c.cantidad, 0), 0), dif = prom ? (mo - prom) / prom : 0;
+    return `<div class="rep-col"><div class="rep-col-h"><b>${escapeHtml(p.nombre)}</b><span class="rep-mo">${fmtMoney(mo)}</span>${on.length > 1 ? `<span class="rep-dif ${Math.abs(dif) <= 0.12 ? 'ok' : 'mal'}" title="Contra el promedio">${dif >= 0 ? '+' : ''}${Math.round(dif * 100)} %</span>` : ''}</div>
+      <div class="rep-col-s">${n} cartel${n === 1 ? '' : 'es'} · ${repFmtM2(m2)}${p.max ? ` · tope ${repFmtM2(+p.max)} c/u` : ' · sin tope'}${R.curso && p.curso.n ? ` · incluye ${fmtMoney(p.curso.mo)} en curso` : ''}</div>
+      ${us.map((u) => repUnidadHtml(u, p.id)).join('') || '<div class="rep-vacio">Sin carteles</div>'}</div>`;
+  };
+  const pend = R.sinLugar.concat(R.fuera);
+  const nRep = on.reduce((s, p) => s + (R.asig[p.id] || []).reduce((t, u) => t + u.carteles.length, 0), 0);
+  body.innerHTML = cab(`Carteles de neón sin productor, en diseño, cortados o no · semana del lunes ${+fl[2]}/${+fl[1]}`) + `
+    <div class="rep-sec"><div class="rep-h">Quiénes producen <span>tildá a los que trabajan y el tamaño máximo de cartel que se lleva cada uno</span></div>
+      <div class="rep-prods">${prodHtml}</div>
+      <div class="rep-opts"><label><input type="checkbox" data-rep-juntos${R.juntos ? ' checked' : ''}> Mismo pedido, mismo productor</label><label><input type="checkbox" data-rep-curso${R.curso ? ' checked' : ''}> Equilibrar contando lo que ya tienen en curso</label></div></div>
+    <div class="rep-sec"><div class="rep-h">Carteles para repartir <span>${sel.length} de ${R.carteles.length} · ${fmtMoney(totMo)} de mano de obra</span></div><div class="rep-lista">${cartHtml}</div></div>
+    <div class="rep-sec"><div class="rep-h">Sugerencia <span>${on.length ? `parejo es ${fmtMoney(prom)} cada uno · cada cartel se puede pasar a otro con su lista` : 'tildá al menos un productor'}</span></div>
+      <div class="rep-grid">${on.map(colHtml).join('')}</div>
+      ${pend.length ? `<div class="rep-sin"><div class="rep-h" style="margin:0">Quedan sin repartir <span>${R.sinLugar.length ? 'los que pasan el tope de todos los productores tildados; ' : ''}elegí a quién va o dejalos para después</span></div>${pend.map((u) => repUnidadHtml(u, '')).join('')}</div>` : ''}</div>
+    <div class="rep-pie"><span class="rep-pie-txt">Al repartir, cada cartel queda derivado a su productor: lo ve en su pantalla, Neyen arma los paquetes y va a la columna PRODUCTOR del Excel. Si cambiás algo de arriba, la sugerencia se vuelve a armar.</span>
+      <button type="button" class="btn btn-ghost" data-rep-sugerir${sel.length && on.length ? '' : ' disabled'}>Sugerir de nuevo</button>
+      <button type="button" class="btn btn-primary" data-rep-aplicar${nRep && !R.aplicando ? '' : ' disabled'}>${R.aplicando ? 'Repartiendo…' : `Repartir ${nRep} cartel${nRep === 1 ? '' : 'es'}`}</button></div>`;
+  body.scrollTop = y;
+}
+let _repGuardarT = null;
+function repGuardarCfg() {
+  clearTimeout(_repGuardarT);
+  _repGuardarT = setTimeout(() => {
+    const R = STATE.rep; if (!R || !R.prods) return;
+    const max = {}; for (const p of R.prods) if (+p.max > 0) max[p.id] = +p.max;
+    fetch(CONFIG.trackerUrl + '/admin/prod/reparto-cfg', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ max_m2: max, activos: R.prods.filter((p) => p.on).map((p) => p.id), juntos: R.juntos, curso: R.curso }) }).catch(() => {});
+  }, 600);
+}
+function repCambio(e) {
+  const R = STATE.rep; if (!R || !R.prods) return;
+  const el = e.target;
+  if (el.matches('[data-rep-on]')) { const p = repProd(el.getAttribute('data-rep-on')); if (p) p.on = el.checked; }
+  else if (el.matches('[data-rep-max]')) { const p = repProd(el.getAttribute('data-rep-max')); if (p) { const v = parseFloat(String(el.value).replace(',', '.')); p.max = v > 0 ? Math.round(v * 100) / 100 : ''; } }
+  else if (el.matches('[data-rep-juntos]')) R.juntos = el.checked;
+  else if (el.matches('[data-rep-curso]')) R.curso = el.checked;
+  else if (el.matches('[data-rep-c]')) { const c = R.carteles.find((x) => x.id === +el.getAttribute('data-rep-c')); if (c) c.on = el.checked; repSugerir(); repPintar(); return; }
+  else if (el.matches('[data-rep-mover]')) { repMover(el.getAttribute('data-rep-mover'), el.value); repPintar(); return; }
+  else return;
+  repGuardarCfg(); repSugerir(); repPintar();
+}
+// Pasa una unidad (cartel o pedido) a otro productor, o a "dejar para después" (destino vacío).
+function repMover(key, destino) {
+  const R = STATE.rep; let u = null;
+  for (const id of Object.keys(R.asig)) { const i = R.asig[id].findIndex((x) => x.key === key); if (i >= 0) { u = R.asig[id].splice(i, 1)[0]; break; } }
+  for (const l of [R.sinLugar, R.fuera]) { const i = l.findIndex((x) => x.key === key); if (!u && i >= 0) u = l.splice(i, 1)[0]; }
+  if (!u) return;
+  if (destino && R.asig[destino]) R.asig[destino].push(u); else R.fuera.push(u);
+}
+function repClick(e) {
+  const el = e.target;
+  if (el.closest('[data-rep-cerrar]')) { repCerrar(); return; }
+  if (el.closest('[data-rep-sugerir]')) { repSugerir(); repPintar(); return; }
+  if (el.closest('[data-rep-aplicar]')) { repAplicar(); }
+}
+async function repAplicar() {
+  const R = STATE.rep; if (!R || R.aplicando) return;
+  const plan = R.prods.filter((p) => p.on && (R.asig[p.id] || []).length).map((p) => ({ p, us: R.asig[p.id], ids: R.asig[p.id].flatMap((u) => u.carteles.map((c) => c.id)) }));
+  const n = plan.reduce((s, x) => s + x.ids.length, 0); if (!n) return;
+  const det = plan.map((x) => `${x.p.nombre}: ${x.ids.length} cartel${x.ids.length === 1 ? '' : 'es'} · ${fmtMoney(x.us.reduce((s, u) => s + u.mo, 0))}`).join('\n');
+  if (!(await showConfirm(`Se derivan ${n} cartel${n === 1 ? '' : 'es'}:\n\n${det}\n\nCada productor los ve en su pantalla y Neyen arma los paquetes con este reparto.`, { title: 'Repartir', confirmLabel: 'Repartir', cancelLabel: 'Volver' }).catch(() => false))) return;
+  R.aplicando = true; repPintar();
+  let hechos = 0; const saltados = [];
+  try {
+    // Lo que mientras tanto ya derivó alguien no se pisa.
+    const pt = await fetch(CONFIG.trackerUrl + '/admin/prod/tablero', { headers: authHeaders() }).then((r) => r.json());
+    const ya = new Set((pt.carteles || []).filter((c) => c.productor_id).map((c) => c.id));
+    for (const x of plan) {
+      const ids = x.ids.filter((id) => !ya.has(id));
+      saltados.push(...x.ids.filter((id) => ya.has(id)));
+      if (!ids.length) continue;
+      const r = await fetch(CONFIG.trackerUrl + '/admin/prod/asignar', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ pedido_ids: ids, productor_id: x.p.id }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error((j && j.error) || 'error ' + r.status);
+      hechos += +j.cambiados || 0;
+      for (const s of j.saltados || []) saltados.push(s.id);
+    }
+    toast(`Listo: ${hechos} cartel${hechos === 1 ? '' : 'es'} repartido${hechos === 1 ? '' : 's'}${saltados.length ? ` · ${saltados.length} ya tenía${saltados.length === 1 ? '' : 'n'} productor y no se tocaron` : ''}`);
+    repCerrar();
+    nkbCargar();
+  } catch (e) {
+    R.aplicando = false; repPintar();
+    toast('No se pudo repartir: ' + (e.message || 'error') + (hechos ? ` (se alcanzaron a repartir ${hechos})` : ''));
+    if (hechos) nkbCargar({ silent: true });
+  }
+}
 function bindNeonTablero() {
   const root = document.querySelector('.nkb-wrap');
   if (!root) return;
@@ -8203,6 +8448,7 @@ function bindNeonTablero() {
   root.addEventListener('click', e => {
     const el = e.target;
     if (el.closest('[data-nkb-refresh]')) { if (STATE.nkb && STATE.nkb.error) STATE.nkb = null; nkbRedibujar(); if (STATE.nkb) nkbCargar(); return; }
+    if (el.closest('[data-nkb-reparto]')) { repAbrir(); return; }
     const mias = el.closest('[data-nkb-mias]'); if (mias) { STATE.nkbMias = !STATE.nkbMias; mias.classList.toggle('on', STATE.nkbMias); nkbFiltrarDom(); return; }
     const dem = el.closest('[data-nkb-dem]'); if (dem) { STATE.nkbDem = !STATE.nkbDem; dem.classList.toggle('on', STATE.nkbDem); nkbFiltrarDom(); return; }
     const tab = el.closest('[data-nkb-tab]');
