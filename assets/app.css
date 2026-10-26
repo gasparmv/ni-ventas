@@ -4854,6 +4854,63 @@ table.t.t-pedidos .prod-celda-linea { white-space: normal; line-height: 1.35; }
   [data-nkb-zona].buscando .sfk-etq { display: inline-block; }
 }
 
+/* ===== Cortes de Sin Frontera en tablero (26-oct-2026): columnas Pedido · En corte · Listo · Entregado con las piezas del de
+   corpóreos (.sfk-col, .sfk-tabs) y los cancelados plegados abajo. La tarjeta es la fila de la lista (.sfc-row, sfcFilaHtml)
+   adentro de .sfcb-card: sus cajas (.sfc-row, .sfc-head, .lb-nom, .sfc-det) pasan a display: contents y cada pieza se
+   acomoda con order. Arriba: número, "sin nombre" y el plazo; el nombre; material; archivos; aclaraciones; quién y cuándo;
+   abajo, Editar y el estado. ===== */
+.sfk-board.sfcb-board { grid-template-columns: repeat(4, minmax(200px, 1fr)); }
+.sfcb-card { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; flex: 0 0 auto; min-width: 0; padding: 8px 10px 9px; background: var(--ink-100); border: 1px solid var(--border); border-radius: 12px; font-size: 12.5px; transition: border-color .12s, opacity .12s; }
+.sfcb-card:hover { border-color: var(--border-strong); }
+.sfcb-card[draggable="true"] { cursor: grab; }
+.sfcb-card.u-roja { box-shadow: inset 4px 0 0 #ef4444; }
+.sfcb-card.u-ambar { box-shadow: inset 4px 0 0 #f59e0b; }
+.sfcb-card.fin { opacity: .8; }
+.sfcb-card.is-moviendo { opacity: .5; pointer-events: none; }
+.sfcb-card.is-nueva { animation: sfk-llega 1.6s ease-out; }
+.sfcb-card.arrastrada { opacity: .4; }
+.sfcb-card .sfc-row, .sfcb-card .sfc-head, .sfcb-card .lb-nom, .sfcb-card .sfc-det { display: contents; }
+.sfcb-card .ln-num { order: 10; font-size: 11.5px; line-height: 17px; padding: 0 6px; }
+.sfcb-card .sfc-sinnom { order: 20; }
+.sfcb-card .lb-nom > .logi-pill { order: 30; margin-left: auto; white-space: normal; text-align: right; line-height: 15px; padding: 1px 6px; }
+.sfcb-card .lb-nom .n { order: 40; flex: 1 1 100%; min-width: 0; font-size: 15px; font-weight: 800; line-height: 1.22; color: var(--fg); white-space: normal; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.sfcb-card .sfc-mat { order: 50; flex: 1 1 100%; min-width: 0; font-size: 12.5px; color: var(--fg-muted); }
+.sfcb-card .sfc-archs { order: 60; flex: 1 1 100%; min-width: 0; gap: 4px; }
+.sfcb-card .sfc-arch { font-size: 11px; padding: 1px 7px; border-radius: 7px; }
+.sfcb-card .sfc-acl-txt { order: 70; flex: 1 1 100%; min-width: 0; font-size: 12px; line-height: 1.35; }
+.sfcb-card.acl-larga:not(.acl-abierta) .sfc-acl-txt { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.sfcb-mas { order: 75; margin-top: -3px; padding: 0; border: 0; background: none; font: inherit; font-size: 11.5px; font-weight: 700; color: var(--neon-cyan); cursor: pointer; }
+.sfcb-mas:hover, .sfcb-mas:focus-visible { text-decoration: underline; outline: none; }
+.sfcb-card .sfc-meta { order: 80; flex: 1 1 100%; min-width: 0; font-size: 11px; line-height: 1.35; }
+.sfcb-card .sfc-acc { order: 90; flex: 1 1 100%; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; margin: 1px 0 0; padding-top: 6px; border-top: 1px solid var(--border); }
+.sfcb-card select.lb-sel.sfc-est { font-size: 12px; line-height: 18px; padding: 3px 22px 3px 9px; }
+.sfcb-card .sfc-cancelar, .sfcb-card .sfc-editar { font-size: 12px !important; padding: 3px 10px !important; }
+.sfcb-col .sfk-todos { margin-top: 0; }
+.sfcb-ayuda { margin-top: 2px; }
+/* Cancelados: una barra plegable debajo del tablero; abierta, las tarjetas en grilla. */
+.sfcb-canc { margin-top: 2px; background: var(--ink-050, #0f0f15); border: 1px solid var(--border); border-left: 3px solid var(--c); border-radius: var(--r-md); }
+.sfcb-canc > summary { display: flex; align-items: center; gap: 8px; padding: 10px 12px; cursor: pointer; list-style: none; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--c); user-select: none; }
+.sfcb-canc > summary::-webkit-details-marker { display: none; }
+.sfcb-canc > summary b { font: 600 12px var(--font-mono, monospace); color: var(--fg); background: var(--ink-200); border-radius: 999px; padding: 1px 8px; letter-spacing: 0; }
+.sfcb-canc-ver { margin-left: auto; font-size: 11.5px; font-weight: 600; text-transform: none; letter-spacing: 0; color: var(--fg-subtle); }
+.sfcb-canc-ver::after { content: ' ▸'; }
+.sfcb-canc[open] .sfcb-canc-ver::after { content: ' ▾'; }
+.sfcb-canc > summary:hover .sfcb-canc-ver { color: var(--fg); }
+.sfcb-canc.drop-ok { border-color: var(--c); background: color-mix(in srgb, var(--c) 8%, var(--ink-050, #0f0f15)); }
+.sfcb-canc-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px; align-items: start; padding: 0 10px 10px; }
+@media (max-width: 760px) {
+  /* Las 4 pestañas entran en 375 px; si no, se deslizan como las del tablero de corpóreos. */
+  .sfcb-tabs { gap: 5px; }
+  .sfcb-tabs .sfk-tab { flex: 1 0 auto; padding: 6px 9px; font-size: 12.5px; }
+  .sfcb-tabs .sfk-tab b { margin-left: 2px; }
+  .sfcb-card { padding: 11px 12px 12px; font-size: 13px; }
+  .sfcb-card .lb-nom .n { font-size: 16.5px; }
+  .sfcb-card .sfc-mat { font-size: 13px; }
+  .sfcb-card select.lb-sel.sfc-est { font-size: 13px; line-height: 20px; padding: 6px 24px 6px 11px; }
+  .sfcb-card .sfc-cancelar, .sfcb-card .sfc-editar { font-size: 13px !important; padding: 6px 12px !important; }
+  .sfcb-canc-list { grid-template-columns: minmax(0, 1fr); padding: 0 8px 8px; }
+}
+
 /* Chat: en la compu los filtros (Todos, No leídos, Para cotizar, Por cobrar, Etiquetas, Servicio de corte) bajan a otra fila
    en vez de quedar cortados: la barra no tiene scroll visible y "Etiquetas" quedaba afuera (Gaspar 16-oct). En el celular
    sigue deslizandose de costado. */

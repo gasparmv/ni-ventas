@@ -9520,12 +9520,11 @@ function sfcListaHtml() {
   const D = STATE.sfCortes, adm = isAdmin() || isFranOnly();
   if (!D) return '<div class="lb-tit sfc-tit">Pedidos de corte</div><div class="lb-list"><div class="lb-vacio">Cargando…</div></div>';
   if (D.error) return `<div class="lb-tit sfc-tit">Pedidos de corte</div><div class="lb-list"><div class="lb-vacio"><div style="color:#ef4444;margin-bottom:8px">${escapeHtml(D.error)}</div><button type="button" class="btn" data-sfc-refresh>Reintentar</button></div></div>`;
-  const cs = D.cortes || [], enCurso = c => ['pedido', 'en_corte', 'listo'].includes(c.estado);
-  const act = cs.filter(enCurso).sort((a, b) => String(a.fecha).localeCompare(String(b.fecha)) || a.id - b.id);
-  const fin = cs.filter(c => !enCurso(c)).slice(0, 30);
-  return `<div class="lb-tit sfc-tit">${adm ? 'Pedidos de corte en curso' : 'Tus pedidos en curso'}${act.length ? ' · ' + act.length : ''}</div>
-    <div class="lb-list">${act.length ? act.map(sfcFilaHtml).join('') : `<div class="lb-vacio">${adm ? 'No hay pedidos de corte en curso.' : 'No tenés pedidos en curso.'}</div>`}</div>
-    ${fin.length ? `<div class="lb-tit sfc-tit">Entregados y cancelados</div><div class="lb-list">${fin.map(sfcFilaHtml).join('')}</div>` : ''}`;
+  // Tablero por estado (Gaspar 26-oct: "hacé esto en un kanban con estados de producción"): ver sfcb* más abajo.
+  const cs = D.cortes || [], cel = sfcbEtapaCel(cs), drag = adm && sfkFino();
+  return `<div class="lb-tit sfc-tit">${adm ? 'Pedidos de corte' : 'Tus pedidos de corte'}</div>`
+    + sfcbTabsHtml(cs, cel) + sfcbBoardHtml(cs, cel, drag) + sfcbCanceladosHtml(cs, drag)
+    + (adm ? `<div class="logi-ayuda sfcb-ayuda">Cambiá el estado con el selector de cada tarjeta${drag ? ' o arrastrala a otra columna' : ''} · Arriba de cada columna, los vencidos y los que son para hoy</div>` : '');
 }
 function sfcFilaHtml(c) {
   const adm = isAdmin() || isFranOnly(), E = sfcEstado(c.estado), cerrado = c.estado === 'entregado' || c.estado === 'cancelado', dias = sfDias(c.fecha);
@@ -9558,7 +9557,7 @@ function sfcFilaHtml(c) {
   </div>`;
 }
 function sfcPintarLista() {
-  const l = document.querySelector('.sfc-wrap [data-sfc-lista]'); if (l) l.innerHTML = sfcListaHtml();
+  const l = document.querySelector('.sfc-wrap [data-sfc-lista]'); if (l) sfcbPintar(l);
   const u = document.querySelector('.sfc-wrap [data-sfc-upd]'); if (u) u.textContent = STATE.sfCortes && !STATE.sfCortes.error ? sfHace(STATE.sfCortes.at) : '';
 }
 async function sfcCambiarEstado(id, estado, el) {
@@ -9567,11 +9566,13 @@ async function sfcCambiarEstado(id, estado, el) {
   const volver = () => { if (el && el.tagName === 'SELECT') el.value = c.estado; };
   if (estado === 'cancelado' && !(await showConfirm((isAdmin() || isFranOnly()) ? '¿Cancelar el pedido de corte #' + id + '?' : '¿Cancelar el pedido #' + id + '? A Gaspar le llega el aviso.', { title: 'Cancelar pedido', confirmLabel: 'Sí, cancelar', cancelLabel: 'No' }).catch(() => false))) { volver(); return; }
   if (el) el.disabled = true;
+  const card = document.querySelector('.sfc-wrap [data-sfcb-card="' + id + '"]'); if (card) card.classList.add('is-moviendo');
   try {
     const j = await sfFetch('/admin/sinfrontera/corte/estado', { id, estado, quien: isSinFronteraOnly() ? sfOperador() : '' });
     if (j.corte) { sfcCambioGuardado(); Object.assign(c, j.corte); }
+    STATE._sfcbMovido = id; // el tablero la marca en su columna nueva (sfcbPintar)
     niToast('#' + id + ': ' + sfcEstado(c.estado)[1].toLowerCase());
-  } catch (e) { volver(); niToast('No se guardó: ' + String((e && e.message) || 'error'), { error: true }); }
+  } catch (e) { volver(); if (card) card.classList.remove('is-moviendo'); niToast('No se guardó: ' + String((e && e.message) || 'error'), { error: true }); }
   if (el) el.disabled = false;
   // Sin Frontera canceló el pedido que tenía abierto para editar: ya no se puede editar, se cierra el formulario.
   if (STATE.sfcEditId === id && !sfcPuedeEditar(c)) sfcEditarCancelar(); else sfcPintarLista();
@@ -9618,6 +9619,186 @@ async function sfcFranUI() {
     } catch (ex) { b.disabled = false; err(ex.message || 'No se pudo guardar'); }
   });
   setTimeout(() => { const i = $(u.existe ? '[data-tel]' : '[data-p1]'); if (i) i.focus(); }, 50);
+}
+
+// ---------- Cortes: tablero por estado (Gaspar 26-oct: "hacé esto en un kanban con estados de producción así se ordena más
+// visualmente") ----------
+// Columnas Pedido → En corte → Listo → Entregado (solo lo de los últimos días, con "Ver todos"); los cancelados, aparte y
+// plegados. Mismas piezas visuales que el tablero de corpóreos (.sfk-col, .sfk-tabs: en el celular una pestaña por columna),
+// con atributos propios (data-sfcb-*) para no cruzarse con sus eventos. La tarjeta ES la fila de la lista (sfcFilaHtml)
+// envuelta: el CSS la acomoda en vertical, así lo que se cambie ahí (nombre, plazo, botones) sale igual en el tablero. Los
+// permisos son los de siempre: el selector de estado (y el arrastre, solo compu con mouse) para Gaspar y Fran; Sin Frontera
+// edita y cancela con sus botones. Las tres pantallas (Gaspar, Fran y Sin Frontera) usan este mismo tablero.
+const SFCB_COLS = ['pedido', 'en_corte', 'listo', 'entregado'];
+const SFCB_DIAS_ENT = 7, SFCB_MAX_ENT = 8;   // Entregado: lo de la última semana (máx. 8); el resto, con "Ver todos"
+const SFCB_CEL_KEY = 'niventas.sfcEtapaCel';
+function sfcbDe(cs, id) {
+  const lista = cs.filter(c => sfcEstado(c.estado)[0] === id);   // un estado desconocido cae en Pedido (como sfcEstado)
+  // Entregados y cancelados: lo último arriba. El resto: por la fecha para la que lo piden (vencidos y los de hoy arriba), y
+  // después por número.
+  if (id === 'entregado' || id === 'cancelado') return lista.sort((a, b) => String(b.estado_at || '').localeCompare(String(a.estado_at || '')) || b.id - a.id);
+  return lista.sort((a, b) => String(a.fecha || '9999-99-99').localeCompare(String(b.fecha || '9999-99-99')) || a.id - b.id);
+}
+// Lo que muestra cada columna: en Entregado, los recientes salvo que se haya tocado "Ver todos".
+function sfcbVisibles(cs, id) {
+  const lista = sfcbDe(cs, id);
+  if (id !== 'entregado') return { lista, total: lista.length, recientes: lista.length };
+  const lim = Date.now() - SFCB_DIAS_ENT * 86400000;
+  const rec = lista.filter(c => c.estado_at && new Date(c.estado_at).getTime() >= lim).slice(0, SFCB_MAX_ENT);
+  return { lista: STATE.sfcbEntTodos ? lista : rec, total: lista.length, recientes: rec.length };
+}
+// Pestaña del celular: la última usada; la primera vez, la primera columna con algo para hacer.
+function sfcbEtapaCel(cs) {
+  let e = STATE.sfcbEtapaCel;
+  if (e == null) { try { e = localStorage.getItem(SFCB_CEL_KEY); } catch (_) { e = null; } }
+  if (!SFCB_COLS.includes(e)) e = ['pedido', 'en_corte', 'listo'].find(x => cs.some(c => sfcEstado(c.estado)[0] === x)) || 'pedido';
+  return e;
+}
+// Aclaraciones largas: en la tarjeta van 3 renglones y "ver todo" las abre (queda abierta aunque se repinte).
+function sfcbAclLarga(c) { const a = String(c.aclaraciones || ''); return a.length > 140 || (a.match(/\n/g) || []).length >= 3; }
+function sfcbCardHtml(c, drag) {
+  const e = sfcEstado(c.estado)[0], dias = sfDias(c.fecha), larga = sfcbAclLarga(c);
+  const abierta = larga && !!(STATE.sfcbAclAbiertas && STATE.sfcbAclAbiertas.has(c.id));
+  // Borde como la pastilla del plazo: vencido en rojo; para hoy o mañana, en ámbar. Solo lo que falta cortar.
+  const urg = (e === 'pedido' || e === 'en_corte') && !isNaN(dias) ? (dias < 0 ? ' u-roja' : dias <= 1 ? ' u-ambar' : '') : '';
+  return `<article class="sfcb-card${urg}${e === 'entregado' || e === 'cancelado' ? ' fin' : ''}${larga ? ' acl-larga' : ''}${abierta ? ' acl-abierta' : ''}" data-sfcb-card="${c.id}"${drag ? ' draggable="true"' : ''}>`
+    + sfcFilaHtml(c)
+    + (larga ? `<button type="button" class="sfcb-mas" data-sfcb-mas="${c.id}" aria-expanded="${abierta ? 'true' : 'false'}">${abierta ? 'ver menos' : 'ver todo'}</button>` : '')
+    + `</article>`;
+}
+function sfcbColHtml(id, cs, cel, drag) {
+  const E = sfcEstado(id), v = sfcbVisibles(cs, id), ent = id === 'entregado';
+  const vacio = ent ? (STATE.sfcbEntTodos ? 'Nada entregado' : 'Nada entregado estos días') : 'Nada en ' + E[1].toLowerCase();
+  return `<section class="sfk-col sfcb-col${cel === id ? ' on-cel' : ''}" data-sfcb-col="${id}" style="--c:${E[2]}">`
+    + `<header class="sfk-col-h"><i class="sfk-dot"></i><span class="t">${escapeHtml(E[1])}</span><span class="n">${v.lista.length}</span></header>`
+    + (ent ? `<div class="sfk-sub">${STATE.sfcbEntTodos ? 'todos' : 'últimos ' + SFCB_DIAS_ENT + ' días'}</div>` : '')
+    + `<div class="sfk-col-list" data-sfcb-list="${id}">${v.lista.map(c => sfcbCardHtml(c, drag)).join('')}${v.lista.length ? '' : `<div class="sfk-vacio">${vacio}</div>`}`
+    + (ent && v.total > v.recientes ? `<button type="button" class="btn btn-ghost lb-mini sfk-todos" data-sfcb-ent-todos>${STATE.sfcbEntTodos ? 'Ver solo los recientes' : 'Ver todos (' + v.total + ')'}</button>` : '')
+    + `</div></section>`;
+}
+function sfcbTabsHtml(cs, cel) {
+  return `<div class="sfk-tabs sfcb-tabs" data-sfcb-tabs>${SFCB_COLS.map(id => {
+    const E = sfcEstado(id), n = sfcbVisibles(cs, id).lista.length;
+    return `<button type="button" class="sfk-tab${id === cel ? ' on' : ''}${n ? '' : ' cero'}" data-sfcb-tab="${id}" style="--c:${E[2]}">${escapeHtml(E[1])} <b>${n}</b></button>`;
+  }).join('')}</div>`;
+}
+function sfcbBoardHtml(cs, cel, drag) { return `<div class="sfk-board sfcb-board" data-sfcb-board>${SFCB_COLS.map(id => sfcbColHtml(id, cs, cel, drag)).join('')}</div>`; }
+// Cancelados: plegados abajo del tablero (en la compu también se puede soltar una tarjeta ahí para cancelarla).
+function sfcbCanceladosHtml(cs, drag) {
+  const lista = sfcbDe(cs, 'cancelado'), E = sfcEstado('cancelado');
+  if (!lista.length) return '';
+  return `<details class="sfcb-canc" data-sfcb-col="cancelado" data-sfcb-canc style="--c:${E[2]}"${STATE.sfcbCancAbierto ? ' open' : ''}>`
+    + `<summary><i class="sfk-dot"></i><span class="t">Cancelados</span><b>${lista.length}</b><span class="sfcb-canc-ver">${STATE.sfcbCancAbierto ? 'ocultar' : 'ver'}</span></summary>`
+    + `<div class="sfcb-canc-list">${lista.map(c => sfcbCardHtml(c, drag)).join('')}</div></details>`;
+}
+// Firma de lo que se ve: el refresco de fondo solo repinta si algo cambió (incluye el día, por "faltan N días").
+function sfcbSig() {
+  const D = STATE.sfCortes;
+  return JSON.stringify([D ? (D.error || '') : null, D && D.cortes ? D.cortes : null, sfcbEtapaCel((D && D.cortes) || []), !!STATE.sfcbEntTodos,
+    new Date().toDateString(), isAdmin(), isFranOnly(), sfkFino()]);
+}
+// Repinta el tablero (no el formulario ni la barra de arriba) conservando el scroll de cada columna y de las pestañas. Sin
+// `forzar`, solo si cambió algo. Mientras se arrastra una tarjeta, espera a que la suelten.
+function sfcbPintar(l, forzar) {
+  if (STATE._sfcbDrag) { STATE._sfcbPend = true; return; }
+  const sig = sfcbSig();
+  if (forzar || l.getAttribute('data-sig') !== sig) {
+    const scroll = {}, tb0 = l.querySelector('[data-sfcb-tabs]'), bd0 = l.querySelector('[data-sfcb-board]');
+    const tabsX = tb0 ? tb0.scrollLeft : 0, boardX = bd0 ? bd0.scrollLeft : 0;
+    l.querySelectorAll('[data-sfcb-list]').forEach(x => { scroll[x.getAttribute('data-sfcb-list')] = x.scrollTop; });
+    l.setAttribute('data-sig', sig);
+    l.innerHTML = sfcListaHtml();
+    l.querySelectorAll('[data-sfcb-list]').forEach(x => { const s = scroll[x.getAttribute('data-sfcb-list')]; if (s) x.scrollTop = s; });
+    const tb = l.querySelector('[data-sfcb-tabs]'), bd = l.querySelector('[data-sfcb-board]');
+    if (tb) tb.scrollLeft = tabsX;
+    if (bd) bd.scrollLeft = boardX;
+  }
+  // La que se acaba de mover: titila en su columna nueva (a la vista si quedó más abajo) y, en el celular, su pestaña.
+  const id = STATE._sfcbMovido; STATE._sfcbMovido = null;
+  const card = id ? l.querySelector('[data-sfcb-card="' + id + '"]') : null;
+  if (!card) return;
+  card.classList.add('is-nueva');
+  const col = card.closest('[data-sfcb-col]'), list = card.closest('[data-sfcb-list]');
+  if (list && !sfkCel()) { const r = card.getBoundingClientRect(), lr = list.getBoundingClientRect(); if (r.top < lr.top || r.bottom > lr.bottom) list.scrollTop += r.top - lr.top - 8; }
+  const tab = col ? l.querySelector('[data-sfcb-tab="' + col.getAttribute('data-sfcb-col') + '"]') : null;
+  if (tab && !tab.classList.contains('on')) { tab.classList.remove('titila'); void tab.offsetWidth; tab.classList.add('titila'); }
+}
+function sfcbElegirTab(id) {
+  STATE.sfcbEtapaCel = id; try { localStorage.setItem(SFCB_CEL_KEY, id); } catch (_) {}
+  const l = document.querySelector('.sfc-wrap [data-sfc-lista]'); if (!l) return;
+  l.querySelectorAll('[data-sfcb-tab]').forEach(b => b.classList.toggle('on', b.getAttribute('data-sfcb-tab') === id));
+  l.querySelectorAll('.sfk-col[data-sfcb-col]').forEach(c => c.classList.toggle('on-cel', c.getAttribute('data-sfcb-col') === id));
+  l.setAttribute('data-sig', sfcbSig());
+  // Si estaba más abajo en una columna larga, vuelve al principio del tablero (si no, la otra columna aparece por la mitad).
+  if (l.getBoundingClientRect().top < 0) { try { l.scrollIntoView({ block: 'start' }); } catch (_) {} }
+}
+// Eventos del tablero (los suma sfcBind al contenedor recién dibujado; el tablero se repinta adentro sin perderlos).
+function sfcbBind(root) {
+  root.addEventListener('click', e => {
+    const tab = e.target.closest('[data-sfcb-tab]'); if (tab) { sfcbElegirTab(tab.getAttribute('data-sfcb-tab')); return; }
+    if (e.target.closest('[data-sfcb-ent-todos]')) {
+      STATE.sfcbEntTodos = !STATE.sfcbEntTodos;
+      const l = document.querySelector('.sfc-wrap [data-sfc-lista]'); if (l) sfcbPintar(l, true);
+      return;
+    }
+    const mas = e.target.closest('[data-sfcb-mas]');
+    if (mas) {
+      const id = +mas.getAttribute('data-sfcb-mas'), card = mas.closest('[data-sfcb-card]');
+      const S = STATE.sfcbAclAbiertas || (STATE.sfcbAclAbiertas = new Set()), on = !S.has(id);
+      if (on) S.add(id); else S.delete(id);
+      if (card) card.classList.toggle('acl-abierta', on);
+      mas.textContent = on ? 'ver menos' : 'ver todo'; mas.setAttribute('aria-expanded', on ? 'true' : 'false');
+    }
+  });
+  // <details> de los cancelados: 'toggle' no burbujea, se escucha en captura. Queda como lo dejaron aunque se repinte.
+  root.addEventListener('toggle', e => {
+    const d = e.target; if (!d || !d.matches || !d.matches('[data-sfcb-canc]')) return;
+    STATE.sfcbCancAbierto = d.open;
+    const v = d.querySelector('.sfcb-canc-ver'); if (v) v.textContent = d.open ? 'ocultar' : 'ver';
+  }, true);
+  if ((isAdmin() || isFranOnly()) && sfkFino()) sfcbBindDrag(root);
+}
+// ---------- Arrastrar entre columnas (solo compu con mouse; solo Gaspar y Fran, los que cambian el estado) ----------
+// Mismo camino que el selector (sfcCambiarEstado: cancelar pregunta, el worker valida). En el celular no hay arrastre: las
+// tarjetas no son draggable y el scroll no se toca.
+function sfcbFinDrag(root) {
+  STATE._sfcbDrag = null;
+  root.querySelectorAll('.sfcb-card.arrastrada, [data-sfcb-col].drop-ok').forEach(x => x.classList.remove('arrastrada', 'drop-ok'));
+  const b = root.querySelector('[data-sfcb-board]'); if (b) b.classList.remove('sfk-arrastrando');
+  if (STATE._sfcbPend) { STATE._sfcbPend = false; sfcPintarLista(); } // algo llegó mientras se arrastraba
+}
+function sfcbBindDrag(root) {
+  // Empezar a arrastrar desde las aclaraciones no arrastra (así se pueden seleccionar y copiar), ni desde el selector, un
+  // botón o un archivo (en Firefox un select adentro de algo draggable no se deja usar; el archivo se arrastra como link).
+  root.addEventListener('mousedown', e => {
+    const card = e.target.closest && e.target.closest('.sfcb-card[draggable]');
+    if (card) card.setAttribute('draggable', e.target.closest('.sfc-acl-txt, select, button, a, input') ? 'false' : 'true');
+  });
+  root.addEventListener('dragstart', e => {
+    const card = e.target.closest && e.target.closest('.sfcb-card[draggable="true"]');
+    if (!card || e.target !== card) return;   // un archivo (link) se arrastra como link, no mueve la tarjeta
+    STATE._sfcbDrag = +card.getAttribute('data-sfcb-card');
+    try { e.dataTransfer.setData('text/plain', '#' + STATE._sfcbDrag); e.dataTransfer.effectAllowed = 'move'; } catch (_) {}
+    card.classList.add('arrastrada');
+    const b = root.querySelector('[data-sfcb-board]'); if (b) b.classList.add('sfk-arrastrando');
+  });
+  root.addEventListener('dragend', () => { if (STATE._sfcbDrag) sfcbFinDrag(root); });
+  root.addEventListener('dragover', e => {
+    if (!STATE._sfcbDrag) return;
+    const col = e.target.closest && e.target.closest('[data-sfcb-col]');
+    root.querySelectorAll('[data-sfcb-col].drop-ok').forEach(x => { if (x !== col) x.classList.remove('drop-ok'); });
+    if (!col) return;
+    e.preventDefault();
+    try { e.dataTransfer.dropEffect = 'move'; } catch (_) {}
+    col.classList.add('drop-ok');
+  });
+  root.addEventListener('drop', e => {
+    if (!STATE._sfcbDrag) return;
+    const col = e.target.closest && e.target.closest('[data-sfcb-col]'), id = STATE._sfcbDrag;
+    e.preventDefault();
+    sfcbFinDrag(root);
+    if (col) sfcCambiarEstado(id, col.getAttribute('data-sfcb-col'), null);
+  });
 }
 function sfcMarcar(form, attr, v) { form.querySelectorAll('[' + attr + ']').forEach(b => { const on = b.getAttribute(attr) === v; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on ? 'true' : 'false'); }); }
 // Eventos de la pantalla (los llama bindSinFrontera con el contenedor recién dibujado).
@@ -9687,6 +9868,7 @@ function sfcBind(root) {
     if (e.target.closest('[data-sfc-refresh]')) { if (STATE.sfCortes && STATE.sfCortes.error) { STATE.sfCortes = null; sfcPintarLista(); } sfcCargar({}); return; }
     const c = e.target.closest('[data-sfc-cancelar]'); if (c) sfcCambiarEstado(+c.getAttribute('data-sfc-cancelar'), 'cancelado', c);
   });
+  sfcbBind(root);
 }
 function bindSinFrontera() {
   const root = document.querySelector('.sf-wrap');
