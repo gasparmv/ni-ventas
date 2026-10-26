@@ -279,7 +279,7 @@
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" integrity="sha384-/1qUCSGwTur9vjf/z9lmu/eCUYbpOTgSjmpbMQZ1/CtX2v/WcAIKqRv+U1DUCG6e" crossorigin="anonymous"></script>
-<script src="nest-core.js?v=5"></script>
+<script src="nest-core.js?v=6"></script>
 <script src="clipper.js?v=1"></script>
 <script src="gcode.js?v=5"></script>
 <script src="dxf.js?v=4"></script>
@@ -297,7 +297,7 @@ const TOL_NEST = 0.05;       // mm: simplificación del contorno para acomodar (
 const COL = { corte: '#ff4d4d', calado: '#f2f2f2', agujero: '#4d8dff', suelto: '#ff9f1a', ignorado: '#4a5263', fondo: '#0b0d11', placa: '#161a22' };
 const CLASES = [['corte', 'Corte'], ['calado', 'Calado'], ['agujero', 'Agujeros'], ['ignorar', 'Ignorar']];
 const CFG_DEF = { largo: 2440, ancho: 1220, sep: 6.5, margen: 5, paso: 5, seg: 20, borde: true, enteras: true, gzip: true, adentro: true };
-const VERSION_MOTOR = '5'; // subirla (y la de nest-core.js?v= arriba) cada vez que cambian nest-core.js o nest-worker.js: GitHub Pages los cachea 10 min
+const VERSION_MOTOR = '6'; // subirla (y la de nest-core.js?v= arriba) cada vez que cambian nest-core.js o nest-worker.js: GitHub Pages los cachea 10 min
 const TOLS_UNION = [0.001, 0.01, 0.05, 0.1, 0.5, 1, 2]; // mm: a cuánto se toman como la misma las puntas de dos trazos sueltos
 const TOL_UNION = 0.01;
 const CIERRE_SOLO = 2;       // mm: un contorno de corte abierto (3 puntos o más) que no cierra por esto o menos se cierra solo
@@ -1693,7 +1693,9 @@ function contornos(m, W, H) {
 function calcularSobrante(s) {
   const r = S.mejor, cfg = S.cfgNest, lam = laminaInfo(s), N = NestCore;
   const hoja = lam.tipo === 'recorte' ? N.hojaLamina(lam, 1, null) : N.nuevaHoja(Math.ceil(lam.largo), Math.ceil(lam.ancho));
-  const dsc = N.disco(cfg.sep);
+  // Una celda más que la separación (revisión 26-oct): las piezas compactadas no caen justo en la grilla y el redondeo de abajo
+  // las corre hasta 0,71 mm; así el sobrante sigue lejos de cada pieza y nunca se mete en el surco de la fresa.
+  const dsc = N.disco(cfg.sep + 1);
   for (const c of r.coloc) if (c.hoja === s) {
     const pz = S.piezas[c.id];
     if (!pz.simple) pz.simple = N.simplificar(pz.poly, TOL_NEST); // piezas rearmadas después de acomodar: no lo tienen todavía

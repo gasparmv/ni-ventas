@@ -138,11 +138,23 @@
   // comparten con su copia guardada hasta que se escriben (propia[j]).
   function nuevaHoja(W, H) { const filas = new Array(H); for (let j = 0; j < H; j++) filas[j] = []; return { W, H, filas, usado: 0, ocupadas: 0, libre: new Int32Array(H).fill(W), run: new Array(H).fill(null), propia: new Uint8Array(H) }; }
   function libreMax(f, W) { let x = 0, m = 0; for (const [a, b] of f) { if (a - x > m) m = a - x; x = b + 1; } return Math.max(m, W - x); }
+  // Las filas celda por celda se reciclan (revisión 26-oct): cada corrida arma unas mil por placa y tirarlas juntaba basura
+  // entre GCs (el pico de memoria de cada worker subía y bajaba de a ~100 MB). Al terminar la corrida, las propias de sus
+  // láminas vuelven acá (por ancho, hasta ~64 MB: lo que una corrida grande ya usa a la vez) y trabajar las suelta al final
+  // de la ronda. filaRun escribe la fila entera, así que no hace falta limpiarlas.
+  const RUNS = new Map();
+  function pedirRun(W) { const p = RUNS.get(W); return p && p.length ? p.pop() : (W < 32000 ? new Int16Array(W) : new Int32Array(W)); }
+  function devolverRuns(hojas) {
+    for (const h of hojas) {
+      let p = RUNS.get(h.W); if (!p) RUNS.set(h.W, p = []);
+      for (let j = 0; j < h.H; j++) if (h.propia[j] && h.run[j]) { if (p.length * h.W < 32e6) p.push(h.run[j]); h.run[j] = null; h.propia[j] = 0; }
+    }
+  }
   function filaRun(hoja, j) {
     const f = hoja.filas[j], W = hoja.W;
     if (!f.length) { hoja.run[j] = null; return; }
     let v = hoja.run[j];
-    if (!v || !hoja.propia[j]) { v = hoja.run[j] = W < 32000 ? new Int16Array(W) : new Int32Array(W); hoja.propia[j] = 1; }
+    if (!v || !hoja.propia[j]) { v = hoja.run[j] = pedirRun(W); hoja.propia[j] = 1; }
     let x = 0;
     for (const [a, b] of f) { for (let c = x; c < a; c++) v[c] = a - c; v.fill(-(b + 1), a, b + 1); x = b + 1; }
     for (let c = x; c < W; c++) v[c] = W - c;
@@ -273,6 +285,14 @@
     hoja.usado = Math.max(hoja.usado, gx + m.c1 + 1);
   }
   function angulos(paso) { const out = []; for (let g = 0; g < 360; g += paso) out.push(g * Math.PI / 180); return out; }
+  // Clave de la forma exacta para noEntra (revisión 26-oct): el contorno simplificado y los huecos corridos a la esquina de su
+  // caja, a 0,001 mm, cada anillo desde su vértice menor. Solo las copias idénticas la comparten: una pieza y su espejo (una L
+  // y una J) tienen la misma área y la misma caja pero no entran en los mismos lugares.
+  function firmaForma(simple, huecos) {
+    const b = bbox(simple), r = (v) => Math.round(v * 1000);
+    const anillo = (q) => { const s = q.map(([x, y]) => r(x - b.x0) + ',' + r(y - b.y0)); let k = 0; for (let i = 1; i < s.length; i++) if (s[i] < s[k]) k = i; return s.slice(k).concat(s.slice(0, k)).join(' '); };
+    return [simple].concat(huecos || []).map(anillo).join('|');
+  }
   // Una corrida completa con un orden de piezas. cache: Map de máscaras (pieza|ángulo).
   function corrida(piezas, orden, cfg, cache) {
     const res = cfg.res, W = Math.floor(cfg.largo / res), H = Math.floor(cfg.ancho / res);
@@ -293,18 +313,18 @@
     });
     const R = hojas.length, coloc = [], sinLugar = [];
     // Piezas repetidas (la misma letra varias veces): si una no entró en una lámina, la copia tampoco va a entrar (la lámina
-    // solo se llena más y la búsqueda es la misma), así que no se vuelve a probar. Va por una firma de la forma.
-    const noEntra = new Set();
+    // solo se llena más y la búsqueda es la misma), así que no se vuelve a probar. noEntra[s] = las formas que no entraron en s.
+    const noEntra = [];
     for (const idx of orden) {
       const pz = piezas[idx];
       if (!pz.simple) pz.simple = simplificar(pz.poly, tol);
-      if (pz.firma == null) { const b = bbox(pz.simple); pz.firma = [pz.simple.length, (pz.huecos || []).length, Math.round(area(pz.simple) * 10), Math.round((b.x1 - b.x0) * 100), Math.round((b.y1 - b.y0) * 100)].join(':'); }
+      if (pz.firma == null) pz.firma = firmaForma(pz.simple, pz.huecos);
       let elegido = null;
       for (let s = 0; s <= hojas.length; s++) {
         if (s === hojas.length && cfg.soloRecortes) break;
         const hoja = s < hojas.length ? hojas[s] : nuevaHoja(W, H);
         if (s < hojas.length && (hoja.W * hoja.H - hoja.ocupadas) < pz.celdas) continue; // no le queda lugar ni contando todo lo libre
-        if (s < hojas.length && noEntra.has(pz.firma + '|' + s)) continue;
+        if (s < hojas.length && noEntra[s] && noEntra[s].has(pz.firma)) continue;
         let mejor = null;
         const masc = (a) => {
           // La clave va por el id de la pieza (no por su lugar en el arreglo): mejorarUltima corre con un subconjunto.
@@ -336,11 +356,12 @@
           break;
         }
         if (s === hojas.length) break; // no entra ni en una placa vacía
-        noEntra.add(pz.firma + '|' + s);
+        (noEntra[s] || (noEntra[s] = new Set())).add(pz.firma);
       }
       if (elegido) coloc.push({ id: pz.id, hoja: elegido.hoja, grados: elegido.a * cfg.paso, dx: elegido.gx * res - elegido.m.ox, dy: elegido.gy * res - elegido.m.oy });
       else sinLugar.push(pz.id);
     }
+    devolverRuns(hojas);
     // Puntaje: menos piezas sin lugar, menos placas enteras y la última más corta; si alcanzó con recortes, usar menos.
     const nuevas = hojas.length - R, usadas = [];
     hojas.forEach((h, k) => { if (k >= R || h.usado > 0) usadas.push(k); });
@@ -368,26 +389,34 @@
   // como están), así que cada vuelta con esas piezas solas cuesta una fracción de una corrida completa: se prueban órdenes
   // nuevos y gana el que deja la placa más corta. Nunca empeora: si no encuentra nada mejor, devuelve r: null. r.orden (el de
   // la corrida) se conserva para "Seguir". Corta a la hora fin, tras maxVueltas o tras 300 vueltas seguidas sin mejorar.
-  // alVuelta (opcional) se llama en cada vuelta (para contarlas en la página).
-  function mejorarUltima(piezas, r, cfg, cache, azar, fin, maxVueltas, alVuelta) {
+  // alVuelta (opcional) se llama en cada vuelta (para contarlas en la página) y alMejora(r nuevo), cada vez que la placa queda
+  // más corta que en r (para mandarlo sin esperar al final: revisión 26-oct).
+  function mejorarUltima(piezas, r, cfg, cache, azar, fin, maxVueltas, alVuelta, alMejora) {
     if (!r || !r.nuevas || r.sinLugar.length) return { r: null, vueltas: 0 };
     const ult = r.usadas[r.usadas.length - 1], ids = new Set();
     for (const c of r.coloc) if (c.hoja === ult) ids.add(c.id);
     const sub = piezas.filter((p) => ids.has(p.id));
     if (sub.length < 2) return { r: null, vueltas: 0 };
     const cfg2 = { ...cfg, recortes: [], soloRecortes: false }, pos = new Map(sub.map((p, i) => [p.id, i]));
-    const bases = ordenesBase(sub);
-    if (r.orden) bases.unshift(r.orden.filter((i) => ids.has(piezas[i].id)).map((i) => pos.get(piezas[i].id))); // da la misma placa
+    // Si todas las piezas van en esta placa, sus órdenes de base son los de la fase 1 (ya corridos): no se repiten.
+    const bases = sub.length < piezas.length || !r.orden ? ordenesBase(sub) : [];
+    const armar = (q) => ({ ...r, coloc: r.coloc.filter((c) => c.hoja !== ult).concat(q.coloc.map((c) => ({ ...c, hoja: ult }))), ultimoLargo: q.ultimoLargo, puntaje: r.puntaje - r.ultimoLargo + q.ultimoLargo });
     let mejor = null, k = 0, ultimaMejora = 0;
+    // El orden de r con solo estas piezas arma la misma placa (las demás nunca entraron en ella): arranca de ahí sin volver a
+    // correrlo (con una sola placa es una corrida entera).
+    if (r.orden) mejor = { q: { ultimoLargo: r.ultimoLargo }, ord: r.orden.filter((i) => ids.has(piezas[i].id)).map((i) => pos.get(piezas[i].id)) };
     const probar = (ord) => {
-      const q = corrida(sub, ord, cfg2, cache); k++; if (alVuelta) alVuelta();
-      if (q.nuevas === 1 && !q.sinLugar.length && (!mejor || q.ultimoLargo < mejor.q.ultimoLargo)) { mejor = { q, ord }; ultimaMejora = k; }
+      const q = corrida(sub, ord, cfg2, cache); k++;
+      if (q.nuevas === 1 && !q.sinLugar.length && (!mejor || q.ultimoLargo < mejor.q.ultimoLargo)) {
+        mejor = { q, ord }; ultimaMejora = k;
+        if (alMejora && q.ultimoLargo < r.ultimoLargo) alMejora(armar(q));
+      }
+      if (alVuelta) alVuelta();
     };
     for (const b of bases) { if (Date.now() >= fin) break; probar(b); }
     while (mejor && Date.now() < fin && k < (maxVueltas || Infinity) && k - ultimaMejora < 300) probar(variar(mejor.ord, azar));
     if (!mejor || mejor.q.ultimoLargo >= r.ultimoLargo) return { r: null, vueltas: k };
-    const coloc = r.coloc.filter((c) => c.hoja !== ult).concat(mejor.q.coloc.map((c) => ({ ...c, hoja: ult })));
-    return { r: { ...r, coloc, ultimoLargo: mejor.q.ultimoLargo, puntaje: r.puntaje - r.ultimoLargo + mejor.q.ultimoLargo }, vueltas: k };
+    return { r: armar(mejor.q), vueltas: k };
   }
   // Primer contacto de un punto que avanza (p + t·u, t >= 0, u unitario) con la "cápsula" de radio rr alrededor del segmento ab
   // (los puntos a menos de rr de él): el t más chico, o Infinity si no la toca.
@@ -402,9 +431,11 @@
     const vx = bx - ax, vy = by - ay, L = Math.sqrt(vx * vx + vy * vy);
     if (L > 1e-12) {
       const nx = -vy / L, ny = vx / L, dn = nx * (px - ax) + ny * (py - ay), un = nx * ux + ny * uy;
+      // En la banda de 1e-9 (apenas adentro del borde) y acercándose, el contacto es ya: s se recorta a 0 en vez de salir
+      // negativo y descartarse (revisión 26-oct: el punto cruzaba el segmento entero).
       let s = -1;
-      if (dn >= rr - 1e-9 && un < 0) s = (rr - dn) / un;
-      else if (dn <= -rr + 1e-9 && un > 0) s = (-rr - dn) / un;
+      if (dn >= rr - 1e-9 && un < 0) s = Math.max(0, (rr - dn) / un);
+      else if (dn <= -rr + 1e-9 && un > 0) s = Math.max(0, (-rr - dn) / un);
       else if (Math.abs(dn) < rr - 1e-9 && dn * un < 0) { const w0 = ((px - ax) * vx + (py - ay) * vy) / L; if (w0 >= 0 && w0 <= L) return 0; } // ya adentro (no debería pasar): no acercarse más
       if (s >= -1e-9) { if (s < 0) s = 0; const w = ((px + s * ux - ax) * vx + (py + s * uy - ay) * vy) / L; if (w >= 0 && w <= L && s < t) t = s; }
     }
@@ -416,12 +447,14 @@
   // entre piezas sep + 2·tol, al borde margen + tol. El avance es el primer contacto exacto (cada vértice contra las cápsulas
   // de los segmentos de la otra pieza, y al revés), así que puede resbalar a lo largo de una vecina y nunca la cruza ni se le
   // acerca de más. Solo en placas enteras (un recorte con forma no tiene el borde recto); la última placa primero. Corta a la
-  // hora fin y lo hecho hasta ahí vale igual. Devuelve un resultado nuevo (r no se toca).
-  function compactar(piezas, r, cfg, fin) {
+  // hora fin y lo hecho hasta ahí vale igual. Devuelve un resultado nuevo (r no se toca). soloUltima: compacta solo la última
+  // placa (las otras ya vienen compactadas).
+  function compactar(piezas, r, cfg, fin, soloUltima) {
     const tol = cfg.tol || 0.05, req = cfg.sep + 2 * tol + 1e-3, marg = cfg.margen + tol + 1e-3, BK = 8;
     const porId = new Map(piezas.map((p) => [p.id, p]));
     const out = { ...r, coloc: r.coloc.map((c) => ({ ...c })) };
     const nRec = r.nRec || 0, laminas = r.usadas.filter((s) => s >= nRec).reverse();
+    if (soloUltima) laminas.length = Math.min(1, laminas.length);
     let movido = 0;
     for (const s of laminas) {
       // Cada pieza: segmentos y vértices girados (sin trasladar), y los segmentos repartidos en franjas de BK mm por y y por x
@@ -511,21 +544,24 @@
     if (movido > 0) out.puntaje -= 1e-3;
     return out;
   }
-  // Lo que hace cada worker en una ronda (nest-worker.js; las pruebas en Node lo llaman igual). Hasta la mitad del tiempo prueba
-  // órdenes (fase 1: el primero, el de base o el que siguió, y después variantes del mejor); hasta casi el final rehace sola la
-  // última placa (fase 2, mejorarUltima) y al final compacta (fase 3). est = { mejor: el mejor crudo de la fase 1 (su orden
-  // sigue en "Seguir" y en la ronda siguiente), final: el último mandado }. avisar('mejor', r) cada vez que mejora lo mandado
-  // y avisar('corrida', n) de a tandas (cada 0,2 s). o = { semilla, segundos, base, vueltas, vueltas2, parte1 } (para las
-  // pruebas: topes de vueltas de cada fase y la parte del tiempo de la fase 1).
+  // Lo que hace cada worker en una ronda (nest-worker.js; las pruebas en Node lo llaman igual). Primero prueba órdenes (fase 1:
+  // el primero, el de base o el que siguió, y después variantes del mejor); al cerrarla compacta el mejor crudo y lo manda, y
+  // hasta casi el final rehace sola la última placa (fase 2, mejorarUltima), compactando y mandando cada mejora. Así lo que
+  // queda al apretar Detener ya viene compactado y con lo mejor de la fase 2 (revisión 26-oct). est = { mejor: el mejor crudo
+  // de la fase 1 (su orden sigue en "Seguir" y en la ronda siguiente), final: el último mandado }. avisar('mejor', r) cada vez
+  // que mejora lo mandado y avisar('corrida', n) de a tandas (cada 0,2 s). o = { semilla, segundos, base, vueltas, vueltas2,
+  // parte1 } (para las pruebas: topes de vueltas de cada fase y la parte del tiempo de la fase 1).
   function trabajar(piezas, cfg, cache, est, o, avisar) {
     const azar = rng(o.semilla * 7919 + 13), bases = ordenesBase(piezas), w = (o.semilla - 1) % 100;
-    const t0 = Date.now(), T = o.segundos * 1000, fin1 = t0 + T * (o.parte1 || 0.5), fin = t0 + T, fin2 = fin - Math.min(3000, T * 0.1);
+    // Con poco tiempo la fase 1 se lleva más: al principio buena parte se va en armar las máscaras.
+    const T = o.segundos * 1000, parte1 = o.parte1 || (T <= 20000 ? 0.7 : 0.5);
+    const t0 = Date.now(), fin1 = t0 + T * parte1, fin = t0 + T, fin2 = fin - Math.min(3000, T * 0.1);
     let sinAvisar = 0, tAviso = Date.now();
     const contar = () => { sinAvisar++; if (Date.now() - tAviso > 200) { avisar('corrida', sinAvisar); sinAvisar = 0; tAviso = Date.now(); } };
     const mandar = (r) => { if (!est.final || r.puntaje < est.final.puntaje) { est.final = r; avisar('mejor', r); } };
-    // Fase 1. Los workers que no tienen un orden de base propio (hay 2 y suelen ser 3 o 4) arrancan de una variante, para no
-    // repetir la misma primera vuelta.
-    const inicio = o.base || (est.mejor && est.mejor.orden) || (w < bases.length ? bases[w] : variar(bases[w % bases.length], azar));
+    // Fase 1. Cada worker arranca de un orden de base (hay 2: el 3 y el 4 repiten el del 1 y el 2 y se separan después por las
+    // variantes). Arrancar de una variante al azar daba peor con poco tiempo (revisión 26-oct: placa43 a 10 s).
+    const inicio = o.base || (est.mejor && est.mejor.orden) || bases[w % bases.length];
     let k = 0, ultimaMejora = 0;
     while (k === 0 || (Date.now() < fin1 && k < (o.vueltas || Infinity) && k - ultimaMejora < 300)) {
       const orden = k === 0 ? inicio : variar(est.mejor ? est.mejor.orden : inicio, azar);
@@ -533,10 +569,20 @@
       k++; contar();
       if (!est.mejor || r.puntaje < est.mejor.puntaje) { est.mejor = r; ultimaMejora = k; mandar(r); }
     }
-    // Fase 2 y 3 sobre el mejor crudo (la fase 2 rinde más que seguir con la 1: va la mitad del tiempo a cada una).
-    const f2 = mejorarUltima(piezas, est.mejor, cfg, cache, azar, fin2, o.vueltas2, contar);
-    const r = compactar(piezas, f2.r || est.mejor, cfg, fin);
-    mandar(r);
+    // Si la fase 1 se comió todo el tiempo (la primera vuelta, con la máquina ocupada), la compactación igual tiene un mínimo
+    // (hasta()): sin ella la separación queda en 7 a 9 mm y el margen en 6.
+    const hasta = () => Math.max(fin, Date.now() + Math.min(2000, T * 0.15));
+    const c1 = compactar(piezas, est.mejor, cfg, hasta());
+    mandar(c1);
+    // Fase 2: cada mejora de la última placa se compacta (solo esa placa: las otras ya están en c1) y se manda, a lo sumo una
+    // vez por segundo; la que quedó sin mandar va al final.
+    const ult = est.mejor.usadas[est.mejor.usadas.length - 1];
+    const conC1 = (r2) => compactar(piezas, { ...r2, coloc: c1.coloc.filter((c) => c.hoja !== ult).concat(r2.coloc.filter((c) => c.hoja === ult)) }, cfg, hasta(), true);
+    let pend = null, tMandado = Date.now();
+    const vuelta2 = () => { contar(); if (pend && Date.now() - tMandado >= 1000) { mandar(conC1(pend)); pend = null; tMandado = Date.now(); } };
+    const f2 = mejorarUltima(piezas, est.mejor, cfg, cache, azar, fin2, o.vueltas2, vuelta2, (r2) => { pend = r2; });
+    if (pend) mandar(conC1(pend));
+    RUNS.clear(); // el worker queda esperando: no guarda filas
     if (sinAvisar) avisar('corrida', sinAvisar);
     return { vueltas: k, vueltas2: f2.vueltas, ms: Date.now() - t0 };
   }
