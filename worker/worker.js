@@ -6775,7 +6775,8 @@ async function corteFrenoAvisar(env, f, texto, opts = {}) {
   const t = ((+f.prueba ? '[prueba, no frené nada] ' : '') + String(texto || '')).replace(/\s+/g, ' ').trim().slice(0, 760) + ' ' + CORTE_FRENO_LINK;
   const tipo = opts.tipo || (/^pago_/.test(f.tipo) ? 'corte_pago_dif' : (f.tipo === 'agregar' ? 'corte_agregar' : 'corte_freno'));
   const plata = /^pago_/.test(f.tipo) || f.tipo === 'agregar';
-  try { await precotizNotifyGaspar(env, t, { tipo, prioridad: +f.prueba ? 'P2' : 'P1', plata: plata && !+f.prueba, refPhone: f.telefono, clave: 'corte_freno:' + f.id + (opts.recordatorio ? ':rec' : '') }); } catch (_) {}
+  // El tipo va en la clave: un comprobante suelto que después resulta de más vuelve a avisar.
+  try { await precotizNotifyGaspar(env, t, { tipo, prioridad: +f.prueba ? 'P2' : 'P1', plata: plata && !+f.prueba, refPhone: f.telefono, clave: 'corte_freno:' + f.id + ':' + f.tipo + (opts.recordatorio ? ':rec' : '') }); } catch (_) {}
   return true;
 }
 // Texto corto para Neyen y logística (sin montos ni lo que dijo el cliente).
