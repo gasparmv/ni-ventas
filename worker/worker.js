@@ -6349,6 +6349,11 @@ async function corteVigiaPago(env, phone, opts = {}) {
   const cfgF = await corteFrenosCfg(env);
   const banda = cfgF.dif ? cortePagoBanda(monto, total, cfgF) : null;
   const deMas = !!banda && banda.banda === 'de_mas';
+  // Al cliente: en el modo 'dry' (corte_pago_dif_on='dry') lo de siempre; el monto de más se le nombra solo si entró a la caja
+  // del corte y no pasa del total (el monto sale del OCR: un comprobante de una cuota de curso o un ",00" leído como dígitos
+  // le decía "pasaste $235.060 más"). Si no, un "lo revisamos" neutro.
+  const deMasCli = deMas && !cfgF.difPrueba;
+  const montoCli = deMasCli && CORTE_CAJAS_PROPIAS.includes(cajaDeComprobante(proof)) && banda.diferencia <= total;
   // La transición 'cobrando' → pagado/parcial es CONDICIONAL: solo la ejecución que efectivamente cambió filas confirma,
   // avisa y marca la planilla (si dos corridas procesan el mismo comprobante, la segunda no repite nada).
   const transicion = async (estado) => {
@@ -6374,20 +6379,23 @@ async function corteVigiaPago(env, phone, opts = {}) {
     const ch = await transicion('pagado');
     if (ch === 0) return await ch0(); // no confirmar ni avisar dos veces (o reintentar si el pago quedó sin marcar)
     if (ch < 0) { try { await precotizNotifyGaspar(env, 'Corte: ' + quien + ' mandó comprobante por $' + monto.toLocaleString('es-AR') + ' pero falló marcarlo PAGADO en la base. Revisalo a mano.', { tipo: 'corte_pago', prioridad: 'P1', refPhone: phone, plata: true }); } catch (_) {} return true; }
-    const msgOk = deMas ? 'recibido, gracias! pasaste ' + corteLandingPesos(banda.diferencia) + ' más del total, ya lo revisamos y te confirmamos por acá'
+    const msgOk = deMasCli ? (montoCli ? 'recibido, gracias! pasaste ' + corteLandingPesos(banda.diferencia) + ' más del total, ya lo revisamos y te confirmamos por acá' : 'recibido, gracias! lo revisamos y te confirmamos por acá')
       : (piezas.length && piezas.every(p => corteEsInsumoProd(p.producto)) ? 'recibido, gracias! tu pedido queda confirmado, ya lo preparamos para despachar' : 'recibido, gracias! tu corte queda confirmado');
     const sheetMsg = await corteTrasPagado(env, phone, piezas, cobr.nombre, total, proof, msgOk);
     let fr = null;
     if (deMas) { try { fr = await corteFrenoPago(env, cfgF, { tipo: 'pago_de_mas', tel: phone, nombre: cobr.nombre, cobro_total: total, monto, diferencia: banda.diferencia, proof, key: img.r2Key, wamid: img.wamid, ts: img.ts, extra: sheetMsg }); } catch (_) {} }
     else if (cfgF.dif) await corteFrenoCompTomado(env, img.wamid); // pagó antes del cobro: el freno de "plata sin cobro" se cierra solo
     if (!fr) { try { await precotizNotifyGaspar(env, 'Corte: ' + quien + ' pagó $' + monto.toLocaleString('es-AR') + ' (total $' + total.toLocaleString('es-AR') + '). Lo marqué PAGADO.' + (deMas ? ' Ojo: pagó ' + corteLandingPesos(banda.diferencia) + ' de más (no pude abrir el freno: revisalo).' : '') + sheetMsg, deMas ? { tipo: 'corte_pago_dif', prioridad: 'P1', refPhone: phone, plata: true } : { tipo: 'corte_pago_ok', prioridad: 'P2', refPhone: phone }); } catch (_) {} }
-    // Otras imágenes del mismo rato (dos transferencias, el comprobante reenviado): que no queden sin mirar.
-    if (cfgF.dif) { try { await corteComprobantesTrasPago(env, cfgF, phone, cobr.nombre, monto, img.wamid); } catch (_) {} }
+    // Otras imágenes del mismo rato (dos transferencias, el comprobante reenviado): que no queden sin mirar. Los datos del que
+    // se contó quedan guardados para reconocer un reenvío del mismo comprobante (ese no frena ni avisa).
+    if (cfgF.dif) { await cortePagoCheckDatos(env, img.wamid, proof); try { await corteComprobantesTrasPago(env, cfgF, phone, cobr.nombre, monto, img.wamid, proof); } catch (_) {} }
   } else {
     const ch = await transicion('parcial');
     if (ch === 0) return await ch0(); // otra ejecución ya lo procesó (o reintentar)
     // Lo pagado queda anotado: si después manda otro comprobante con el resto, corteVigiaParcial lo suma y lo marca pagado.
     if (ch > 0) await cortePagoParcialGuardar(env, phone, total, monto, img.wamid, nowIso);
+    // (un "pagó sin cobro" de este mismo comprobante pasa a ser el freno "de menos" de abajo: corteFrenoPago lo actualiza)
+    if (cfgF.dif && ch > 0) await cortePagoCheckDatos(env, img.wamid, proof);
     const falta = Math.max(0, total - monto);
     // Pago de menos con las diferencias prendidas: además del aviso de siempre, el paquete queda frenado hasta que complete
     // (corteVigiaParcial lo cierra solo) o Gaspar lo resuelva. Sin aviso propio: va en este.
@@ -6498,6 +6506,14 @@ async function corteVigiaParcial(env) {
     let up = null;
     try { up = await env.DB.prepare("UPDATE corte_pago_parcial SET pagado=?, montos=?, wamids=?, updated_at=? WHERE phone=? AND pagado=?").bind(pagado, JSON.stringify(nuevos), JSON.stringify([...lista(cuenta.wamids), img.wamid]), nowIso, r.telefono, cuenta.pagado).run(); } catch (_) {}
     if (!up || !up.meta || !up.meta.changes) continue; // otra corrida tocó la cuenta en el medio
+    // Con las diferencias prendidas: este comprobante ya quedó CONTADO. Si antes el detector lo había visto como "pagó sin cobro"
+    // (pagó antes de que saliera el cobro, que arrancó en parcial por la seña o lo que tenía a favor), ese freno se cierra solo:
+    // si no, el paquete quedaba trabado y "Dejar a favor" contaba la misma plata dos veces. Si con esto se pasa del total, ese
+    // mismo freno pasa a ser el "de más" (abajo, corteFrenoPago lo actualiza).
+    const cfgF = await corteFrenosCfg(env);
+    const bandaP = cfgF.dif ? cortePagoBanda(pagado, total, cfgF) : null;
+    const deMasP = !!bandaP && bandaP.banda === 'de_mas' && pagado >= total * 0.99;
+    if (cfgF.dif) { await cortePagoCheckDatos(env, img.wamid, proof); if (!deMasP) await corteFrenoCompTomado(env, img.wamid); }
     const previo = (Number(cuenta.pagado) || 0) - montos.reduce((s, m) => s + (Number(m) || 0), 0); // lo anotado sin comprobante (la seña web)
     const suma = (previo > 1 ? 'a cuenta ' + pesos(previo) + ' + ' : '') + nuevos.map(pesos).join(' + ') + ' = ' + pesos(pagado);
     if (pagado < total * 0.99) { await avisar('mandó otro comprobante por ' + pesos(monto) + ': lleva ' + suma + ' de ' + pesos(total) + ' (faltan ' + pesos(total - pagado) + ').'); continue; }
@@ -6510,12 +6526,12 @@ async function corteVigiaParcial(env) {
     try { await env.DB.prepare("DELETE FROM corte_pago_parcial WHERE phone=?").bind(r.telefono).run(); } catch (_) {}
     if (ch === 0) continue; // ya lo habían marcado a mano en el medio: no confirmar ni avisar de nuevo
     // Con las diferencias prendidas: completó → se cierra el freno "de menos"; si con la suma se pasó del total, la diferencia
-    // queda como "de más" (mensaje neutro al cliente, P1 a Gaspar y el paquete frenado), igual que un pago de una vez.
-    const cfgF = await corteFrenosCfg(env);
-    const bandaP = cfgF.dif ? cortePagoBanda(pagado, total, cfgF) : null;
-    const deMasP = !!bandaP && bandaP.banda === 'de_mas';
+    // queda como "de más" (mensaje neutro al cliente, P1 a Gaspar y el paquete frenado), igual que un pago de una vez. Al
+    // cliente, el monto solo si entró a la caja del corte y no pasa del total; en el modo 'dry', lo de siempre.
     if (cfgF.dif) await corteFrenoMenosCerrar(env, r.telefono, 'completó el pago', 'vigía');
-    const sheetMsg = await corteTrasPagado(env, r.telefono, piezas, r.nombre, total, proof, deMasP ? 'recibido, gracias! con esto pasaste ' + pesos(bandaP.diferencia) + ' más del total, ya lo revisamos y te confirmamos por acá'
+    const deMasCli = deMasP && !cfgF.difPrueba;
+    const montoCli = deMasCli && CORTE_CAJAS_PROPIAS.includes(cajaDeComprobante(proof)) && bandaP.diferencia <= total;
+    const sheetMsg = await corteTrasPagado(env, r.telefono, piezas, r.nombre, total, proof, deMasCli ? (montoCli ? 'recibido, gracias! con esto pasaste ' + pesos(bandaP.diferencia) + ' más del total, ya lo revisamos y te confirmamos por acá' : 'recibido, gracias! lo revisamos y te confirmamos por acá')
       : (piezas.length && piezas.every(p => corteEsInsumoProd(p.producto)) ? 'recibido, gracias! con esto queda completo el pago de tu pedido, ya lo preparamos para despachar' : 'recibido, gracias! con esto queda completo el pago de tu corte'));
     let fr = null;
     if (deMasP) { try { fr = await corteFrenoPago(env, cfgF, { tipo: 'pago_de_mas', tel: r.telefono, nombre: r.nombre, cobro_total: total, monto: pagado, diferencia: bandaP.diferencia, proof, key: img.r2Key, wamid: img.wamid, ts: img.ts, extra: ' (Pagó en partes: ' + suma + '.)' + sheetMsg }); } catch (_) {} }
@@ -6595,14 +6611,24 @@ async function processCorteVigiaAuto(env) {
 // pago_repetido; origen chat | web | vigia; estado abierto | resuelto | descartado; frena=1 traba el paquete (prueba=1 en el
 // modo 'dry': solo avisa). corte_chat_check = cada mensaje se clasifica una sola vez. corte_pedidos.freno_id = la pieza nació
 // de ese freno (caja de la planilla y "sumado después" en la tarjeta de Neyen). Esquema lazy (sin migración numerada).
-// Kill-switches (kv, nacen apagados): corte_pago_dif_on ('1' = diferencias de comprobante y comprobantes sin cobro),
-// corte_agregar_on ('dry' | '1' = detector del chat y pedidos web sobre un paquete abierto), corte_freno_on ('1' = traba embalar,
-// retirar y despachar). corte_frenos_desde (ISO): nada anterior se mira. Tolerancia: max(corte_pago_tol_min, total ×
-// corte_pago_tol_pct %) = max($1.000, 1 %).
+// Kill-switches (kv, nacen apagados): corte_pago_dif_on ('dry' | '1' = diferencias de comprobante y comprobantes sin cobro;
+// en 'dry' al cliente le llega lo de siempre y los frenos son de prueba), corte_agregar_on ('dry' | '1' = detector del chat y
+// pedidos web sobre un paquete abierto), corte_freno_on ('1' = traba embalar, retirar y despachar). corte_frenos_desde (ISO):
+// nada anterior se mira. Tolerancia: max(corte_pago_tol_min, total × corte_pago_tol_pct %) = max($1.000, 1 %).
+// Qué frena: un "agregar" con el paquete sin despachar y una diferencia de plata de la caja del corte, solo si nacen con
+// corte_freno_on prendido (frena=1); al leerlo, traba mientras queden piezas sin despachar de esa tanda (CORTE_FRENO_TRABA_SQL).
+// Un cambio, un reclamo, un comprobante reenviado o uno de caja dudosa avisan sin frenar.
 const CORTE_FRENO_COLS = 'id, telefono, nombre, tipo, origen, estado, frena, prueba, wamids, texto_cliente, items_json, items_total, entendido, cobro_total, comprobante_monto, diferencia, comprobante_key, comprobante_wamid, caja, rel_id, tanda_id, hoja_fecha, web_envio_id, aviso_at, recordado_at, created_at, updated_at, resolucion, resuelto_por, resuelto_at, piezas_ids, nota';
 const CORTE_FRENO_LINK = 'neoninfinitosoftware.com/#corte';
 const CORTE_FRENO_LABEL = 'Corte: para aprobar';
 let _corteFrenosOk = false;
+// ¿Existe corte_pedidos.freno_id? (la crea el primer freno). Logística y "Retiró" la leen sin crear nada. Se cachea solo el sí.
+let _corteFrenoCol = false;
+async function corteFrenoColOk(env) {
+  if (_corteFrenoCol || _corteFrenosOk) return true;
+  try { await env.DB.prepare('SELECT freno_id FROM corte_pedidos LIMIT 0').all(); _corteFrenoCol = true; } catch (_) {}
+  return _corteFrenoCol;
+}
 async function ensureCorteFrenosSchema(env) {
   if (_corteFrenosOk) return true;
   const verificar = async () => {
@@ -6630,16 +6656,45 @@ async function ensureCorteFrenosSchema(env) {
   return await verificar();
 }
 // Configuración (una sola lectura). Si la base falla, todo apagado (lado seguro: hoy no frena nada).
-const CORTE_FRENOS_KV = { corte_pago_dif_on: '0', corte_agregar_on: '0', corte_freno_on: '0', corte_frenos_desde: '', corte_pago_tol_min: '1000', corte_pago_tol_pct: '1' };
+// corte_pago_dif_on = 'dry': las diferencias se miden (freno de prueba que no traba, aviso "[prueba]" a Gaspar) pero al cliente
+// le llega lo de siempre. corte_chat_ia_tope / corte_chat_ocr_tope = llamadas a la IA / al lector del detector por día (AR).
+const CORTE_FRENOS_KV = { corte_pago_dif_on: '0', corte_agregar_on: '0', corte_freno_on: '0', corte_frenos_desde: '', corte_pago_tol_min: '1000', corte_pago_tol_pct: '1', corte_chat_ia_tope: '400', corte_chat_ocr_tope: '150' };
 async function corteFrenosCfg(env) {
   const v = { ...CORTE_FRENOS_KV };
   const ks = Object.keys(CORTE_FRENOS_KV);
   try { ((await env.DB.prepare(`SELECT k, v FROM kv_cache WHERE k IN (${ks.map(() => '?').join(',')})`).bind(...ks).all()).results || []).forEach(r => { v[r.k] = String(r.v == null ? '' : r.v).trim(); }); } catch (_) {}
   const num = (x, d) => { const n = parseFloat(String(x).replace(',', '.')); return Number.isFinite(n) && n >= 0 ? n : d; };
   return {
-    dif: v.corte_pago_dif_on === '1', agregar: ['1', 'dry'].includes(v.corte_agregar_on) ? v.corte_agregar_on : '0', freno: v.corte_freno_on === '1',
-    desde: v.corte_frenos_desde || '', tolMin: num(v.corte_pago_tol_min, 1000), tolPct: num(v.corte_pago_tol_pct, 1),
+    dif: ['1', 'dry'].includes(v.corte_pago_dif_on), difPrueba: v.corte_pago_dif_on === 'dry', agregar: ['1', 'dry'].includes(v.corte_agregar_on) ? v.corte_agregar_on : '0', freno: v.corte_freno_on === '1',
+    desde: v.corte_frenos_desde || '', tolMin: num(v.corte_pago_tol_min, 1000), tolPct: num(v.corte_pago_tol_pct, 1), iaTope: num(v.corte_chat_ia_tope, 400), ocrTope: num(v.corte_chat_ocr_tope, 150),
   };
+}
+// Cajas que cobran el corte (cajaDeComprobante): desde el 22-oct el corte se cobra al alias neoninfinito.cartel (Favio). Un
+// comprobante a otra caja (Gaspar, Bruno, Melina) de un cliente de corte es casi siempre otra cosa (una cuota del curso, una OC).
+const CORTE_CAJAS_PROPIAS = ['Favio'];
+// Los datos que leyó el OCR de un comprobante CONTADO (fecha, banco, titular, caja): para reconocer el mismo comprobante
+// reenviado ("te lo reenvío por las dudas", foto y PDF). Columna lazy de corte_pago_check.
+async function cortePagoCheckDatos(env, wamid, proof) {
+  if (!wamid || !proof) return;
+  const d = JSON.stringify({ fecha: String(proof.fecha || '').slice(0, 40), banco: String(proof.banco || '').slice(0, 60), titular: String(proof.titular_destino || '').slice(0, 80), caja: cajaDeComprobante(proof) });
+  const up = () => env.DB.prepare('UPDATE corte_pago_check SET datos=? WHERE wamid=?').bind(d, wamid).run();
+  try { await up(); } catch (e) {
+    if (!/no such column/i.test(String((e && e.message) || e))) return;
+    try { await env.DB.prepare('ALTER TABLE corte_pago_check ADD COLUMN datos TEXT').run(); } catch (_) {}
+    try { await up(); } catch (_) {}
+  }
+}
+// ¿Es el MISMO comprobante que uno contado? Mismo monto y misma fecha/hora del OCR, y la misma caja o el mismo titular.
+// → 'mismo' (reenvío: sin freno ni aviso) | 'monto' (coincide el monto y no hay con qué comparar: aviso sin frenar) |
+// 'distinto' (mismo monto, otra fecha: dos transferencias, frena) | '' (otro monto).
+function corteCompMismo(proof, monto, contado) {
+  if (!contado || Math.abs(Math.round(+monto || 0) - Math.round(+contado.monto || 0)) > 1) return '';
+  let d = contado.datos; if (typeof d === 'string') { try { d = JSON.parse(d); } catch (_) { d = null; } }
+  const norm = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (!d || !norm(d.fecha) || !norm(proof && proof.fecha)) return 'monto';
+  if (norm(d.fecha) !== norm(proof.fecha)) return 'distinto';
+  const caja = cajaDeComprobante(proof);
+  return ((caja && caja === d.caja) || (norm(d.titular) && norm(d.titular) === norm(proof.titular_destino))) ? 'mismo' : 'monto';
 }
 // Tolerancia de un comprobante contra el cobro: max($1.000, 1 %) sobre montos redondeados (hay precios como 14875.000000000002).
 function cortePagoTol(total, cfg) {
@@ -6698,17 +6753,25 @@ function corteItemsMerge(viejos, nuevos) {
     const o = v.find(x => x.codigo === it.codigo && x.cantidad);
     return o ? { ...it, cantidad: o.cantidad, color: it.color || o.color || null } : it;
   });
+  // Un "algo" sin código que ahora se aclaró ("Te puedo agregar algo?" → "5 fuentes") no queda colgado: si no, el pedido seguía
+  // "sin entender" para siempre.
+  const vago = o => !o.codigo && /^(algo|algo mas|una cosa|otra cosa|cosas|mas cosas|un par de cosas|no se que|)$/.test(String(o.texto || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').trim());
   for (const o of v) {
+    if (vago(o) && out.some(x => x.codigo)) continue;
     if (o.codigo ? !out.some(x => x.codigo === o.codigo) : !out.some(x => !x.codigo)) out.push(o);
   }
   return out.slice(0, 10);
 }
-// Reglas sin IA sobre lo que escribió el cliente: red de seguridad si la IA no contesta o dice "nada" ante un pedido claro, y
-// cantidades que la IA dejó vacías. "Te puedo agregar 5 fuentes?" → agregar 5 nitto_4a; "sumame un rollo de cable blanco" →
-// agregar 1 cable sin calibre (no entendido); "Y 40mil las fuentes no?" → menciona fuentes, $40.000 (no es una cantidad).
+// Reglas sin IA sobre lo que escribió el cliente: deciden SOLO si la IA no contestó (nunca pisan un "nada" de la IA), y
+// completan cantidades que la IA dejó vacías. agregar = un pedido inequívoco: verbo de pedido (agregame, sumame, poneme,
+// mandame, pasame, te encargo, quiero, necesitaría, "5 fuentes más"), producto del catálogo y cantidad explícita, sin negación
+// ("al final no agregues") y sin forma de pregunta de información ("incluye la fuente?", "la venden?", "cuánto sale?"), salvo
+// un imperativo claro. "Te puedo agregar 5 fuentes?" → agregar 5 nitto_4a; "sumame un rollo de cable blanco" → agregar 1 cable
+// sin calibre (no entendido); "Y 40mil las fuentes no?" → menciona fuentes, $40.000 (no es una cantidad: no agrega).
 const CORTE_NUM_PAL = { un: 1, una: 1, uno: 1, dos: 2, tres: 3, cuatro: 4, cinco: 5, seis: 6, siete: 7, ocho: 8, nueve: 9, diez: 10, once: 11, doce: 12, quince: 15, veinte: 20, treinta: 30 };
 function corteAgregarReglas(texto) {
-  const n = String(texto || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  const crudo = String(texto || '').toLowerCase();
+  const n = crudo.normalize('NFD').replace(/[̀-ͯ]/g, '');
   const toks = (n.match(/\$?\s?\d+(?:[.,]\d+)*(?:\s?(?:mil|k)(?![a-z]))?|[a-z]+/g) || []).map(t => t.trim());
   const esPlata = t => /\$|mil|k$/.test(t) || /^\d{1,3}\.\d{3}/.test(t) || (/^\d+$/.test(t) && +t >= 1000);
   const plata = toks.filter(esPlata).map(t => { const x = parseFloat(t.replace(/[$\s]|mil|k/g, '').replace(/\.(?=\d{3}\b)/g, '').replace(',', '.')); return /mil|k$/.test(t) ? x * 1000 : x; }).filter(x => x >= 100);
@@ -6720,20 +6783,30 @@ function corteAgregarReglas(texto) {
   for (let i = 0; i < toks.length; i++) {
     const t = toks[i];
     let codigo;
-    if (/^(fuente|fuentes|fuentecita|fuentecitas|nitto)$/.test(t)) codigo = 'nitto_4a';
+    if (/^(fuente|fuentes|fuentecita|fuentecitas|nitto|transformador|transformadores|trafo|trafos)$/.test(t)) codigo = 'nitto_4a';
     else if (/^(cable|cables|rollo|rollos)$/.test(t)) {
       if (i - ultCable <= 3) { ultCable = i; continue; } // "rollo de cable": un solo ítem
       ultCable = i; codigo = calibres.length === 1 ? calibres[0] : null;
     } else continue;
     let q = null;
     for (let j = i - 1; j >= Math.max(0, i - 3); j--) { if (esPlata(toks[j])) continue; const c = cant(toks[j]); if (c) { q = c; break; } }
+    // "fuentes x5", "rollo de cable x2": la cantidad después
+    if (!q) for (let j = i + 1; j <= Math.min(toks.length - 2, i + 3); j++) { if (toks[j] === 'x' && cant(toks[j + 1])) { q = cant(toks[j + 1]); break; } }
     const esCable = codigo !== 'nitto_4a';
     const prev = items.find(x => x.codigo === codigo && (codigo || esCable));
     if (prev) { if (!prev.cantidad && q) prev.cantidad = q; continue; }
     items.push({ codigo, cantidad: q, color: esCable && colores.length === 1 ? colores[0] : null, texto: esCable ? 'cable' + (colores.length === 1 ? ' ' + colores[0] : '') : 'fuentes' });
   }
-  const verbo = /\b(agreg\w*|sum[aeá]\w*|anad\w*|inclu\w*|tambien|ademas)\b/.test(n) || /\b(quiero|queria|necesito|mandame|mandenme|me mandas|me mandan|poneme|me pones|me pasas)\b/.test(n) && items.some(x => x.cantidad);
-  return { agregar: verbo && items.length > 0, menciona: items.length > 0, items, monto: plata.length ? Math.round(plata[0]) : 0 };
+  // Imperativo claro ("agregame", "sumá", "te encargo"): pide aunque pregunte el precio en el mismo mensaje.
+  const fuerte = /\b(agregame|agregale|agregamel[ao]s?|agregal[ao]s?|sumame|sumale|sumamel[ao]s?|sumal[ao]s?|anadime|anadile|poneme|ponele|ponemel[ao]s?|mandame|mandamel[ao]s?|mandenme|pasame|pasamel[ao]s?|encargo|encargame|traeme)\b/.test(n) || /(^|[^a-zñ])(agregá|sumá|poné|mandá|pasá|añadí)(?![a-zñ])/.test(crudo);
+  // Pedido más blando ("te puedo agregar", "me agregás", "quiero", "necesitaría", "5 fuentes más"). "Suma" (sustantivo),
+  // "también", "además" e "incluye" ya no cuentan: "Cuánto es la suma con las fuentes?" o "las fuentes también, gracias" no piden.
+  const blando = /\b(agreg(?!ad[oa]s?\b)\w*|anad\w*|sumar|sumarl[ao]s?|sumarle|sumarme|sumas|sumes|encarg\w*|quiero|queria|quisiera|necesito|necesitaria|necesitaba|me mandas|me mandan|me pasas|me pones|me traes)\b/.test(n)
+    || /\b(\d{1,2}|un|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\s+(?:[a-z0-9,.]+\s+){0,3}?(fuentes?|fuentecitas?|nitto|transformador(es)?|trafos?|cables?|rollos?)(\s+[a-z0-9,.]+){0,3}?\s+mas\b/.test(n);
+  const negado = /\b(no|ni|sin)\s+(?:me\s+|le\s+|te\s+|lo\s+|los\s+|las?\s+)?(agreg|sum|pon|mand|quier|necesit|anad|encarg|pas|tra)\w*/.test(n) || /\b(saca\w*|quita\w*|cancel\w*|al final no|mejor no|ya no|no hace falta)\b/.test(n);
+  const info = /\b(inclu\w*|venden|vendes|vende|tenes|tienen|hay|cuanto\w*|cuanta\w*|precio\w*|sale|salen|vale|valen|cuesta\w*|costo|cotiz\w*)\b/.test(n);
+  const pide = (fuerte || blando) && !negado && (fuerte || !info) && items.some(x => x.cantidad);
+  return { agregar: pide, menciona: items.length > 0, items, monto: plata.length ? Math.round(plata[0]) : 0 };
 }
 // Alta de un freno. Devuelve la fila (con id) o null (p. ej. el comprobante ya abrió otro: índice único).
 async function corteFrenoCrear(env, f) {
@@ -6767,16 +6840,27 @@ async function corteFrenoEtiqueta(env, tel, poner) {
 // Aviso a Gaspar de un freno, UNA vez (claim propio en aviso_at: con avisoInterno en off/dry la clave no deduplica). Una línea
 // de hasta ~800 caracteres (puede salir por la plantilla recordatorio_agenda) con el link al panel. NUNCA un link que apruebe:
 // la vista previa de WhatsApp dispara los GET.
+// opts.recordatorio: el recordatorio de un freno que sigue trabando (uno por día hábil: claim sobre recordado_at). opts.reaviso:
+// el freno cambió (se entendió qué pide, o cambió el total) → otro aviso, sin claim (el que llama lo pide una vez por cambio).
+// opts.prioridad: P2 para los que solo avisan (no traban).
 async function corteFrenoAvisar(env, f, texto, opts = {}) {
-  const campo = opts.recordatorio ? 'recordado_at' : 'aviso_at';
-  let c = null;
-  try { c = await env.DB.prepare(`UPDATE corte_frenos SET ${campo}=? WHERE id=? AND ${campo} IS NULL RETURNING id`).bind(new Date().toISOString(), f.id).first(); } catch (_) {}
-  if (!c) return false;
+  const now = new Date().toISOString();
+  let suf = '';
+  if (opts.reaviso) suf = ':upd:' + String(opts.reaviso).slice(0, 40);
+  else {
+    const campo = opts.recordatorio ? 'recordado_at' : 'aviso_at';
+    const otra = opts.recordatorio ? ` OR ${campo} < ?` : '';
+    let c = null;
+    try { c = await env.DB.prepare(`UPDATE corte_frenos SET ${campo}=? WHERE id=? AND (${campo} IS NULL${otra}) RETURNING id`).bind(now, f.id, ...(opts.recordatorio ? [isoHace(20 * 3600e3)] : [])).first(); } catch (_) {}
+    if (!c) return false;
+    if (opts.recordatorio) suf = ':rec:' + now.slice(0, 10);
+  }
   const t = ((+f.prueba ? '[prueba, no frené nada] ' : '') + String(texto || '')).replace(/\s+/g, ' ').trim().slice(0, 760) + ' ' + CORTE_FRENO_LINK;
   const tipo = opts.tipo || (/^pago_/.test(f.tipo) ? 'corte_pago_dif' : (f.tipo === 'agregar' ? 'corte_agregar' : 'corte_freno'));
   const plata = /^pago_/.test(f.tipo) || f.tipo === 'agregar';
+  const prioridad = +f.prueba ? 'P2' : (opts.prioridad || 'P1');
   // El tipo va en la clave: un comprobante suelto que después resulta de más vuelve a avisar.
-  try { await precotizNotifyGaspar(env, t, { tipo, prioridad: +f.prueba ? 'P2' : 'P1', plata: plata && !+f.prueba, refPhone: f.telefono, clave: 'corte_freno:' + f.id + ':' + f.tipo + (opts.recordatorio ? ':rec' : '') }); } catch (_) {}
+  try { await precotizNotifyGaspar(env, t, { tipo, prioridad, plata: plata && !+f.prueba && prioridad === 'P1', refPhone: f.telefono, clave: 'corte_freno:' + f.id + ':' + f.tipo + suf }); } catch (_) {}
   return true;
 }
 // Texto corto para Neyen y logística (sin montos ni lo que dijo el cliente).
@@ -6787,22 +6871,27 @@ function corteFrenoCorto(f) {
   if (f.tipo === 'reclamo') return 'hay un reclamo del cliente';
   return 'hay que revisar el pago';
 }
-// Frenos que TRABAN (abierto, frena=1, no de prueba) por teléfono → Map tel → [{id, tipo, corto}]. Con corte_freno_on apagado,
-// vacío (no toca la tabla). Si la lectura falla, TIRA: el que llama decide (embalar: fail-open; logística: fail-closed).
+// Un freno TRABA si está abierto, nació para frenar (frena=1: con corte_freno_on prendido en ese momento y el paquete sin
+// despachar), no es de prueba y el cliente todavía tiene piezas sin despachar de ESA semana (la tanda del freno; sin tanda,
+// cualquiera). Se calcula al leerlo: un freno viejo que nadie resolvió no traba el paquete de la semana siguiente.
+const CORTE_FRENO_TRABA_SQL = "f.estado='abierto' AND f.frena=1 AND IFNULL(f.prueba,0)=0 AND EXISTS (SELECT 1 FROM corte_pedidos p WHERE p.telefono=f.telefono AND p.estado IN ('pedido','matriz_lista','cortado','embalado') AND IFNULL(p.producto,'TRANS')!='NEON' AND (f.tanda_id IS NULL OR p.tanda_id=f.tanda_id))";
+// Frenos que TRABAN por teléfono → Map tel → [{id, tipo, corto}]. Con corte_freno_on apagado, vacío (no toca la tabla). Si la
+// lectura falla, TIRA: el que llama decide (embalar: fail-open; logística: fail-closed).
 async function corteFrenosAbiertos(env, cfgIn) {
   const cfg = cfgIn || await corteFrenosCfg(env);
   const m = new Map();
   if (!cfg.freno) return m;
   if (!(await ensureCorteFrenosSchema(env))) throw new Error('frenos sin esquema');
-  const rs = (await env.DB.prepare("SELECT id, telefono, tipo, items_json, entendido FROM corte_frenos WHERE estado='abierto' AND frena=1 AND IFNULL(prueba,0)=0").all()).results || [];
+  const rs = (await env.DB.prepare(`SELECT f.id, f.telefono, f.tipo, f.items_json, f.entendido FROM corte_frenos f WHERE ${CORTE_FRENO_TRABA_SQL}`).all()).results || [];
   for (const r of rs) { const k = String(r.telefono || ''); if (!k) continue; if (!m.has(k)) m.set(k, []); m.get(k).push({ id: r.id, tipo: r.tipo, corto: corteFrenoCorto(r) }); }
   return m;
 }
 async function corteFrenosAbiertosOFail(env) { try { return await corteFrenosAbiertos(env); } catch (_) { return new Map(); } } // fail-open (embalar)
 function corteQuien(nombre, tel) { return (nombre ? String(nombre).trim() + ' ' : '') + '(…' + String(tel || '').slice(-4) + ')'; }
-// ¿Le queda algo sin despachar? → la pieza más nueva (tanda/fecha a la que va el freno) o null.
+// ¿Le queda algo sin despachar? → la pieza del paquete de ESTA semana (la tanda a la que va el freno) o null: primero las que
+// tienen tanda y están en cobro o pagadas; un pedido web de la semana que viene (sin tanda) solo si no hay otra cosa.
 async function cortePaqueteAbierto(env, tel) {
-  try { return await env.DB.prepare("SELECT id, tanda_id, hoja_fecha, cliente_nombre FROM corte_pedidos WHERE telefono=? AND IFNULL(producto,'TRANS')!='NEON' AND estado IN ('pedido','matriz_lista','cortado','embalado') ORDER BY id DESC LIMIT 1").bind(tel).first(); } catch (_) { return { id: 0 }; } // sin poder leer: como abierto (lado seguro)
+  try { return await env.DB.prepare("SELECT id, tanda_id, hoja_fecha, cliente_nombre FROM corte_pedidos WHERE telefono=? AND IFNULL(producto,'TRANS')!='NEON' AND estado IN ('pedido','matriz_lista','cortado','embalado') ORDER BY CASE WHEN tanda_id IS NULL THEN 1 ELSE 0 END, CASE estado_pago WHEN 'cobrando' THEN 0 WHEN 'parcial' THEN 0 WHEN 'pagado' THEN 1 WHEN 'interno' THEN 1 ELSE 2 END, id DESC LIMIT 1").bind(tel).first(); } catch (_) { return { id: 0 }; } // sin poder leer: como abierto (lado seguro)
 }
 // Lo que escribió el cliente cerca de un momento (±10 min): las citas del aviso de un comprobante ("Ahi te pasé con los 40mil
 // de las fuentes").
@@ -6816,83 +6905,139 @@ async function corteCitasCerca(env, tel, tsIso) {
 // Una diferencia de plata de un comprobante → freno + aviso a Gaspar. d = { tipo: pago_de_mas | pago_de_menos | pago_sin_cobro |
 // pago_repetido, tel, nombre, cobro_total, monto, diferencia, proof, key, wamid, ts, extra (texto al final del aviso), sinAviso }.
 // Un comprobante abre UNA diferencia: si ya había un freno por ese mismo comprobante (lo vio el detector de comprobantes
-// sueltos y después lo tomó el cobro), se actualiza en vez de duplicarse. Devuelve el freno o null.
+// sueltos y después lo tomó el cobro), se actualiza en vez de duplicarse. Devuelve el freno, { id, ya_resuelto: true } si Gaspar
+// ya había resuelto ese comprobante, o null si no se pudo abrir. Frena solo si el freno está prendido, el paquete no salió y no
+// es de prueba (modo 'dry'). d.soloAviso: sin frenar y con aviso P2 (no se sabe si es plata del corte).
 async function corteFrenoPago(env, cfg, d) {
   if (!(await ensureCorteFrenosSchema(env))) return null;
   const tol = cortePagoTol(Math.max(d.cobro_total || 0, d.pendiente || 0), cfg);
   const paq = await cortePaqueteAbierto(env, d.tel);
   const caja = d.caja != null ? String(d.caja || '') : cajaDeComprobante(d.proof);
   const citas = await corteCitasCerca(env, d.tel, d.ts);
+  const prueba = cfg.difPrueba ? 1 : 0;
   // ¿Coincide con lo que pidió sumar? (agregar abierto con el mismo total ± tolerancia)
   let rel = null;
   if (d.tipo === 'pago_de_mas' || d.tipo === 'pago_sin_cobro') {
     try { rel = ((await env.DB.prepare("SELECT id, items_json, items_total FROM corte_frenos WHERE telefono=? AND tipo='agregar' AND estado='abierto' AND IFNULL(prueba,0)=0 ORDER BY id DESC LIMIT 5").bind(d.tel).all()).results || []).find(a => +a.items_total > 0 && Math.abs((d.tipo === 'pago_de_mas' ? d.diferencia : d.monto) - +a.items_total) <= tol) || null; } catch (_) {}
   }
-  const campos = { tipo: d.tipo, frena: paq ? 1 : 0, cobro_total: d.cobro_total, comprobante_monto: d.monto, diferencia: d.diferencia, comprobante_key: d.key, caja, texto_cliente: citas, tanda_id: paq && paq.tanda_id, hoja_fecha: paq && paq.hoja_fecha };
+  const campos = { tipo: d.tipo, frena: (paq && cfg.freno && !prueba && !d.soloAviso) ? 1 : 0, prueba, cobro_total: d.cobro_total, comprobante_monto: d.monto, diferencia: d.diferencia, comprobante_key: d.key, caja, texto_cliente: citas, tanda_id: paq && paq.tanda_id, hoja_fecha: paq && paq.hoja_fecha };
   let f = null;
   if (d.wamid) {
     try {
       const prev = await env.DB.prepare('SELECT id, estado FROM corte_frenos WHERE comprobante_wamid=?').bind(d.wamid).first();
-      if (prev && prev.estado !== 'abierto') return null; // ese comprobante ya lo resolvió Gaspar
-      if (prev) f = await env.DB.prepare(`UPDATE corte_frenos SET tipo=?, estado='abierto', frena=?, cobro_total=?, comprobante_monto=?, diferencia=?, comprobante_key=?, caja=?, texto_cliente=?, tanda_id=?, hoja_fecha=?, resolucion=NULL, resuelto_at=NULL, resuelto_por=NULL, aviso_at=NULL, recordado_at=NULL, updated_at=? WHERE id=? RETURNING ${CORTE_FRENO_COLS}`)
-        .bind(campos.tipo, campos.frena, Math.round(d.cobro_total || 0), Math.round(d.monto || 0), Math.round(d.diferencia || 0), d.key || null, caja || null, citas, campos.tanda_id || null, campos.hoja_fecha || null, new Date().toISOString(), prev.id).first();
+      if (prev && prev.estado !== 'abierto') return { id: prev.id, ya_resuelto: true }; // ese comprobante ya lo resolvió Gaspar
+      if (prev) f = await env.DB.prepare(`UPDATE corte_frenos SET tipo=?, estado='abierto', frena=?, prueba=?, cobro_total=?, comprobante_monto=?, diferencia=?, comprobante_key=?, caja=?, texto_cliente=?, tanda_id=?, hoja_fecha=?, resolucion=NULL, resuelto_at=NULL, resuelto_por=NULL, aviso_at=NULL, recordado_at=NULL, updated_at=? WHERE id=? RETURNING ${CORTE_FRENO_COLS}`)
+        .bind(campos.tipo, campos.frena, prueba, Math.round(d.cobro_total || 0), Math.round(d.monto || 0), Math.round(d.diferencia || 0), d.key || null, caja || null, citas, campos.tanda_id || null, campos.hoja_fecha || null, new Date().toISOString(), prev.id).first();
     } catch (_) {}
   }
   if (!f) f = await corteFrenoCrear(env, { ...campos, telefono: d.tel, nombre: d.nombre, origen: 'vigia', wamids: d.wamid ? [d.wamid] : [], comprobante_wamid: d.wamid || null, rel_id: rel ? rel.id : null });
   if (!f) return null;
   if (rel) { try { await env.DB.batch([env.DB.prepare('UPDATE corte_frenos SET rel_id=? WHERE id=?').bind(rel.id, f.id), env.DB.prepare('UPDATE corte_frenos SET rel_id=? WHERE id=? AND rel_id IS NULL').bind(f.id, rel.id)]); } catch (_) {} }
-  await corteFrenoEtiqueta(env, d.tel, true);
+  if (!prueba) await corteFrenoEtiqueta(env, d.tel, true);
   if (d.sinAviso) { try { await env.DB.prepare('UPDATE corte_frenos SET aviso_at=? WHERE id=? AND aviso_at IS NULL').bind(new Date().toISOString(), f.id).run(); } catch (_) {} return f; }
   const q = corteQuien(d.nombre, d.tel), pz = corteLandingPesos;
   const relTxt = rel ? (() => { let it = []; try { it = JSON.parse(rel.items_json || '[]'); } catch (_) {} return ' Coincide con lo que pidió sumar (' + corteItemsTxt(it, false) + ').'; })() : '';
-  const frenoTxt = cfg.freno && f.frena ? 'Frené el paquete hasta que decidas' : (f.frena ? 'Decidí' : 'El paquete ya salió: decidí');
+  const frenoTxt = cfg.freno && f.frena ? 'Frené el paquete hasta que decidas' : (paq ? (d.soloAviso ? 'No frené nada. Decidí' : 'Decidí') : 'El paquete ya salió: decidí');
+  const cajaTxt = caja ? ' (caja ' + caja + ')' : ' (no veo a qué cuenta entró)';
   let t;
   if (d.tipo === 'pago_de_mas') t = 'Corte · ' + q + ' pagó ' + pz(d.diferencia) + ' de más: cobro ' + pz(d.cobro_total) + ', comprobante ' + pz(d.monto) + (caja ? ' (caja ' + caja + ')' : '') + '.' + (citas ? ' Dijo: ' + citas + '.' : '') + relTxt + ' Lo marqué pagado. ' + frenoTxt + ': sumar algo, dejarlo a favor para el próximo cobro o devolverlo.';
-  else if (d.tipo === 'pago_repetido') t = 'Corte · ' + q + ' mandó un comprobante por ' + pz(d.monto) + (caja ? ' (caja ' + caja + ')' : '') + ', el mismo monto que uno que ya conté' + (d.repDe ? ' (' + d.repDe + ')' : '') + ': puede ser el mismo reenviado.' + (citas ? ' Dijo: ' + citas + '.' : '') + ' ' + frenoTxt + ' si es el mismo, si queda a favor o si lo devolvés.';
-  else t = 'Corte · ' + q + ' mandó un comprobante por ' + pz(d.monto) + (caja ? ' (caja ' + caja + ')' : '') + ' y no tiene ningún cobro abierto.' + (d.pendiente > 0 ? ' Lo pendiente de la semana suma ' + pz(d.pendiente) + (Math.abs(d.monto - d.pendiente) <= tol ? ' (coincide).' : '.') : '') + (citas ? ' Dijo: ' + citas + '.' : '') + relTxt + ' ' + frenoTxt + ': marcar pagado lo pendiente, dejarlo a favor o devolverlo.';
-  await corteFrenoAvisar(env, f, t + (d.extra || ''));
+  else if (d.tipo === 'pago_repetido') t = 'Corte · ' + q + ' mandó un comprobante por ' + pz(d.monto) + cajaTxt + ', el mismo monto que uno que ya conté' + (d.repDe ? ' (' + d.repDe + ')' : '') + (d.soloAviso ? ': puede ser el mismo reenviado.' : ', con otra fecha: parecen dos transferencias.') + (citas ? ' Dijo: ' + citas + '.' : '') + ' ' + frenoTxt + ' si es el mismo, si queda a favor o si lo devolvés.';
+  else {
+    const coincide = d.pendiente > 0 && Math.abs(d.monto - d.pendiente) <= tol;
+    // Solo se propone "marcar pagado lo pendiente" si el monto coincide (con un monto que no tiene que ver, un clic apurado
+    // marcaba el corte pagado con la plata de otra cosa).
+    t = 'Corte · ' + q + ' mandó un comprobante por ' + pz(d.monto) + cajaTxt + ' y no tiene ningún cobro abierto.' + (d.pendiente > 0 ? ' Lo pendiente de la semana suma ' + pz(d.pendiente) + (coincide ? ' (coincide).' : ' (no coincide).') : '') + (citas ? ' Dijo: ' + citas + '.' : '') + relTxt + ' ' + frenoTxt + (coincide ? ': marcar pagado lo pendiente, dejarlo a favor o devolverlo.' : ': si es del corte, dejarlo a favor o devolverlo; si es de otra cosa, liberalo.');
+  }
+  await corteFrenoAvisar(env, f, t + (d.extra || ''), d.soloAviso ? { prioridad: 'P2' } : {});
   return f;
+}
+// ¿Ese comprobante es de otra cosa? El chat tiene "POR PAGAR CURSO" (una cuota del curso) o "POR PAGAR" (una OC de carteles), o
+// processPaymentProof ya lo registró como pago (wa_pago_proof). → motivo | ''.
+async function corteCompAjeno(env, tel, wamid) {
+  if (tel) {
+    try { if (await hasCursoPorPagarLabel(env, tel)) return 'curso'; } catch (_) {}
+    try { if (await hasPorPagarLabel(env, tel)) return 'oc'; } catch (_) {}
+  }
+  try { if (wamid && await env.DB.prepare('SELECT 1 AS x FROM wa_pago_proof WHERE wamid=? LIMIT 1').bind(wamid).first()) return 'otro_pago'; } catch (_) {}
+  return '';
+}
+// Un comprobante de un cliente SIN cobro abierto → qué hacer, según la caja y si es un reenvío de uno contado.
+// → { tipo: 'pago_sin_cobro' | 'pago_repetido', soloAviso } | { nada: 'repetido' | 'otra_caja', caja }.
+function corteCompSueltoClase(proof, monto, contado) {
+  const caja = cajaDeComprobante(proof);
+  if (caja && !CORTE_CAJAS_PROPIAS.includes(caja)) return { nada: 'otra_caja', caja }; // una cuota del curso, una OC: no es del corte
+  const rep = corteCompMismo(proof, monto, contado);
+  if (rep === 'mismo') return { nada: 'repetido', caja };                   // el mismo comprobante reenviado: ni freno ni aviso
+  if (rep === 'monto') return { tipo: 'pago_repetido', soloAviso: true };   // mismo monto, sin con qué comparar: aviso sin frenar
+  if (rep === 'distinto') return { tipo: 'pago_repetido', soloAviso: !caja }; // mismo monto, otra fecha: dos transferencias
+  return { tipo: 'pago_sin_cobro', soloAviso: !caja };                      // caja que no se ve: aviso sin frenar
 }
 // Comprobantes que nadie mira: el vigía lee UNO por cobro (el más nuevo). Apenas un cobro queda pagado, las otras imágenes de ese
 // teléfono de las últimas 6 h se leen: si alguna es otro comprobante, abre una diferencia (repetido si es el mismo monto que
-// uno contado; si no, plata sin cobro). Quedan registradas en corte_pago_check (no se usan para un cobro futuro). Tope de lecturas.
-async function corteComprobantesTrasPago(env, cfg, tel, nombre, montoContado, wamidContado) {
+// uno contado y no se ve que sea el mismo; si no, plata sin cobro). Quedan registradas en corte_pago_check (no se usan para un
+// cobro futuro). Tope de lecturas. Lo que es de otra cosa (curso, OC, otra caja) no abre nada.
+async function corteComprobantesTrasPago(env, cfg, tel, nombre, montoContado, wamidContado, proofContado) {
   if (!cfg.dif) return;
+  if (await corteCompAjeno(env, tel, '')) return; // alumno con una cuota del curso por pagar u OC de carteles: no se mira
   let ims = [];
   try { ims = (await env.DB.prepare("SELECT wamid, media_url AS r2Key, msg_type AS msgType, ts FROM wa_messages WHERE phone=? AND direction='inbound' AND msg_type IN ('image','document') AND media_url IS NOT NULL AND media_url!='' AND media_url NOT LIKE 'http%' AND ts > ? AND wamid!=? AND wamid NOT IN (SELECT wamid FROM corte_pago_check) ORDER BY ts DESC LIMIT 3").bind(tel, isoHace(6 * 3600e3), wamidContado || '').all()).results || []; } catch (_) { return; }
+  const contado = { monto: montoContado, datos: proofContado ? { fecha: proofContado.fecha || '', titular: proofContado.titular_destino || '', caja: cajaDeComprobante(proofContado) } : null };
   for (const im of ims) {
+    if (await corteCompAjeno(env, tel, im.wamid)) continue;
     const proof = await analyzePaymentProof(env, im.r2Key, im.msgType === 'document' ? 'application/pdf' : '', { phone: tel, by: 'pago_corte_extra' });
     if (!proof) continue; // fallo transitorio: queda para el vigía o el detector del chat
     const es = !!proof.es_comprobante, monto = Math.round(+proof.monto || 0);
     let ins = null;
     try { ins = await env.DB.prepare('INSERT OR IGNORE INTO corte_pago_check (wamid, phone, monto, es_comprobante, checked_at) VALUES (?,?,?,?,?)').bind(im.wamid, tel, monto, es ? 1 : 0, new Date().toISOString()).run(); } catch (_) {}
     if (!ins || !ins.meta || !ins.meta.changes || !es || !(monto > 0)) continue;
-    const rep = Math.abs(monto - Math.round(montoContado || 0)) <= 1;
-    await corteFrenoPago(env, cfg, { tipo: rep ? 'pago_repetido' : 'pago_sin_cobro', tel, nombre, cobro_total: 0, monto, diferencia: monto, proof, key: im.r2Key, wamid: im.wamid, ts: im.ts, repDe: rep ? 'el que cubrió el cobro de recién' : '', extra: rep ? '' : ' (Es otro comprobante, además del que cubrió el cobro.)' });
+    await cortePagoCheckDatos(env, im.wamid, proof); // para reconocer otro reenvío más adelante
+    const k = corteCompSueltoClase(proof, monto, contado);
+    if (k.nada === 'otra_caja') { try { await precotizNotifyGaspar(env, 'Corte · ' + corteQuien(nombre, tel) + ' mandó otro comprobante por ' + corteLandingPesos(monto) + ' a la caja ' + k.caja + ' (no es la del corte). No lo tomé como plata del corte.', { tipo: 'corte_pago', prioridad: 'P2', refPhone: tel, clave: 'corte_comp_otra:' + im.wamid }); } catch (_) {} continue; }
+    if (k.nada) continue;
+    const rep = k.tipo === 'pago_repetido';
+    await corteFrenoPago(env, cfg, { tipo: k.tipo, soloAviso: k.soloAviso, tel, nombre, cobro_total: 0, monto, diferencia: monto, proof, key: im.r2Key, wamid: im.wamid, ts: im.ts, repDe: rep ? 'el que cubrió el cobro de recién' : '', extra: rep ? '' : ' (Es otro comprobante, además del que cubrió el cobro.)' });
   }
 }
 // El vigía tomó como pago del cobro un comprobante que antes había abierto un freno de "plata sin cobro" (pagó antes de que
-// saliera el cobro): ese freno se cierra solo.
+// saliera el cobro): ese freno se cierra solo. El esquema se asegura acá (antes miraba un flag por isolate y, en un isolate
+// nuevo, el freno quedaba abierto trabando un paquete pagado).
 async function corteFrenoCompTomado(env, wamid) {
-  if (!_corteFrenosOk || !wamid) return;
+  if (!wamid || !(await ensureCorteFrenosSchema(env))) return;
   try { const f = await env.DB.prepare("SELECT id FROM corte_frenos WHERE comprobante_wamid=? AND estado='abierto' AND tipo IN ('pago_sin_cobro','pago_repetido')").bind(wamid).first(); if (f) await corteFrenoCerrar(env, f.id, 'resuelto', 'lo tomó el cobro', 'vigía'); } catch (_) {}
+}
+// ¿El comprobante de un "pagó sin cobro" / "repetido" ya se contó como pago de un cobro (piezas con ese comprobante, o sumado a
+// un pago parcial)? Antes de dejarlo a favor, devolverlo o marcar pagado con él: si ya se contó, sería contar la misma plata dos veces.
+async function corteFrenoCompContado(env, f) {
+  if (!f || !['pago_sin_cobro', 'pago_repetido'].includes(f.tipo)) return false;
+  try { if (f.comprobante_key && await env.DB.prepare('SELECT 1 AS x FROM corte_pedidos WHERE telefono=? AND comprobante_key=? LIMIT 1').bind(f.telefono, f.comprobante_key).first()) return true; } catch (_) {}
+  try { if (f.comprobante_wamid && await env.DB.prepare("SELECT 1 AS x FROM corte_pago_parcial WHERE phone=? AND instr(IFNULL(wamids,''), ?) > 0 LIMIT 1").bind(f.telefono, JSON.stringify(String(f.comprobante_wamid))).first()) return true; } catch (_) {}
+  return false;
+}
+// Si ya se contó: el freno se cierra (no tiene que trabar nada) y la acción se rechaza (409). Si no, null.
+async function corteFrenoYaContado(env, f, quien) {
+  if (!(await corteFrenoCompContado(env, f))) return null;
+  await corteFrenoCerrar(env, f.id, 'resuelto', 'ya contado en un cobro', quien || 'vigía');
+  await corteFrenoQuemarComp(env, f);
+  return { ok: false, status: 409, motivo: 'Ese comprobante ya se contó como pago de su cobro: dejarlo a favor, devolverlo o usarlo de nuevo sería contar la misma plata dos veces. Lo cerré.' };
 }
 // ===== DETECTOR DEL CHAT (kv corte_agregar_on 'dry' | '1') + comprobantes sueltos (corte_pago_dif_on) =====
 // Corre en el vigía de pagos (cron de cada minuto, aunque el bot del corte esté apagado y el chat esté en la bandeja de
 // cursos). Lee SOLO lo nuevo de wa_messages con un cursor global (kv corte_chat_cursor; relee 5 min por los webhooks que
-// llegan tarde; corte_chat_check evita repetir) y espera 90 s por si el cliente sigue escribiendo. Solo mira a los teléfonos
-// con un paquete abierto (algo sin despachar, un cobro en curso o despachado hace menos de 7 días: para los reclamos). Por
-// teléfono y por corrida, UNA llamada a Haiku con todos sus mensajes nuevos (tope 8 por corrida): agregar | cambio | reclamo |
-// nada. Qué y cuánto lo calcula el código con los precios de la web; las reglas sin IA cubren si la IA no contesta o se le
-// escapa un pedido claro. Imágenes de un cliente SIN cobro abierto (pagó antes de que saliera el cobro, o dos veces): se
-// leen (tope 5 por corrida) y, si son comprobantes, abren una diferencia. Si la IA o el lector fallan, el mensaje queda sin
-// marcar y el cursor lo espera (hasta 30 min la IA; después, solo las reglas).
+// llegan tarde; corte_chat_check evita repetir) y espera a que el cliente deje de escribir (90 s desde su último mensaje,
+// hasta 10 min). Solo mira a los teléfonos con un paquete abierto (CORTE_CHAT_CAND_SQL), sin los del equipo. Por teléfono y por
+// corrida, UNA llamada a Haiku con todos sus mensajes nuevos (tope 8 por corrida y corte_chat_ia_tope por día): agregar |
+// cambio | reclamo | nada. Saludos y acuses ("ok", "dale") no van a la IA salvo que haya algo que confirmar. Qué y cuánto lo
+// calcula el código con los precios de la web; las reglas sin IA deciden solo si la IA no contesta (un pedido inequívoco).
+// Imágenes de un cliente SIN cobro abierto (pagó antes de que saliera el cobro, o dos veces): se leen (tope 5 por corrida) y,
+// si son comprobantes del corte, abren una diferencia (los de un curso, una OC u otra caja no). Si la IA, el lector o el alta
+// del freno fallan, el mensaje queda sin marcar y el cursor lo espera hasta 30 min (el lector, 3 intentos; un audio sin
+// transcribir, 12 min); después se marca y, si el cliente tiene algo abierto, Gaspar recibe un aviso para leerlo él.
 const CORTE_CHAT_SYSTEM = 'Sos parte del equipo de un taller de Argentina que corta bases de acrílico para carteles de neón y vende insumos. Te paso el final del chat con un CLIENTE que tiene un pedido de esta semana (NEGOCIO = una persona del taller; AUTOMÁTICO = un mensaje automático). Los mensajes marcados NUEVO todavía no los revisó nadie. Decidí si en los NUEVOS el cliente pide cambiar su pedido. Respondé SOLO un JSON: {"accion":"agregar|cambio|reclamo|nada","items":[{"codigo":"nitto_4a|cable_025|cable_035|cable_05|null","texto":"lo que pidió, corto","cantidad":5,"color":"blanco|negro|null"}],"frase":"cita textual corta del cliente"}.\n' +
-  'agregar: quiere sumar algo al pedido ("Te puedo agregar 5 fuentes?", "Y 40mil las fuentes no?", "sumame un rollo de cable", "ahí te pasé con lo de las fuentes"). Aunque el NEGOCIO le haya dicho que sí, igual es agregar: puede que nadie lo haya cargado. Si hay una propuesta abierta y el cliente vuelve sobre lo mismo, devolvé agregar con la lista COMPLETA (lo que ya estaba más lo nuevo).\n' +
+  'agregar: pide sumar algo al pedido ("Te puedo agregar 5 fuentes?", "sumame un rollo de cable", "te encargo 5 fuentes", "ahí te pasé con lo de las fuentes"). Si antes ya pidió algo y vuelve sobre eso, también es agregar (por ejemplo "Y 40mil las fuentes no?" después de haber pedido las fuentes; solo, sin un pedido antes, es una pregunta de precio). Aunque el NEGOCIO le haya dicho que sí, igual es agregar: puede que nadie lo haya cargado. Si hay una propuesta abierta y el cliente vuelve sobre lo mismo, devolvé agregar con la lista COMPLETA (lo que ya estaba más lo nuevo).\n' +
   'cambio: cambiar una medida, sacar una pieza, cancelar o cambiar la entrega.\n' +
   'reclamo: le falta algo, le llegó mal o roto ("me llegaron las bases pero no las fuentes").\n' +
-  'nada: preguntas de precio o de medidas sin pedir un cambio, saludos, agradecimientos, coordinar el pago o el envío, o respuestas a otra campaña ("por ahora paso").\n' +
-  'items solo con agregar. Catálogo: nitto_4a = Fuente Nitto 4A (fuente, fuentecita, nitto); cable_025 = Cable 0,25 mm estañado transparente (rollo de 50 m); cable_035 = Cable 0,35 mm (rollo de 100 m, blanco o negro); cable_05 = Cable 0,5 mm (rollo de 100 m, blanco o negro). Si pide algo que no está en el catálogo (tira LED, otra fuente, un diseño nuevo) o un cable sin decir cuál, codigo null y describilo en texto. cantidad = unidades o rollos, null si no la dice; no la inventes: "las fuentes" sin número es null, salvo que el número esté en un mensaje anterior del mismo pedido. Un monto ("40mil") no es una cantidad. Ante la duda entre agregar y nada, elegí agregar.';
+  'nada: preguntas de información o de precio sin pedir nada ("las bases incluyen la fuente?", "la fuente también la venden?", "cuánto es la suma con las fuentes?"), saludos, agradecimientos o avisar que algo llegó bien ("me llegó todo, las fuentes también, gracias"), coordinar el pago o el envío, o respuestas a otra campaña ("por ahora paso"). Si dice que NO quiere sumar algo, no es agregar.\n' +
+  'items solo con agregar. Catálogo: nitto_4a = Fuente Nitto 4A (fuente, fuentecita, nitto, transformador, trafo); cable_025 = Cable 0,25 mm estañado transparente (rollo de 50 m); cable_035 = Cable 0,35 mm (rollo de 100 m, blanco o negro); cable_05 = Cable 0,5 mm (rollo de 100 m, blanco o negro). Si pide algo que no está en el catálogo (tira LED, otra fuente, un diseño nuevo) o un cable sin decir cuál, codigo null y describilo en texto. cantidad = unidades o rollos, null si no la dice; no la inventes: "las fuentes" sin número es null, salvo que el número esté en un mensaje anterior del mismo pedido. Un monto ("40mil") no es una cantidad.';
 function corteChatParse(txt) {
   const m = /\{[\s\S]*\}/.exec(String(txt || '')); if (!m) return null;
   let o; try { o = JSON.parse(m[0]); } catch (_) { return null; }
@@ -6919,13 +7064,13 @@ async function corteChatClasificar(env, tel, contexto) {
     return corteChatParse((j.content && j.content[0] && j.content[0].text) || '');
   } catch (_) { return null; }
 }
-// IA + reglas. La IA manda; las reglas suben un "nada" a "agregar" si el pedido es claro (verbo + producto del catálogo),
-// completan cantidades que la IA dejó vacías y, si la IA no contestó, deciden solas (solo un pedido claro).
+// IA + reglas. La IA manda (un "nada" de la IA queda en nada: las reglas lo pisaban con "gracias por sumar las fuentes" o
+// "las bases incluyen la fuente?" y frenaban el paquete); las reglas completan cantidades que la IA dejó vacías y, si la IA no
+// contestó, deciden solas (solo un pedido inequívoco).
 function corteChatFusion(ia, reglas) {
   const rg = reglas || { agregar: false, items: [] };
   if (!ia) return rg.agregar ? { accion: 'agregar', items: rg.items, frase: '', via: 'reglas' } : null;
-  let r = { ...ia, items: [...(ia.items || [])], via: 'ia' };
-  if (r.accion === 'nada' && rg.agregar && rg.items.some(x => x.codigo)) r = { accion: 'agregar', items: rg.items, frase: ia.frase || '', via: 'reglas' };
+  const r = { ...ia, items: [...(ia.items || [])], via: 'ia' };
   if (r.accion === 'agregar') {
     if (!r.items.length && rg.items.length) r.items = rg.items;
     r.items = r.items.map(it => {
@@ -6975,13 +7120,22 @@ async function corteChatContexto(env, tel, piezas, nuevos, est) {
     + (frs.filter(f => f.estado !== 'abierto').map(f => 'YA RESUELTO: ' + f.tipo + (its(f) ? ' ' + its(f) : '') + (f.resolucion ? ' (' + f.resolucion + ')' : '')).join('\n')) + '\n'
     + 'CHAT (lo más viejo arriba):\n' + hist.map(h => (h.direction === 'inbound' ? 'CLIENTE' : (+h.automated > 0 ? 'AUTOMÁTICO' : 'NEGOCIO')) + (nuevosSet.has(h.wamid) ? ' (NUEVO)' : '') + (h.msg_type && !['text', 'template'].includes(h.msg_type) ? ' [' + h.msg_type + ']' : '') + ': ' + corteChatCuerpo(h).slice(0, 300)).join('\n');
 }
-// Alta (o actualización, si ya tiene uno abierto del mismo tipo de las últimas 48 h) del freno que sale del chat + aviso.
+// La pieza que dice a qué paquete (tanda) va un freno: entre las vivas CON tanda, primero las del cobro en curso o pagadas.
+// Nunca un pedido web de la semana que viene ('pedido' sin tanda): lo sumado se iba a esa semana y el paquete actual salía sin
+// lo agregado. null si no hay ninguna con tanda.
+function corteFrenoBase(vivas) {
+  const rk = p => ({ cobrando: 0, parcial: 0, pagado: 1, interno: 1 }[p.estado_pago] ?? 2);
+  return (vivas || []).filter(p => p.tanda_id).sort((a, b) => rk(a) - rk(b) || (+b.tanda_id - +a.tanda_id) || (['TRANS', 'NEGRO'].includes(String(b.producto || 'TRANS').toUpperCase()) - ['TRANS', 'NEGRO'].includes(String(a.producto || 'TRANS').toUpperCase())) || (b.id - a.id))[0] || null;
+}
+// Alta (o actualización, si ya tiene uno abierto del mismo tipo de las últimas 48 h) del freno que sale del chat + aviso. Frena
+// SOLO un "agregar" con el paquete sin despachar (Gaspar: frenar por un agregar sin resolver o por plata). Un cambio o un reclamo
+// avisan sin frenar, y un pedido sobre un paquete que ya salió es para otro envío: tampoco frena (trababa el de la semana siguiente).
 async function corteFrenoChat(env, cfg, tel, piezas, est, r, reales) {
   if (!r || r.accion === 'nada') return null;
   const prueba = cfg.agregar === 'dry' ? 1 : 0;
   const citas = reales.map(m => '"' + corteChatCuerpo(m).slice(0, 200) + '" (' + corteHoraAR(m.ts) + ')').join(' · ');
   const nombre = (piezas.find(p => p.cliente_nombre) || {}).cliente_nombre || '';
-  const base = est.vivas.slice().sort((a, b) => b.id - a.id)[0] || null;
+  const base = corteFrenoBase(est.vivas);
   let prev = null;
   try { prev = await env.DB.prepare(`SELECT ${CORTE_FRENO_COLS} FROM corte_frenos WHERE telefono=? AND tipo=? AND estado='abierto' AND IFNULL(prueba,0)=? AND origen='chat' AND created_at >= ? ORDER BY id DESC LIMIT 1`).bind(tel, r.accion, prueba, isoHace(48 * 3600e3)).first(); } catch (_) {}
   let items = [], total = 0, entendido = true;
@@ -6990,12 +7144,22 @@ async function corteFrenoChat(env, cfg, tel, piezas, est, r, reales) {
     const c = corteAgregarCotizar(await corteLandingPrecios(env), corteItemsMerge(viejos, r.items));
     items = c.items; total = c.total; entendido = c.entendido;
   }
-  const frena = prueba ? 0 : (r.accion === 'reclamo' ? (est.abierto ? 1 : 0) : 1);
+  const frena = (!prueba && cfg.freno && r.accion === 'agregar' && est.abierto) ? 1 : 0;
   const now = new Date().toISOString();
+  const q = corteQuien(nombre, tel);
+  const contexto = ' ' + est.cobroTxt + (est.paqTxt ? ' ' + est.paqTxt : '');
+  const listaTxt = () => items.length > 1 ? items.map(x => (x.cantidad ? x.cantidad + ' ' : '') + x.nombre + (x.precio ? ' (' + corteLandingPesos(x.precio) + ')' : '')).join(' y ') + ' = ' + corteLandingPesos(total) : corteItemsTxt(items, false) + (total ? ' = ' + corteLandingPesos(total) : '');
   if (prev) {
     let w = []; try { w = JSON.parse(prev.wamids || '[]'); } catch (_) {}
     const tx = (String(prev.texto_cliente || '') + ' · ' + citas).slice(-700);
-    try { await env.DB.prepare('UPDATE corte_frenos SET wamids=?, texto_cliente=?, items_json=?, items_total=?, entendido=?, updated_at=? WHERE id=? AND estado=\'abierto\'').bind(JSON.stringify([...w, ...reales.map(m => m.wamid)].slice(-30)), tx, JSON.stringify(items.length ? items : (JSON.parse(prev.items_json || '[]') || [])), items.length ? total : (+prev.items_total || 0), items.length ? (entendido ? 1 : 0) : +prev.entendido, now, prev.id).run(); } catch (_) {}
+    let u = null;
+    try { u = await env.DB.prepare('UPDATE corte_frenos SET wamids=?, texto_cliente=?, items_json=?, items_total=?, entendido=?, updated_at=? WHERE id=? AND estado=\'abierto\'').bind(JSON.stringify([...w, ...reales.map(m => m.wamid)].slice(-30)), tx, JSON.stringify(items.length ? items : (JSON.parse(prev.items_json || '[]') || [])), items.length ? total : (+prev.items_total || 0), items.length ? (entendido ? 1 : 0) : +prev.entendido, now, prev.id).run(); } catch (_) { return null; }
+    if (!u || !u.meta || !u.meta.changes) return null; // se resolvió en el medio: que se reintente (abre uno nuevo)
+    // Se entendió lo que antes no ("Te puedo agregar algo?" y después "5 fuentes"), o cambió el total: un aviso más, una vez por
+    // cambio (sin esto Gaspar se quedaba con la versión "no entendí").
+    if (r.accion === 'agregar' && items.length && entendido && (!+prev.entendido || Math.round(total) !== Math.round(+prev.items_total || 0))) {
+      await corteFrenoAvisar(env, { ...prev, entendido: 1 }, 'Corte · ' + q + ' aclaró lo que quiere sumar: ' + listaTxt() + ' (precio web). Dijo: ' + citas + '.' + contexto + ((cfg.freno && +prev.frena && !prueba) ? ' Sigue frenado el paquete hasta que lo resuelvas en el CRM:' : ' Resolvelo en el CRM:'), { reaviso: 'e1:' + Math.round(total) });
+    }
     return prev;
   }
   const f = await corteFrenoCrear(env, { telefono: tel, nombre, tipo: r.accion, origen: 'chat', frena, prueba, wamids: reales.map(m => m.wamid), texto_cliente: citas, items, items_total: total, entendido, tanda_id: base && base.tanda_id, hoja_fecha: base && base.hoja_fecha });
@@ -7007,28 +7171,68 @@ async function corteFrenoChat(env, cfg, tel, piezas, est, r, reales) {
     if (rel) { try { await env.DB.batch([env.DB.prepare('UPDATE corte_frenos SET rel_id=? WHERE id=?').bind(rel.id, f.id), env.DB.prepare('UPDATE corte_frenos SET rel_id=? WHERE id=? AND rel_id IS NULL').bind(f.id, rel.id)]); } catch (_) {} }
   }
   if (!prueba) await corteFrenoEtiqueta(env, tel, true);
-  const q = corteQuien(nombre, tel);
-  const fin = (cfg.freno && frena && !prueba) ? ' Frené el paquete hasta que lo resuelvas en el CRM:' : ' Resolvelo en el CRM:';
-  const contexto = ' ' + est.cobroTxt + (est.paqTxt ? ' ' + est.paqTxt : '');
+  // Con el paquete afuera el aviso ya no dice "frené" (antes: "El paquete ya salió... Frené el paquete").
+  const fin = (cfg.freno && frena) ? ' Frené el paquete hasta que lo resuelvas en el CRM:' : (est.abierto ? ' Resolvelo en el CRM:' : ' No frené nada. Resolvelo en el CRM:');
   let t;
   if (r.accion === 'agregar') {
-    const lista = items.length > 1 ? items.map(x => (x.cantidad ? x.cantidad + ' ' : '') + x.nombre + (x.precio ? ' (' + corteLandingPesos(x.precio) + ')' : '')).join(' y ') + ' = ' + corteLandingPesos(total) : corteItemsTxt(items, false) + (total ? ' = ' + corteLandingPesos(total) : '');
-    t = entendido ? 'Corte · ' + q + ' quiere sumar ' + lista + ' (precio web). Dijo: ' + citas + '.' + contexto + (rel ? ' Ya pagó ' + corteLandingPesos(rel.diferencia) + ' de más: coincide.' : '') + fin
-      : 'Corte · ' + q + ' quiere sumar algo que no pude cotizar solo (' + (corteItemsTxt(items, false) || 'no sé qué') + '). Dijo: ' + citas + '.' + contexto + ' Decidí qué es en el CRM:';
-  } else if (r.accion === 'cambio') t = 'Corte · ' + q + ' pidió un cambio en su pedido. Dijo: ' + citas + '.' + contexto + fin;
-  else t = 'Corte · ' + q + ' reclama: ' + citas + '.' + contexto + (est.abierto ? fin : ' Resolvelo con el cliente (el freno no aplica: ya salió):');
+    t = entendido ? 'Corte · ' + q + ' quiere sumar ' + listaTxt() + ' (precio web). Dijo: ' + citas + '.' + contexto + (rel ? ' Ya pagó ' + corteLandingPesos(rel.diferencia) + ' de más: coincide.' : '') + fin
+      : 'Corte · ' + q + ' quiere sumar algo que no pude cotizar solo (' + (corteItemsTxt(items, false) || 'no sé qué') + '). Dijo: ' + citas + '.' + contexto + ((cfg.freno && frena) ? ' Frené el paquete: decidí qué es en el CRM:' : ' Decidí qué es en el CRM:');
+  } else if (r.accion === 'cambio') t = 'Corte · ' + q + ' pidió un cambio en su pedido. Dijo: ' + citas + '.' + contexto + ' No frené nada. Resolvelo en el CRM:';
+  else t = 'Corte · ' + q + ' reclama: ' + citas + '.' + contexto + (est.abierto ? ' No frené nada. Resolvelo en el CRM:' : ' Resolvelo con el cliente (ya salió):');
   await corteFrenoAvisar(env, f, t);
   return f;
 }
-// Comprobante de un cliente SIN cobro abierto (lo vio el detector): repetido (mismo monto que uno contado en 7 días) o plata
-// sin cobro (pagó antes de que saliera el cobro, o algo que no le cobramos). NO se anota en corte_pago_check: si después sale
-// el cobro, el vigía lo puede tomar como pago (y ese freno se cierra solo).
+// Comprobante de un cliente SIN cobro abierto (lo vio el detector): el mismo que uno contado en 7 días reenviado (nada), mismo
+// monto sin poder comparar (aviso sin frenar), a otra caja (no es del corte: aviso P2 sin freno) o plata sin cobro (pagó antes de
+// que saliera el cobro, o algo que no le cobramos). NO se anota en corte_pago_check: si después sale el cobro, el vigía lo puede
+// tomar como pago (y ese freno se cierra solo). → lo que se anota en corte_chat_check, o null si no se pudo abrir el freno.
 async function corteFrenoSuelto(env, cfg, tel, piezas, est, m, proof) {
   const monto = Math.round(+proof.monto || 0);
-  let rep = null;
-  try { rep = await env.DB.prepare('SELECT checked_at FROM corte_pago_check WHERE phone=? AND es_comprobante=1 AND checked_at >= ? AND wamid != ? AND ABS(monto - ?) <= 1 ORDER BY checked_at DESC LIMIT 1').bind(tel, isoHace(7 * 86400000), m.wamid, monto).first(); } catch (_) {}
+  // Los contados del mismo monto (7 días): el que más se parece (el mismo comprobante > solo el monto > otra fecha).
+  let reps = [];
+  try { reps = (await env.DB.prepare('SELECT * FROM corte_pago_check WHERE phone=? AND es_comprobante=1 AND checked_at >= ? AND wamid != ? AND ABS(monto - ?) <= 1 ORDER BY checked_at DESC LIMIT 5').bind(tel, isoHace(7 * 86400000), m.wamid, monto).all()).results || []; } catch (_) {}
+  const orden = { mismo: 0, monto: 1, distinto: 2 };
+  const rep = reps.map(x => ({ x, k: corteCompMismo(proof, monto, x) })).sort((a, b) => (orden[a.k] ?? 3) - (orden[b.k] ?? 3))[0]?.x || null;
   const nombre = (piezas.find(p => p.cliente_nombre) || {}).cliente_nombre || '';
-  return await corteFrenoPago(env, cfg, { tipo: rep ? 'pago_repetido' : 'pago_sin_cobro', tel, nombre, cobro_total: 0, monto, diferencia: monto, proof, key: m.media_url, wamid: m.wamid, ts: m.ts, pendiente: est.pendiente, repDe: rep ? 'del ' + corteHoraAR(rep.checked_at) : '' });
+  const k = corteCompSueltoClase(proof, monto, rep);
+  if (k.nada === 'repetido') return 'comp:' + monto + ':repetido';
+  if (k.nada === 'otra_caja') {
+    try { await precotizNotifyGaspar(env, 'Corte · ' + corteQuien(nombre, tel) + ' mandó un comprobante por ' + corteLandingPesos(monto) + ' a la caja ' + k.caja + ' (no es la del corte) y no tiene cobro abierto. No lo tomé como plata del corte: si era del corte, revisalo en el chat.', { tipo: 'corte_pago', prioridad: 'P2', refPhone: tel, clave: 'corte_comp_otra:' + m.wamid }); } catch (_) {}
+    return 'comp:' + monto + ':otra_caja';
+  }
+  const f = await corteFrenoPago(env, cfg, { tipo: k.tipo, soloAviso: k.soloAviso, tel, nombre, cobro_total: 0, monto, diferencia: monto, proof, key: m.media_url, wamid: m.wamid, ts: m.ts, pendiente: est.pendiente, repDe: rep ? 'del ' + corteHoraAR(rep.checked_at) : '' });
+  return f ? 'comp:' + monto + ':freno:' + f.id : null;
+}
+// Candidatos del detector (un paquete abierto): algo sin despachar, un cobro en curso de un paquete sin despachar o que salió
+// hace menos de 14 días, o despachado hace menos de 7 días (los reclamos). Un deudor de hace meses ya no: toda su charla de
+// cursos iba a la IA. Binds: (hace 14 días, hace 7 días).
+const CORTE_CHAT_CAND_SQL = "IFNULL(producto,'TRANS')!='NEON' AND estado NOT IN ('prueba','cancelado') AND (estado IN ('pedido','matriz_lista','cortado','embalado') OR (estado_pago IN ('cobrando','parcial') AND COALESCE(despachado_at, entregado_at, updated_at) >= ?) OR (estado='despachado' AND despachado_at >= ?))";
+// Saludos y acuses que no piden nada (no van a la IA). Un acuse ("dale", "ok", "si") SÍ va si tiene una propuesta abierta o el
+// negocio le acaba de preguntar algo: puede ser el "sí" a "te sumo las fuentes?".
+const CORTE_CHAT_SALUDO_RE = /^(hola+|holis|buenas?|buen dia|buenos dias|buenas (tardes|noches)|que tal|como va|como andas|como estas)( (abril|gaspar|bruno|neyen|favio|emma|agus|facu|joaco|che|chicos|gente))?$/;
+const CORTE_CHAT_ACUSE_RE = /^(ok+|oka+|okey|okis|dale+|listo|perfecto|joya|genial|buenisimo|barbaro|de una|super|claro|entendido|si+|ah ok|ahh ok|ya esta|vale|bien|re bien)( (ok|dale|listo|perfecto|genial|joya|buenisimo|barbaro|bien))*( (muchas |mil )?gracias)?$/;
+function corteChatCortesia(b) {
+  if (sinRespEsCortesia(b)) return 'cortesia';
+  const t = String(b || '').trim();
+  if (!t || /[?¿]/.test(t)) return '';
+  const n = t.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[\p{Extended_Pictographic}\u{1F3FB}-\u{1F3FF}️‍]/gu, '').replace(/[^a-z0-9ñ ]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!n) return 'cortesia';
+  if (CORTE_CHAT_SALUDO_RE.test(n)) return 'cortesia';
+  if (CORTE_CHAT_ACUSE_RE.test(n)) return 'acuse';
+  return '';
+}
+// ¿Un acuse de este cliente puede ser un "sí" a algo? Freno abierto, o el último mensaje de una persona del negocio antes del
+// acuse (últimas 24 h) es una pregunta.
+async function corteChatHayPropuesta(env, tel, ts) {
+  try { if (await env.DB.prepare("SELECT 1 AS x FROM corte_frenos WHERE telefono=? AND estado='abierto' LIMIT 1").bind(tel).first()) return true; } catch (_) { return true; }
+  try {
+    const o = await env.DB.prepare("SELECT body FROM wa_messages WHERE phone=? AND direction='outbound' AND IFNULL(automated,0)=0 AND msg_type NOT IN ('status','reaction') AND ts < ? AND ts >= ? ORDER BY ts DESC LIMIT 1").bind(tel, ts, new Date(Date.parse(ts) - 24 * 3600e3).toISOString()).first();
+    return !!(o && /\?/.test(String(o.body || '')));
+  } catch (_) { return true; }
+}
+// Intentos fallidos del lector sobre un archivo (fila 'ocrerr:<wamid>' de corte_chat_check) → cuántos van.
+async function corteOcrFalla(env, m) {
+  try { const r = await env.DB.prepare("INSERT INTO corte_chat_check (wamid, phone, ts, resultado, checked_at) VALUES (?, ?, ?, '1', ?) ON CONFLICT(wamid) DO UPDATE SET resultado=CAST(CAST(corte_chat_check.resultado AS INTEGER) + 1 AS TEXT), checked_at=excluded.checked_at RETURNING resultado").bind('ocrerr:' + m.wamid, m.phone, m.ts, new Date().toISOString()).first(); return parseInt(r && r.resultado, 10) || 1; } catch (_) { return 99; }
 }
 async function corteChatVigia(env, cfg) {
   if (!(cfg.agregar !== '0' || cfg.dif)) return;
@@ -7042,19 +7246,32 @@ async function corteChatVigia(env, cfg) {
   const tope = isoHace(90e3);
   if (piso >= tope) return;
   const LIM = 300;
+  const h14 = isoHace(14 * 86400000), h7 = isoHace(7 * 86400000);
+  // Solo los mensajes de los candidatos cuentan para el tope de la corrida: 300 entrantes de cursos o difusiones ya no tapan el
+  // pedido de un cliente del corte detrás de un mensaje trabado.
   let msgs = [];
-  try { msgs = (await env.DB.prepare("SELECT wamid, phone, ts, msg_type, body, media_url FROM wa_messages WHERE ts > ? AND ts <= ? AND direction='inbound' AND msg_type NOT IN ('status','reaction','sticker') ORDER BY ts LIMIT " + LIM).bind(piso, tope).all()).results || []; } catch (_) { return; }
+  try { msgs = (await env.DB.prepare(`SELECT wamid, phone, ts, msg_type, body, media_url FROM wa_messages WHERE ts > ? AND ts <= ? AND direction='inbound' AND msg_type NOT IN ('status','reaction','sticker') AND phone IN (SELECT telefono FROM corte_pedidos WHERE ${CORTE_CHAT_CAND_SQL}) ORDER BY ts LIMIT ${LIM}`).bind(piso, tope, h14, h7).all()).results || []; } catch (_) { return; }
   let pendTs = '';
   const pend = (ts) => { if (!pendTs || ts < pendTs) pendTs = ts; };
+  // IA y lector: tope diario (kv corte_chat_ia_dia = 'AAAA-MM-DD|ia|ocr', día AR); la IA, si está caída (kv corte_chat_ia_falla).
+  const hoyAR = new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 10);
+  const iaDia = String(await kvGet(env, 'corte_chat_ia_dia', '') || '').split('|');
+  let iaHoy = iaDia[0] === hoyAR ? (parseInt(iaDia[1], 10) || 0) : 0, ocrHoy = iaDia[0] === hoyAR ? (parseInt(iaDia[2], 10) || 0) : 0;
+  const iaHoy0 = iaHoy, ocrHoy0 = ocrHoy;
+  let iaBien = false, iaMal = false;
   try {
-    const tels = [...new Set(msgs.map(m => String(m.phone || '')).filter(t => /^\d{8,15}$/.test(t)))];
+    // Teléfonos del equipo (wa_internal_phones, agenda): sus mensajes no son de un cliente aunque tengan piezas con su número.
+    const internos = (await internosSet(env)).set;
+    const tels = [...new Set(msgs.map(m => String(m.phone || '')).filter(t => /^\d{8,15}$/.test(t) && !internos.has(t)))];
     if (!tels.length) return;
-    // Candidatos: con un paquete abierto (de a 90 por los parámetros de D1).
-    const piezasDe = new Map();
+    // Piezas de los candidatos (de a 90 por los parámetros de D1).
+    const piezasDe = new Map(), activos = new Set();
     for (let i = 0; i < tels.length; i += 90) {
       const ch = tels.slice(i, i + 90);
-      const rs = (await env.DB.prepare(`SELECT id, telefono, cliente_nombre, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, producto, precio, estado, estado_pago, tanda_id, hoja_fecha, despachado_at, express FROM corte_pedidos WHERE telefono IN (${ch.map(() => '?').join(',')}) AND IFNULL(producto,'TRANS')!='NEON' AND estado NOT IN ('prueba','cancelado') AND (estado IN ('pedido','matriz_lista','cortado','embalado') OR estado_pago IN ('cobrando','parcial') OR (estado='despachado' AND despachado_at >= ?))`).bind(...ch, isoHace(7 * 86400000)).all()).results || [];
+      const rs = (await env.DB.prepare(`SELECT id, telefono, cliente_nombre, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, producto, precio, estado, estado_pago, tanda_id, hoja_fecha, despachado_at, express FROM corte_pedidos WHERE telefono IN (${ch.map(() => '?').join(',')}) AND ${CORTE_CHAT_CAND_SQL}`).bind(...ch, h14, h7).all()).results || [];
       for (const p of rs) { if (!piezasDe.has(p.telefono)) piezasDe.set(p.telefono, []); piezasDe.get(p.telefono).push(p); }
+      // Los que siguen escribiendo (algo entró en los últimos 90 s): se espera a que terminen (la conversación, no cada mensaje).
+      ((await env.DB.prepare(`SELECT DISTINCT phone FROM wa_messages WHERE phone IN (${ch.map(() => '?').join(',')}) AND direction='inbound' AND msg_type NOT IN ('status','reaction') AND ts > ?`).bind(...ch, tope).all()).results || []).forEach(r => activos.add(String(r.phone)));
     }
     if (!piezasDe.size) return;
     const cand = msgs.filter(m => piezasDe.has(String(m.phone)));
@@ -7062,60 +7279,143 @@ async function corteChatVigia(env, cfg) {
     const hechos = new Set();
     for (let i = 0; i < claves.length; i += 90) { const ch = claves.slice(i, i + 90); ((await env.DB.prepare(`SELECT wamid FROM corte_chat_check WHERE wamid IN (${ch.map(() => '?').join(',')})`).bind(...ch).all()).results || []).forEach(r => hechos.add(r.wamid)); }
     const marcar = async (k, m, res) => { try { await env.DB.prepare('INSERT OR IGNORE INTO corte_chat_check (wamid, phone, ts, resultado, checked_at) VALUES (?, ?, ?, ?, ?)').bind(k, m.phone, m.ts, String(res).slice(0, 60), new Date().toISOString()).run(); } catch (_) {} };
+    const edad = (m) => Date.now() - Date.parse(m.ts);
     let ias = 0, ocrs = 0;
     for (const tel of [...new Set(cand.map(m => String(m.phone)))]) {
       const piezas = piezasDe.get(tel) || [];
       const est = cortePaqueteEstado(piezas);
       const deTel = cand.filter(m => String(m.phone) === tel);
+      const nombre = (piezas.find(p => p.cliente_nombre) || {}).cliente_nombre || '';
+      const conCosas = est.abierto || ['cobrando', 'parcial'].includes(est.cobro);
+      const sinVer = deTel.filter(m => (cfg.agregar !== '0' && !hechos.has(m.wamid)) || (cfg.dif && ['image', 'document'].includes(m.msg_type) && !hechos.has('ocr:' + m.wamid)));
+      if (!sinVer.length) continue;
+      // Sigue escribiendo: se espera (hasta 10 min desde su primer mensaje nuevo, para no esperar para siempre a uno que no para).
+      if (activos.has(tel) && edad(sinVer[0]) < 10 * 60e3) { pend(sinVer[0].ts); continue; }
       // 1) Comprobantes sueltos (pagó sin cobro abierto). Los de un cobro en curso, un exprés o una seña los mira el vigía.
       const medias = cfg.dif ? deTel.filter(m => ['image', 'document'].includes(m.msg_type) && !hechos.has('ocr:' + m.wamid)) : [];
       if (medias.length) {
         const enCobro = piezas.some(p => ['cobrando', 'parcial'].includes(p.estado_pago) && +p.precio > 0) || piezas.some(p => +p.express === 1 && p.estado_pago === 'pendiente');
-        let sena = false;
+        let sena = false, ajeno = '';
         if (!enCobro) { try { sena = !!(await env.DB.prepare("SELECT 1 AS x FROM corte_senas WHERE telefono=? AND estado IN ('pendiente','revisar') LIMIT 1").bind(tel).first()); } catch (_) {} }
+        // Alumno con una cuota del curso por pagar (o una OC de carteles): su comprobante no es del corte (antes abría "pagó sin
+        // cobro", frenaba el paquete y el botón verde era "Dejar a favor" con la plata del curso).
+        if (!enCobro && !sena) ajeno = await corteCompAjeno(env, tel, '');
         for (const m of medias) {
           const key = String(m.media_url || '');
           if (enCobro || sena) { await marcar('ocr:' + m.wamid, m, sena ? 'sena' : 'cobro'); continue; }
+          if (ajeno) { await marcar('ocr:' + m.wamid, m, 'ajeno:' + ajeno); continue; }
           if (!key || /^https?:/i.test(key)) { await marcar('ocr:' + m.wamid, m, 'sin_archivo'); continue; }
           let visto = null; try { visto = await env.DB.prepare('SELECT 1 AS x FROM corte_pago_check WHERE wamid=?').bind(m.wamid).first(); } catch (_) {}
           if (visto) { await marcar('ocr:' + m.wamid, m, 'ya_leido'); continue; }
+          const aj = await corteCompAjeno(env, '', m.wamid); // ya lo tomó otro flujo como pago (wa_pago_proof)
+          if (aj) { await marcar('ocr:' + m.wamid, m, 'ajeno:' + aj); continue; }
           if (ocrs >= 5) { pend(m.ts); continue; }
-          ocrs++;
+          if (ocrHoy >= cfg.ocrTope) {
+            // Tope del día del lector: no se lee (y, si tiene algo abierto, que lo mire una persona).
+            await marcar('ocr:' + m.wamid, m, 'tope_ocr');
+            if (conCosas) { try { await precotizNotifyGaspar(env, 'Corte · ' + corteQuien(nombre, tel) + ' mandó una imagen (' + corteHoraAR(m.ts) + ') y hoy ya llegué al tope de lecturas (kv corte_chat_ocr_tope): si es un comprobante, miralo en el chat.', { tipo: 'corte_pago', prioridad: 'P2', refPhone: tel, clave: 'corte_ocr_tope:' + m.wamid }); } catch (_) {} }
+            continue;
+          }
+          ocrs++; ocrHoy++;
           const proof = await analyzePaymentProof(env, key, m.msg_type === 'document' ? 'application/pdf' : '', { phone: tel, by: 'pago_corte_suelto' });
-          if (!proof) { pend(m.ts); continue; } // fallo transitorio del lector
+          if (!proof) {
+            // El lector no pudo (R2 sin el archivo, Anthropic caído o que no lo acepta): hasta 3 intentos o 30 min, como la IA; después
+            // queda 'ocr_fallo' y, si tiene algo abierto, un aviso P2. Antes se reintentaba para siempre y clavaba el cursor 6 h.
+            const n = await corteOcrFalla(env, m);
+            if (n < 3 && edad(m) < 30 * 60e3) { pend(m.ts); continue; }
+            await marcar('ocr:' + m.wamid, m, 'ocr_fallo');
+            if (conCosas) { try { await precotizNotifyGaspar(env, 'Corte · ' + corteQuien(nombre, tel) + ' mandó un archivo que no pude leer (' + corteHoraAR(m.ts) + '). Si es un comprobante, revisalo en el chat.', { tipo: 'corte_pago', prioridad: 'P2', refPhone: tel, clave: 'corte_ocr_fallo:' + m.wamid }); } catch (_) {} }
+            continue;
+          }
           const monto = Math.round(+proof.monto || 0), es = !!proof.es_comprobante && monto > 0;
-          let f = null;
-          if (es) { try { f = await corteFrenoSuelto(env, cfg, tel, piezas, est, m, proof); } catch (_) {} }
-          await marcar('ocr:' + m.wamid, m, es ? 'comp:' + monto + (f ? ':freno:' + f.id : '') : 'foto');
+          let res = 'foto';
+          if (es) {
+            let r0 = null; try { r0 = await corteFrenoSuelto(env, cfg, tel, piezas, est, m, proof); } catch (_) {}
+            if (!r0) {
+              // No se pudo abrir el freno (D1 saturada): no se marca, se reintenta; pasados 30 min, aviso de respaldo y se marca.
+              if (edad(m) < 30 * 60e3) { pend(m.ts); continue; }
+              try { await precotizNotifyGaspar(env, 'Corte · ' + corteQuien(nombre, tel) + ' mandó un comprobante por ' + corteLandingPesos(monto) + ' sin cobro abierto y no pude abrir el freno: revisalo en el CRM.', { tipo: 'corte_pago_dif', prioridad: 'P1', refPhone: tel, plata: true, clave: 'corte_freno_falla:' + m.wamid }); } catch (_) {}
+              r0 = 'comp:' + monto + ':sin_freno';
+            }
+            res = r0;
+          }
+          await marcar('ocr:' + m.wamid, m, res);
         }
       }
       // 2) Lo que escribió: ¿pide sumar, cambiar o reclama?
       if (cfg.agregar === '0') continue;
       const nuevos = deTel.filter(m => !hechos.has(m.wamid));
       if (!nuevos.length) continue;
-      const textos = nuevos.filter(corteChatEsTexto);
-      for (const m of nuevos.filter(m => !corteChatEsTexto(m))) await marcar(m.wamid, m, 'sin_texto');
+      const textos = [];
+      for (const m of nuevos) {
+        if (corteChatEsTexto(m)) { textos.push(m); continue; }
+        if (m.msg_type !== 'audio') { await marcar(m.wamid, m, 'sin_texto'); continue; }
+        // Audio todavía sin transcribir (processPendingTranscripts lo completa hasta ~5 min después): se espera hasta 12 min.
+        // Después, 'audio_sin_texto' y, si tiene algo abierto, aviso P2 (pedir por audio es lo más común).
+        if (edad(m) < 12 * 60e3) { pend(m.ts); continue; }
+        await marcar(m.wamid, m, 'audio_sin_texto');
+        if (conCosas) { try { await precotizNotifyGaspar(env, 'Corte · ' + corteQuien(nombre, tel) + ' mandó un audio que no se pudo transcribir (' + corteHoraAR(m.ts) + ') y tiene ' + (est.abierto ? 'el paquete sin despachar' : 'el cobro abierto') + '. Escuchalo en el chat por si pide sumar algo.', { tipo: 'corte_agregar', prioridad: 'P2', refPhone: tel, clave: 'corte_audio:' + m.wamid }); } catch (_) {} }
+      }
       const reales = [];
-      for (const m of textos) { if (sinRespEsCortesia(corteChatCuerpo(m))) await marcar(m.wamid, m, 'cortesia'); else reales.push(m); }
+      let propuesta = null;
+      for (const m of textos) {
+        const c = corteChatCortesia(corteChatCuerpo(m));
+        if (c === 'acuse' && propuesta === null) propuesta = await corteChatHayPropuesta(env, tel, m.ts);
+        if (c === 'cortesia' || (c === 'acuse' && !propuesta)) await marcar(m.wamid, m, 'cortesia'); else reales.push(m);
+      }
       if (!reales.length) continue;
       const reglas = corteAgregarReglas(reales.map(corteChatCuerpo).join('\n'));
       let ia = null, intento = false;
-      if (ias < 8) { ias++; intento = true; ia = await corteChatClasificar(env, tel, await corteChatContexto(env, tel, piezas, reales, est)); }
+      if (ias < 8 && iaHoy < cfg.iaTope) {
+        ias++; iaHoy++; intento = true;
+        ia = await corteChatClasificar(env, tel, await corteChatContexto(env, tel, piezas, reales, est));
+        if (ia) iaBien = true; else iaMal = true;
+        if (iaHoy >= cfg.iaTope) { try { await precotizNotifyGaspar(env, 'Corte · el detector del chat llegó al tope de ' + Math.round(cfg.iaTope) + ' lecturas con IA de hoy (kv corte_chat_ia_tope). Hasta mañana solo ve los pedidos clarísimos.', { tipo: 'corte_agregar', prioridad: 'P2', clave: 'corte_chat_ia_tope:' + hoyAR }); } catch (_) {} }
+      }
       let r = corteChatFusion(ia, reglas);
       if (!ia) {
         // Sin IA: si las reglas no ven un pedido claro, se espera (hasta 30 min) a que la IA conteste.
-        const viejo = Date.now() - Date.parse(reales[0].ts) > 30 * 60e3;
+        const viejo = edad(reales[0]) > 30 * 60e3;
         if (!r && !viejo) { reales.forEach(m => pend(m.ts)); continue; }
-        if (!r) r = { accion: 'nada', items: [], via: intento ? 'sin_ia' : 'tope' };
+        if (!r) {
+          // 30 min sin IA (caída, sin crédito, topes): a un cliente con el paquete abierto o el cobro en curso no se le marca "nada"
+          // en silencio: aviso P2 con lo que dijo, para que lo lea una persona.
+          r = { accion: 'nada', items: [], via: intento ? 'sin_ia' : 'tope' };
+          if (conCosas) {
+            r.via += ':aviso';
+            try { await precotizNotifyGaspar(env, 'Corte · no pude leer con la IA lo que escribió ' + corteQuien(nombre, tel) + ': ' + reales.map(m => '"' + corteChatCuerpo(m).slice(0, 160) + '" (' + corteHoraAR(m.ts) + ')').join(' · ').slice(0, 600) + '. ' + est.cobroTxt + ' Si pide sumar algo, cargalo vos.', { tipo: 'corte_agregar', prioridad: 'P2', refPhone: tel, clave: 'corte_chat_sin_ia:' + reales[0].wamid }); } catch (_) {}
+          }
+        }
       }
       let f = null;
-      try { f = await corteFrenoChat(env, cfg, tel, piezas, est, r, reales); } catch (_) {}
-      for (const m of reales) await marcar(m.wamid, m, f ? 'freno:' + f.id : r.accion + (r.via && r.via !== 'ia' ? ':' + r.via : ''));
+      if (r.accion !== 'nada') {
+        try { f = await corteFrenoChat(env, cfg, tel, piezas, est, r, reales); } catch (_) {}
+        if (!f) {
+          // No se pudo abrir el freno (D1 saturada): sin marcar, se reintenta; pasados 30 min, aviso de respaldo (antes el pedido
+          // quedaba marcado y se perdía en silencio).
+          if (edad(reales[0]) < 30 * 60e3) { reales.forEach(m => pend(m.ts)); continue; }
+          try { await precotizNotifyGaspar(env, 'Corte · ' + corteQuien(nombre, tel) + ' ' + (r.accion === 'agregar' ? 'pide sumar algo' : (r.accion === 'cambio' ? 'pide un cambio' : 'reclama')) + ' y no pude abrir el freno. Dijo: ' + reales.map(m => '"' + corteChatCuerpo(m).slice(0, 160) + '"').join(' · ').slice(0, 500) + '. Revisalo en el chat.', { tipo: 'corte_agregar', prioridad: 'P1', refPhone: tel, plata: r.accion === 'agregar', clave: 'corte_freno_falla:' + reales[0].wamid }); } catch (_) {}
+        }
+      }
+      for (const m of reales) await marcar(m.wamid, m, f ? 'freno:' + f.id : r.accion + (r.via && r.via !== 'ia' ? ':' + r.via : '') + (r.accion !== 'nada' ? ':sin_freno' : ''));
     }
   } catch (e) {
     if (msgs.length) pend(msgs[0].ts); // error de base a mitad de camino: el cursor no avanza (lo marcado no se repite)
     try { console.log('corteChatVigia: ' + String((e && e.message) || e)); } catch (_) {}
   } finally {
+    // IA: lo usado hoy y, si no contesta hace más de 30 min, un aviso (una vez por caída) de que el detector está ciego.
+    if (iaHoy !== iaHoy0 || ocrHoy !== ocrHoy0) await kvSet(env, 'corte_chat_ia_dia', hoyAR + '|' + iaHoy + '|' + ocrHoy);
+    if (iaBien || iaMal) try {
+      const fl = String(await kvGet(env, 'corte_chat_ia_falla', '') || '');
+      if (iaBien && fl) await kvSet(env, 'corte_chat_ia_falla', '');
+      else if (iaMal && !iaBien) {
+        if (!fl) await kvSet(env, 'corte_chat_ia_falla', new Date().toISOString());
+        else if (!fl.includes('|') && Date.now() - Date.parse(fl) > 30 * 60e3) {
+          await kvSet(env, 'corte_chat_ia_falla', fl + '|avisado');
+          try { await precotizNotifyGaspar(env, 'Corte · el detector del chat está ciego: la IA no contesta desde ' + corteHoraAR(fl) + ' (caída, clave o crédito). Solo ve los pedidos clarísimos; a los clientes con algo abierto te los paso para que los leas.', { tipo: 'corte_agregar', prioridad: 'P1', clave: 'corte_chat_ciego:' + fl }); } catch (_) {}
+        }
+      }
+    } catch (_) {}
     // Cursor: hasta el mensaje más viejo que quedó sin procesar (IA o lector caídos, topes) o hasta now-90s.
     let nuevo = tope, llenoN = '';
     if (msgs.length >= LIM) { nuevo = msgs[msgs.length - 1].ts; llenoN = '|1'; }
@@ -7132,7 +7432,7 @@ async function corteFrenosProbar(env, tel, desde, hasta, porMensaje) {
   const msgs = (await env.DB.prepare("SELECT wamid, phone, ts, msg_type, body, media_url FROM wa_messages WHERE phone=? AND direction='inbound' AND ts >= ? AND ts <= ? AND msg_type NOT IN ('status','reaction','sticker') ORDER BY ts LIMIT 40").bind(tel, desde, hasta).all()).results || [];
   const piezas = (await env.DB.prepare("SELECT id, telefono, cliente_nombre, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, producto, precio, estado, estado_pago, tanda_id, hoja_fecha, despachado_at, express FROM corte_pedidos WHERE telefono=? AND IFNULL(producto,'TRANS')!='NEON' AND estado NOT IN ('prueba','cancelado') ORDER BY id DESC LIMIT 30").bind(tel).all()).results || [];
   const est = cortePaqueteEstado(piezas);
-  const reales = msgs.filter(corteChatEsTexto).filter(m => !sinRespEsCortesia(corteChatCuerpo(m)));
+  const reales = msgs.filter(corteChatEsTexto).filter(m => corteChatCortesia(corteChatCuerpo(m)) !== 'cortesia');
   const pr = await corteLandingPrecios(env);
   const grupos = porMensaje ? reales.slice(0, 12).map(m => [m]) : (reales.length ? [reales] : []);
   const out = [];
@@ -7145,12 +7445,15 @@ async function corteFrenosProbar(env, tel, desde, hasta, porMensaje) {
   }
   return { ok: true, telefono: tel, mensajes: msgs.length, analizados: reales.length, paquete: { cobro: est.cobroTxt, paquete: est.paqTxt }, resultados: out };
 }
-// Un freno que traba el paquete y sigue abierto 3 h después del aviso → un recordatorio (una vez).
+// Un freno que TRABA el paquete y sigue abierto 3 h después del aviso → un recordatorio, y otro por día hábil (lun a sáb, 9 a 20
+// AR) mientras siga trabando (antes era uno solo y el paquete podía quedar frenado días sin que nadie se acordara).
 async function corteFrenosRecordar(env, cfg) {
   if (!cfg.freno || !(await ensureCorteFrenosSchema(env))) return;
+  const ar = new Date(Date.now() - 3 * 3600e3);
+  if (ar.getUTCDay() === 0 || ar.getUTCHours() < 9 || ar.getUTCHours() >= 20) return;
   let rs = [];
-  try { rs = (await env.DB.prepare(`SELECT ${CORTE_FRENO_COLS} FROM corte_frenos WHERE estado='abierto' AND frena=1 AND IFNULL(prueba,0)=0 AND aviso_at IS NOT NULL AND aviso_at < ? AND recordado_at IS NULL ORDER BY id LIMIT 5`).bind(isoHace(3 * 3600e3)).all()).results || []; } catch (_) { return; }
-  for (const f of rs) await corteFrenoAvisar(env, f, 'Corte · sigue frenado el paquete de ' + corteQuien(f.nombre, f.telefono) + ': ' + corteFrenoCorto(f) + '. Neyen no lo puede embalar ni logística despacharlo hasta que lo resuelvas:', { recordatorio: true });
+  try { rs = (await env.DB.prepare(`SELECT ${CORTE_FRENO_COLS.split(', ').map(c => 'f.' + c).join(', ')} FROM corte_frenos f WHERE ${CORTE_FRENO_TRABA_SQL} AND f.aviso_at IS NOT NULL AND f.aviso_at < ? AND (f.recordado_at IS NULL OR f.recordado_at < ?) ORDER BY f.id LIMIT 5`).bind(isoHace(3 * 3600e3), isoHace(20 * 3600e3)).all()).results || []; } catch (_) { return; }
+  for (const f of rs) await corteFrenoAvisar(env, f, 'Corte · sigue frenado el paquete de ' + corteQuien(f.nombre, f.telefono) + ' (desde el ' + corteHoraAR(f.created_at) + '): ' + corteFrenoCorto(f) + '. Neyen no lo puede embalar ni logística despacharlo hasta que lo resuelvas:', { recordatorio: true });
 }
 // Cierra solo las diferencias "de menos" de un teléfono (completó con otra transferencia o lo marcaron pagado a mano).
 async function corteFrenoMenosCerrar(env, tel, resolucion, quien) {
@@ -7168,10 +7471,17 @@ async function corteFrenosLista(env, { rol = 'admin', cfg = null } = {}) {
   const its = f => { try { return JSON.parse(f.items_json || '[]') || []; } catch (_) { return []; } };
   if (rol !== 'admin') {
     if (!c.freno) return [];
-    const rs = (await env.DB.prepare("SELECT id, telefono, nombre, tipo, items_json, entendido FROM corte_frenos WHERE estado='abierto' AND frena=1 AND IFNULL(prueba,0)=0 ORDER BY id").all()).results || [];
-    return rs.map(f => ({ id: f.id, telefono: f.telefono, nombre: f.nombre || '', tipo: f.tipo, corto: corteFrenoCorto(f), items: f.tipo === 'agregar' ? its(f).map(x => ({ nombre: x.nombre, cantidad: x.cantidad })) : [] }));
+    const rs = (await env.DB.prepare(`SELECT f.id, f.telefono, f.nombre, f.tipo, f.items_json, f.entendido FROM corte_frenos f WHERE ${CORTE_FRENO_TRABA_SQL} ORDER BY f.id`).all()).results || [];
+    return rs.map(f => ({ id: f.id, telefono: f.telefono, nombre: f.nombre || '', tipo: f.tipo, corto: corteFrenoCorto(f), traba: 1, items: f.tipo === 'agregar' ? its(f).map(x => ({ nombre: x.nombre, cantidad: x.cantidad })) : [] }));
   }
-  const rs = (await env.DB.prepare(`SELECT ${CORTE_FRENO_COLS} FROM corte_frenos WHERE estado='abierto' OR resuelto_at >= ? ORDER BY CASE estado WHEN 'abierto' THEN 0 ELSE 1 END, id DESC LIMIT 80`).bind(isoHace(3 * 86400000)).all()).results || [];
+  // traba: si HOY traba el paquete (el freno prendido y piezas sin despachar de esa semana). a_favor_id: el saldo a favor que
+  // dejó un freno resuelto y que todavía no usó ningún cobro (se puede deshacer).
+  const rs = (await env.DB.prepare(`SELECT ${CORTE_FRENO_COLS.split(', ').map(x => 'f.' + x).join(', ')}, CASE WHEN ${CORTE_FRENO_TRABA_SQL} THEN 1 ELSE 0 END AS traba FROM corte_frenos f WHERE f.estado='abierto' OR f.resuelto_at >= ? ORDER BY CASE f.estado WHEN 'abierto' THEN 0 ELSE 1 END, f.id DESC LIMIT 80`).bind(isoHace(3 * 86400000)).all()).results || [];
+  const aFavor = new Map();
+  const conAF = rs.filter(f => f.estado !== 'abierto' && /^a favor/.test(String(f.resolucion || '')));
+  if (conAF.length && await ensureCorteSenaSchema(env)) {
+    try { ((await env.DB.prepare(`SELECT id, nota FROM corte_senas WHERE tipo='a_favor' AND estado='pagada' AND telefono IN (${[...new Set(conAF.map(f => f.telefono))].slice(0, 90).map(() => '?').join(',')})`).bind(...[...new Set(conAF.map(f => f.telefono))].slice(0, 90)).all()).results || []).forEach(s => { const mm = /\(freno #(\d+)\)/.exec(String(s.nota || '')); if (mm) aFavor.set(+mm[1], s.id); }); } catch (_) {}
+  }
   const tels = [...new Set(rs.filter(f => f.estado === 'abierto').map(f => f.telefono))].slice(0, 90);
   const piezasDe = new Map(), ventana = new Set();
   if (tels.length) {
@@ -7179,13 +7489,15 @@ async function corteFrenosLista(env, { rol = 'admin', cfg = null } = {}) {
     try { ((await env.DB.prepare(`SELECT DISTINCT phone FROM wa_messages WHERE phone IN (${tels.map(() => '?').join(',')}) AND direction='inbound' AND msg_type NOT IN ('status','reaction') AND ts > ?`).bind(...tels, isoHace(23 * 3600e3)).all()).results || []).forEach(r => ventana.add(r.phone)); } catch (_) {}
   }
   return rs.map(f => {
-    const est = f.estado === 'abierto' ? cortePaqueteEstado(piezasDe.get(f.telefono) || []) : null;
+    const pz = piezasDe.get(f.telefono) || [];
+    const est = f.estado === 'abierto' ? cortePaqueteEstado(pz) : null;
     return {
       id: f.id, telefono: f.telefono, nombre: f.nombre || '', tipo: f.tipo, origen: f.origen || '', estado: f.estado, frena: +f.frena || 0, prueba: +f.prueba || 0,
+      traba: c.freno && +f.traba ? 1 : 0, a_favor_id: aFavor.get(+f.id) || null,
       texto_cliente: f.texto_cliente || '', items: its(f), items_total: +f.items_total || 0, entendido: +f.entendido ? 1 : 0,
       cobro_total: f.cobro_total, comprobante_monto: f.comprobante_monto, diferencia: f.diferencia, comprobante_key: f.comprobante_key || '', caja: f.caja || '', rel_id: f.rel_id || null,
       web_envio_id: f.web_envio_id || null, created_at: f.created_at, aviso_at: f.aviso_at || '', resolucion: f.resolucion || '', resuelto_por: f.resuelto_por || '', resuelto_at: f.resuelto_at || '', nota: f.nota || '',
-      cliente: est ? { cobro: est.cobro, cobro_txt: est.cobroTxt, paquete_txt: est.paqTxt, abierto: est.abierto, pendiente: est.pendiente, ventana: ventana.has(f.telefono) } : null,
+      cliente: est ? { cobro: est.cobro, cobro_txt: est.cobroTxt, paquete_txt: est.paqTxt, abierto: est.abierto, pendiente: est.pendiente, ventana: ventana.has(f.telefono), cobrando_total: Math.round(pz.filter(p => p.estado_pago === 'cobrando' && +p.precio > 0).reduce((s, p) => s + (+p.precio || 0), 0)) } : null,
     };
   });
 }
@@ -7205,20 +7517,29 @@ async function corteFrenoQuemarComp(env, f) {
 // "Sumar al pedido" (agregar aprobado por Gaspar). Las piezas nuevas van al paquete del cliente con las mismas columnas que un
 // pedido web (origen 'landing', la hoja_fecha exacta de la tanda: la planilla las escribe sola y la carga de la tanda no las
 // duplica), entrega_manual=1 y freno_id. Desde la web (origen 'web'): no se crea nada, se MUEVEN esas piezas al paquete.
+// El paquete es el de ESTA semana: una pieza viva CON tanda (corteFrenoBase; primero la tanda del freno y la del cobro en curso
+// o pagada). Un pedido web de la semana que viene (sin tanda) nunca es la base: lo sumado se iba a esa semana, el freno se
+// cerraba y el paquete salía sin lo agregado. Si lo único sin despachar no tiene tanda, 409.
 // El pago según cómo está el cliente al aprobar:
 //  A · el cobro no salió → quedan pendientes (el cobro de la semana las incluye); con ventana, un "te lo sumo".
 //    Si todo lo demás ya está pagado → sale el cobro solo de lo nuevo.
-//  B · cobro mandado ('cobrando') → re-cobro con el total nuevo (corteCobrarUno: candado, texto o plantilla, 'cobrando' por id).
+//  B · cobro mandado ('cobrando') → re-cobro con el total nuevo: lo que ya estaba en ese cobro más lo nuevo.
 //  C · pago parcial → entran en 'parcial' en la MISMA tanda, la cuenta suma el total y va el detalle con "Ya pagaste".
-//  D · pagó de más (freno 'pago_de_mas' abierto) → si lo cubre, quedan pagadas con ese comprobante (y si sobra, ese freno sigue
-//    por la diferencia); si no alcanza, lo pagado queda a favor y sale el cobro de lo que falta.
+//  D · pagó de más (freno 'pago_de_mas' abierto, que se RECLAMA antes de usarlo: si en paralelo lo dejaron a favor, no se usa dos
+//    veces) → si lo cubre, quedan pagadas con ese comprobante (y si sobra, ese freno sigue por la diferencia); si no alcanza, lo
+//    pagado queda a favor y sale el cobro de lo que falta.
 //  E · el paquete ya salió → van a la tanda vigente como 'cortado' (segundo envío; logística pide el envío de nuevo).
+//  P · pedido web ya pagado con la seña de insumos → solo se mueve al paquete (no se cobra ni toca un de más).
+// Los cobros salen POR ID (lo de ese cobro más lo nuevo; nunca deuda de otras semanas) y SIN forzar el control de teléfono: si
+// hay un conflicto con LTV, las piezas quedan sumadas y Gaspar lo manda desde Cobrar la semana. Una vez creadas las piezas el
+// freno no se reabre (un reintento duplicaba las piezas y el mensaje al cliente): si algo falla después, queda "sumado (con
+// error)" y le llega un P1 a Gaspar.
 async function corteFrenoSumar(env, cfg, f, itemsIn, quien) {
   const tel = f.telefono, nowIso = new Date().toISOString();
   if (f.tipo !== 'agregar') return { ok: false, status: 400, motivo: 'Solo se puede sumar un pedido de agregar' };
   if (!(await ensureCorteLandingSchema(env))) return { ok: false, status: 500, motivo: 'No se pudo preparar la base. Probá de nuevo.' };
   const esWeb = f.origen === 'web' && +f.web_envio_id > 0;
-  let items = [], total = 0, webIds = [];
+  let items = [], total = 0, webIds = [], webCobrables = [];
   if (esWeb) {
     const e = await env.DB.prepare('SELECT id, piezas_ids FROM corte_landing_envios WHERE id=?').bind(f.web_envio_id).first();
     webIds = corteExpressIds(e);
@@ -7226,7 +7547,10 @@ async function corteFrenoSumar(env, cfg, f, itemsIn, quien) {
     webIds = ps.map(p => p.id);
     if (!webIds.length) return { ok: false, status: 409, motivo: 'Las piezas de ese pedido web ya no están (¿se cancelaron?)' };
     items = ps.map(p => ({ nombre: p.diseno_nombre || p.producto, cantidad: parseInt(p.cantidad, 10) || 1, precio: +p.precio || 0 }));
-    total = ps.reduce((s, p) => s + (+p.precio || 0), 0);
+    // Se cobra (y se compara con un de más) solo lo que falta pagar: lo pagado con la seña web de insumos no se vuelve a cobrar.
+    const aPagar = ps.filter(p => ['pendiente', 'cobrando'].includes(String(p.estado_pago || 'pendiente')));
+    webCobrables = aPagar.map(p => p.id);
+    total = aPagar.reduce((s, p) => s + (+p.precio || 0), 0);
   } else {
     const src = (Array.isArray(itemsIn) && itemsIn.length ? itemsIn : (() => { try { return JSON.parse(f.items_json || '[]'); } catch (_) { return []; } })()).map(x => ({ codigo: x && x.codigo, cantidad: x && x.cantidad, color: x && x.color, texto: x && x.texto }));
     const cot = corteAgregarCotizar(await corteLandingPrecios(env), src);
@@ -7234,18 +7558,19 @@ async function corteFrenoSumar(env, cfg, f, itemsIn, quien) {
     items = cot.items; total = cot.total;
   }
   const itemsTxt = corteItemsTxt(items, false);
-  // Las piezas del cliente y la "base" del paquete (la más nueva sin despachar, mejor una base de acrílico).
-  const piezas = (await env.DB.prepare("SELECT id, alumno_id, telefono, cliente_nombre, hoja_cliente, hoja_fecha, entrega, tanda_id, estado, estado_pago, producto, precio, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, comprobante_key FROM corte_pedidos WHERE telefono=? AND IFNULL(producto,'TRANS')!='NEON' AND estado NOT IN ('prueba','cancelado') ORDER BY id DESC LIMIT 80").bind(tel).all()).results || [];
-  const vivas = piezas.filter(p => !['despachado', 'entregado'].includes(p.estado) && !webIds.includes(p.id));
+  // Las piezas del cliente y la "base" del paquete.
+  const piezas = (await env.DB.prepare("SELECT id, alumno_id, telefono, cliente_nombre, hoja_cliente, hoja_fecha, entrega, tanda_id, estado, estado_pago, producto, precio, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, comprobante_key, freno_id FROM corte_pedidos WHERE telefono=? AND IFNULL(producto,'TRANS')!='NEON' AND estado NOT IN ('prueba','cancelado') ORDER BY id DESC LIMIT 80").bind(tel).all()).results || [];
+  const yaSumadas = esWeb ? [] : piezas.filter(p => +p.freno_id === +f.id).map(p => p.id); // un reintento: no se crean de nuevo
+  const vivas = piezas.filter(p => !['despachado', 'entregado'].includes(p.estado) && !webIds.includes(p.id) && !yaSumadas.includes(p.id));
   const priced = vivas.filter(p => +p.precio > 0);
   const hayParcial = priced.some(p => p.estado_pago === 'parcial');
-  const hayCobrando = piezas.some(p => p.estado_pago === 'cobrando' && +p.precio > 0 && !webIds.includes(p.id));
-  let pdm = null;
-  try { pdm = await env.DB.prepare(`SELECT ${CORTE_FRENO_COLS} FROM corte_frenos WHERE telefono=? AND tipo='pago_de_mas' AND estado='abierto' AND IFNULL(prueba,0)=0 ORDER BY (id=?) DESC, id DESC LIMIT 1`).bind(tel, f.rel_id || 0).first(); } catch (_) {}
-  const caso = pdm ? 'D' : (hayParcial ? 'C' : (hayCobrando ? 'B' : 'A'));
-  let base = (caso === 'C' ? priced.find(p => p.estado_pago === 'parcial') : null) || vivas.find(p => ['TRANS', 'NEGRO'].includes(String(p.producto || 'TRANS').toUpperCase())) || vivas[0] || null;
-  let tandaId = base ? (base.tanda_id || null) : null, hojaFecha = base ? (base.hoja_fecha || '') : '', segundo = false;
+  const cobrandoIds = piezas.filter(p => p.estado_pago === 'cobrando' && +p.precio > 0 && !webIds.includes(p.id) && !yaSumadas.includes(p.id)).map(p => p.id);
+  const hayCobrando = cobrandoIds.length > 0;
+  let base = (hayParcial ? corteFrenoBase(priced.filter(p => p.estado_pago === 'parcial')) : null)
+    || (f.tanda_id ? corteFrenoBase(vivas.filter(p => +p.tanda_id === +f.tanda_id)) : null) || corteFrenoBase(vivas);
+  let tandaId = base ? base.tanda_id : null, hojaFecha = base ? (base.hoja_fecha || '') : '', segundo = false;
   if (!base) {
+    if (vivas.length) return { ok: false, status: 409, motivo: 'Lo que tiene sin despachar todavía no tiene semana de corte (es un pedido de la semana que viene). Sumalo a mano desde el tablero o esperá a que se cargue la tanda' };
     const T = await corteTandaVigente(env);
     if (!T) return { ok: false, status: 409, motivo: 'No hay una semana de corte cargada para sumarlo' };
     base = piezas[0] || { telefono: tel, cliente_nombre: f.nombre, hoja_cliente: f.nombre };
@@ -7260,17 +7585,33 @@ async function corteFrenoSumar(env, cfg, f, itemsIn, quien) {
   const cl = await env.DB.prepare("UPDATE corte_frenos SET estado='resuelto', resolucion='sumando', resuelto_por=?, resuelto_at=?, updated_at=? WHERE id=? AND estado='abierto' RETURNING id").bind(String(quien || '').slice(0, 60), nowIso, nowIso, f.id).first().catch(() => null);
   if (!cl) return { ok: false, status: 409, motivo: 'Ese pedido ya se resolvió' };
   const reabrir = () => env.DB.prepare("UPDATE corte_frenos SET estado='abierto', resolucion=NULL, resuelto_por=NULL, resuelto_at=NULL WHERE id=? AND resolucion='sumando'").bind(f.id).run().catch(() => {});
-  // C y D mandan su mensaje sin pasar por corteCobrarUno: toman el candado del cobro (B y A lo toma corteCobrarUno).
+  // D: el de más se reclama ANTES de usarlo (estado + la misma diferencia que se leyó). Si no se puede (lo dejaron a favor en
+  // otra pestaña, u otro agregar lo usó), el caso se recalcula sin él.
+  let pdm = null;
+  if (total > 0) {
+    try { pdm = await env.DB.prepare(`SELECT ${CORTE_FRENO_COLS} FROM corte_frenos WHERE telefono=? AND tipo='pago_de_mas' AND estado='abierto' AND IFNULL(prueba,0)=0 ORDER BY (id=?) DESC, id DESC LIMIT 1`).bind(tel, f.rel_id || 0).first(); } catch (_) {}
+    if (pdm) {
+      const marcaPdm = 'usando para #' + f.id;
+      const cp = await env.DB.prepare("UPDATE corte_frenos SET estado='resuelto', resolucion=?, resuelto_por=?, resuelto_at=?, updated_at=? WHERE id=? AND estado='abierto' AND diferencia=? RETURNING id").bind(marcaPdm, String(quien || '').slice(0, 60), nowIso, nowIso, pdm.id, pdm.diferencia).first().catch(() => null);
+      if (!cp) pdm = null;
+    }
+  }
+  const soltarPdm = async () => { if (pdm) { try { await env.DB.prepare("UPDATE corte_frenos SET estado='abierto', resolucion=NULL, resuelto_por=NULL, resuelto_at=NULL WHERE id=? AND resolucion=?").bind(pdm.id, 'usando para #' + f.id).run(); } catch (_) {} } };
+  const caso = (esWeb && !(total > 0)) ? 'P' : (pdm ? 'D' : (hayParcial ? 'C' : (hayCobrando ? 'B' : 'A')));
+  // C, D y P mandan su mensaje sin pasar por corteCobrarUno: toman el candado del cobro (B y A lo toma corteCobrarUno).
   let soltar = null;
-  if (caso === 'C' || caso === 'D') { soltar = await corteCobroLockTomar(env, tel); if (!soltar) { await reabrir(); return { ok: false, status: 409, motivo: 'Se le está mandando algo a este cliente en este momento: probá en un minuto' }; } }
+  if (['C', 'D', 'P'].includes(caso)) { soltar = await corteCobroLockTomar(env, tel); if (!soltar) { await soltarPdm(); await reabrir(); return { ok: false, status: 409, motivo: 'Se le está mandando algo a este cliente en este momento: probá en un minuto' }; } }
+  let creadas = false, ids = [];
   try {
     // 1) Las piezas.
-    let ids = [], noMovidas = 0;
+    let noMovidas = 0;
     if (esWeb) {
       const u = await env.DB.prepare(`UPDATE corte_pedidos SET tanda_id=?, hoja_fecha=?, estado=?, express=0, freno_id=?, updated_at=? WHERE id IN (${webIds.map(() => '?').join(',')}) AND hoja_fila IS NULL AND estado='pedido' AND tanda_id IS NULL`).bind(tandaId, hojaFecha, estado, f.id, nowIso, ...webIds).run();
       noMovidas = webIds.length - ((u && u.meta && u.meta.changes) || 0);
-      ids = webIds;
+      ids = webIds; creadas = true;
       try { await env.DB.prepare('UPDATE corte_landing_envios SET hoja_fecha=? WHERE id=?').bind(hojaFecha, f.web_envio_id).run(); } catch (_) {}
+    } else if (yaSumadas.length) {
+      ids = yaSumadas; creadas = true;
     } else {
       const ref = base;
       const stmts = [];
@@ -7280,24 +7621,39 @@ async function corteFrenoSumar(env, cfg, f, itemsIn, quien) {
           .bind(ref.alumno_id || null, tel, ref.cliente_nombre || f.nombre || '', ref.hoja_cliente || ref.cliente_nombre || f.nombre || '', hojaFecha, x.nombre, x.color || '', c, x.codigo, x.unit * c, estado, ref.entrega || null, tandaId, nowIso, nowIso, f.id, 'Sumado por chat (freno #' + f.id + ', ' + String(quien || '') + ')'));
       }
       ids = (await env.DB.batch(stmts)).map(r => r.results && r.results[0] && r.results[0].id).filter(Boolean);
+      creadas = ids.length > 0;
     }
     if (!ids.length) throw new Error('sin piezas');
     const ph = ids.map(() => '?').join(',');
+    const nuevosCobrables = esWeb ? webCobrables : ids; // lo nuevo que hay que cobrar (en la web, sin lo ya pagado)
     // 2) El pago.
     const nom = String(base.cliente_nombre || f.nombre || '').trim().split(/\s+/)[0] || '';
-    const hola = nom ? 'Hola ' + corteNombreCap(nom) + ', ' : 'Hola, ';
     const viaje = segundo ? ' Como tu paquete ya salió, van en un envío aparte: te escribimos para coordinarlo.' : '';
     let via = '', mensaje = '', detalle = '', extra = '';
     const ctxCobro = async () => ({ ...(await corteCobrarCtx(env)), nowIso, nowMs: Date.now() });
-    if (caso === 'D') {
+    // ¿El cobro que salió incluye lo sumado? (por id; si no, Gaspar lo tiene que ver)
+    const revisarCobro = (r) => { if (r && r.ok && Array.isArray(r.ids) && nuevosCobrables.some(id => !r.ids.includes(id))) extra += ' Ojo: el detalle que salió no incluye todo lo sumado: revisalo y mandale el cobro desde Cobrar la semana.'; };
+    if (caso === 'P') {
+      if (ventana) {
+        mensaje = 'Listo, lo que pediste por la web va con tu corte de esta semana';
+        const r = await corteSend(env, tel, mensaje); via = r && r.ok ? 'texto' : 'no salió';
+      } else via = 'sin ventana';
+      extra = ' Ya estaba pagado con la seña web: no le cobré nada.';
+    } else if (caso === 'D') {
       const dif = +pdm.diferencia || 0, tol = cortePagoTol(Math.max(total, +pdm.cobro_total || 0), cfg);
       const fecha = corteHoraAR(pdm.created_at).slice(0, 5);
       if (total <= dif + tol) {
-        await env.DB.prepare(`UPDATE corte_pedidos SET estado_pago='pagado', pago_metodo='transferencia', comprobante_key=?, pago_nota=?, updated_at=? WHERE id IN (${ph}) AND estado_pago='pendiente'`).bind(pdm.comprobante_key || null, 'Cubierto con lo que pagó de más el ' + fecha + ' (freno #' + pdm.id + ')', nowIso, ...ids).run();
+        await env.DB.prepare(`UPDATE corte_pedidos SET estado_pago='pagado', pago_metodo='transferencia', comprobante_key=?, pago_nota=?, updated_at=? WHERE id IN (${ph}) AND estado_pago IN ('pendiente','cobrando')`).bind(pdm.comprobante_key || null, 'Cubierto con lo que pagó de más el ' + fecha + ' (freno #' + pdm.id + ')', nowIso, ...ids).run();
         try { await env.DB.prepare('UPDATE corte_frenos SET caja=? WHERE id=?').bind(pdm.caja || null, f.id).run(); } catch (_) {} // la caja de la planilla
         const resto = Math.round(dif - total);
-        if (resto > tol) { try { await env.DB.prepare('UPDATE corte_frenos SET diferencia=?, nota=?, updated_at=? WHERE id=?').bind(resto, 'Se usaron ' + corteLandingPesos(total) + ' para ' + itemsTxt + ' (freno #' + f.id + ')', nowIso, pdm.id).run(); } catch (_) {} extra = ' Le quedan ' + corteLandingPesos(resto) + ' de más: decidí si quedan a favor o los devolvés.'; }
-        else { await corteFrenoCerrar(env, pdm.id, 'resuelto', 'sumado: cubre ' + itemsTxt, quien); await corteFrenoQuemarComp(env, pdm); }
+        if (resto > tol) {
+          // Sobra: ese de más vuelve a quedar abierto por la diferencia (decidir si queda a favor o se devuelve).
+          try { await env.DB.prepare("UPDATE corte_frenos SET estado='abierto', resolucion=NULL, resuelto_por=NULL, resuelto_at=NULL, diferencia=?, nota=?, updated_at=? WHERE id=?").bind(resto, 'Se usaron ' + corteLandingPesos(total) + ' para ' + itemsTxt + ' (freno #' + f.id + ')', nowIso, pdm.id).run(); } catch (_) {}
+          extra = ' Le quedan ' + corteLandingPesos(resto) + ' de más: decidí si quedan a favor o los devolvés.';
+        } else {
+          try { await env.DB.prepare('UPDATE corte_frenos SET resolucion=?, resuelto_at=?, updated_at=? WHERE id=?').bind(('sumado: cubre ' + itemsTxt).slice(0, 120), nowIso, nowIso, pdm.id).run(); } catch (_) {}
+          await corteFrenoQuemarComp(env, pdm);
+        }
         if (ventana) {
           mensaje = 'Listo, con lo que pasaste de más te sumé ' + itemsTxt + (segundo ? '.' + viaje : ', van con tu corte de esta semana');
           const r = await corteSend(env, tel, mensaje); via = r && r.ok ? 'texto' : 'no salió';
@@ -7309,11 +7665,13 @@ async function corteFrenoSumar(env, cfg, f, itemsIn, quien) {
         // No alcanza: lo pagado de más queda a favor y sale el cobro de lo que falta (el crédito lo descuenta).
         await ensureCorteSenaSchema(env);
         await env.DB.prepare("INSERT INTO corte_senas (envio_id, telefono, nombre, tipo, estimado, monto, estado, token, comprobantes, pagado_monto, caja, nota, prueba, created_at, updated_at, pagada_at, pagada_por) VALUES (NULL, ?, ?, 'a_favor', 0, ?, 'pagada', NULL, '[]', ?, ?, ?, 0, ?, ?, ?, ?)").bind(tel, pdm.nombre || f.nombre || '', dif, dif, pdm.caja || '', 'A favor del pago del ' + fecha + ' (freno #' + pdm.id + ')', nowIso, nowIso, nowIso, String(quien || '')).run();
-        await corteFrenoCerrar(env, pdm.id, 'resuelto', 'a favor (no alcanzaba para ' + itemsTxt + ')', quien); await corteFrenoQuemarComp(env, pdm);
+        try { await env.DB.prepare('UPDATE corte_frenos SET resolucion=?, resuelto_at=?, updated_at=? WHERE id=?').bind(('a favor (no alcanzaba para ' + itemsTxt + ')').slice(0, 120), nowIso, nowIso, pdm.id).run(); } catch (_) {}
+        await corteFrenoQuemarComp(env, pdm);
         if (soltar) { await soltar(); soltar = null; }
-        if (estado === 'cortado') { const r = await corteCobrarUno(env, tel, { ...(await ctxCobro()), recobrar: hayCobrando, forzar: true, tandaId: 0, intro: 'te sumé ' + itemsTxt + ' al pedido. Con lo que pasaste de más te queda esto:' }); via = r.ok ? r.via : 'no salió: ' + (r.error || ''); }
+        if (estado === 'cortado') { const r = await corteCobrarUno(env, tel, { ...(await ctxCobro()), recobrar: hayCobrando, forzar: false, ids: [...cobrandoIds, ...nuevosCobrables], tandaId: 0, intro: 'te sumé ' + itemsTxt + ' al pedido. Con lo que pasaste de más te queda esto:' }); via = r.ok ? r.via : 'no salió: ' + (r.error || ''); revisarCobro(r); if (!r.ok) extra = ' Las piezas quedaron sumadas y lo de más a favor: mandale el cobro desde Cobrar la semana.'; }
         else via = 'queda para el cobro de la semana';
       }
+      await corteFrenoEtiqueta(env, tel, false);
     } else if (caso === 'C') {
       const viejo = priced.filter(p => p.estado_pago === 'parcial' && (p.tanda_id || null) === tandaId).reduce((s, p) => s + (+p.precio || 0), 0);
       await env.DB.prepare(`UPDATE corte_pedidos SET estado_pago='parcial', updated_at=? WHERE id IN (${ph}) AND estado_pago='pendiente'`).bind(nowIso, ...ids).run();
@@ -7332,16 +7690,19 @@ async function corteFrenoSumar(env, cfg, f, itemsIn, quien) {
       }
       mensaje = 'detalle con lo que ya pagó';
     } else if (caso === 'B') {
-      const r = await corteCobrarUno(env, tel, { ...(await ctxCobro()), recobrar: true, forzar: true, tandaId: 0, intro: 'te sumé ' + itemsTxt + ' al pedido. Te paso el detalle actualizado:' });
+      // Re-cobro de ESE cobro (lo que ya estaba en 'cobrando') más lo nuevo, por id: una deuda vieja de otra semana no entra.
+      const r = await corteCobrarUno(env, tel, { ...(await ctxCobro()), recobrar: true, forzar: false, ids: [...cobrandoIds, ...nuevosCobrables], tandaId: 0, intro: 'te sumé ' + itemsTxt + ' al pedido. Te paso el detalle actualizado:' });
       via = r.ok ? r.via : 'no salió: ' + (r.error || ''); mensaje = 're-cobro' + (r.ok ? ' por ' + corteLandingPesos(r.total - (r.sena || 0)) : '');
+      revisarCobro(r);
       if (!r.ok) extra = ' Las piezas quedaron sumadas: mandale el cobro desde Cobrar la semana.';
     } else {
       // Todo lo demás ya pagado (también un paquete que ya salió: segundo envío) → el cobro sale ahora, solo de lo nuevo.
       const refPago = vivas.length ? priced : piezas.filter(p => +p.precio > 0 && !webIds.includes(p.id) && !ids.includes(p.id)).slice(0, 20);
       const restoPagado = refPago.length > 0 && refPago.every(p => ['pagado', 'interno'].includes(p.estado_pago));
       if (restoPagado && estado === 'cortado') {
-        const r = await corteCobrarUno(env, tel, { ...(await ctxCobro()), recobrar: false, forzar: true, tandaId: 0, intro: 'te sumé ' + itemsTxt + ' al pedido.' + (segundo ? viaje : '') + ' Te paso el detalle:' });
-        via = r.ok ? r.via : 'no salió: ' + (r.error || ''); mensaje = 'cobro de lo nuevo';
+        const r = await corteCobrarUno(env, tel, { ...(await ctxCobro()), recobrar: false, forzar: false, ids: nuevosCobrables, tandaId: 0, intro: 'te sumé ' + itemsTxt + ' al pedido.' + (segundo ? viaje : '') + ' Te paso el detalle:' });
+        via = r.ok ? r.via : 'no salió: ' + (r.error || ''); mensaje = 'cobro de lo nuevo' + (r.ok ? ' por ' + corteLandingPesos(r.total - (r.sena || 0)) : '');
+        revisarCobro(r);
         if (!r.ok) extra = ' Las piezas quedaron sumadas: mandale el cobro desde Cobrar la semana.';
       } else if (ventana) {
         mensaje = 'Listo, te sumo ' + corteItemsTxt(items, true) + ' a tu pedido' + (segundo ? '.' + viaje : ' de esta semana.') + ' Te paso el total con el cobro.';
@@ -7349,18 +7710,24 @@ async function corteFrenoSumar(env, cfg, f, itemsIn, quien) {
       } else via = 'sin ventana (va en el cobro de la semana)';
     }
     // 3) Cierre del freno y avisos internos.
-    await env.DB.prepare('UPDATE corte_frenos SET resolucion=?, piezas_ids=?, items_json=?, items_total=?, updated_at=? WHERE id=?').bind(('sumado' + (segundo ? ' (otro envío)' : '') + ' · ' + caso).slice(0, 120), ids.join(','), JSON.stringify(items), Math.round(total), nowIso, f.id).run();
+    await env.DB.prepare('UPDATE corte_frenos SET resolucion=?, piezas_ids=?, items_json=?, items_total=?, tanda_id=?, hoja_fecha=?, updated_at=? WHERE id=?').bind(('sumado' + (segundo ? ' (otro envío)' : '') + ' · ' + caso).slice(0, 120), ids.join(','), JSON.stringify(items), Math.round(total), tandaId || null, hojaFecha || null, nowIso, f.id).run();
     await corteFrenoEtiqueta(env, tel, false);
     if (noMovidas) extra += ' Ojo: ' + noMovidas + ' pieza(s) ya estaban escritas en la planilla con otra fecha: movelas a mano.';
-    // Neyen: si el paquete ya estaba embalado, que abra la caja (en horario; si no, lo ve en "Para embalar").
+    // Neyen: si el paquete ya estaba embalado, que abra la caja (en horario; si no, lo ve en "Para embalar"). Logística no lo
+    // puede despachar hasta que ella embale lo sumado (logisticaArmar: "Falta sumar algo a la caja").
     if (!segundo && vivas.some(p => p.estado === 'embalado')) {
       const ar = new Date(Date.now() - 3 * 3600000);
       if (ar.getUTCDay() !== 0 && ar.getUTCHours() >= 8 && ar.getUTCHours() < 19) { try { await sinRespEnviar(env, CORTE_NEYEN_TEL, 'Se sumó algo al paquete de ' + (base.cliente_nombre || 'un cliente') + ' que ya estaba embalado: ' + itemsTxt + '. Abrí la caja y sumalo, está en Para embalar.'); } catch (_) {} }
     }
     return { ok: true, resultado: { caso, via, total: Math.round(total), mensaje, segundo_envio: segundo, piezas: ids, nota: extra.trim() } };
   } catch (e) {
-    await reabrir();
-    return { ok: false, status: 500, motivo: 'No se pudo sumar: ' + String((e && e.message) || e) };
+    const err = String((e && e.message) || e).replace(/\s+/g, ' ').slice(0, 80);
+    if (!creadas) { await soltarPdm(); await reabrir(); return { ok: false, status: 500, motivo: 'No se pudo sumar: ' + err }; }
+    // Las piezas ya están: el freno NO se reabre (un reintento las duplicaba y le volvía a escribir al cliente).
+    try { await env.DB.prepare('UPDATE corte_frenos SET resolucion=?, piezas_ids=?, updated_at=? WHERE id=?').bind(('sumado (con error: ' + err + ')').slice(0, 120), ids.join(','), nowIso, f.id).run(); } catch (_) {}
+    if (pdm) { try { await env.DB.prepare('UPDATE corte_frenos SET resolucion=? WHERE id=? AND resolucion=?').bind(('revisar: falló sumar #' + f.id).slice(0, 120), pdm.id, 'usando para #' + f.id).run(); } catch (_) {} }
+    try { await precotizNotifyGaspar(env, 'Corte · sumé ' + itemsTxt + ' al pedido de ' + corteQuien(f.nombre, tel) + ' pero algo falló después (' + err + '). Revisá en el tablero que el cobro y el mensaje al cliente hayan salido bien: no lo vuelvas a sumar.', { tipo: 'corte_agregar', prioridad: 'P1', refPhone: tel, plata: true, clave: 'corte_sumar_error:' + f.id }); } catch (_) {}
+    return { ok: false, status: 500, motivo: 'Las piezas quedaron sumadas pero algo falló después (' + err + '). Revisá el cobro en el tablero: no lo vuelvas a sumar.' };
   } finally { if (soltar) await soltar(); }
 }
 // "Dejar a favor": la plata de más (o sin cobro) queda como crédito del cliente (corte_senas tipo 'a_favor'): el próximo cobro
@@ -7369,6 +7736,7 @@ async function corteFrenoAFavor(env, cfg, f, quien) {
   if (!['pago_de_mas', 'pago_sin_cobro', 'pago_repetido'].includes(f.tipo)) return { ok: false, status: 400, motivo: 'Eso no es una diferencia de plata' };
   const monto = Math.round(f.tipo === 'pago_de_mas' ? +f.diferencia || 0 : +f.comprobante_monto || 0);
   if (!(monto > 0)) return { ok: false, status: 400, motivo: 'No hay un monto para dejar a favor' };
+  const yc = await corteFrenoYaContado(env, f, quien); if (yc) return yc;
   if (!(await ensureCorteSenaSchema(env))) return { ok: false, status: 500, motivo: 'No se pudo preparar la base. Probá de nuevo.' };
   if (!(await corteFrenoCerrar(env, f.id, 'resuelto', 'a favor ' + corteLandingPesos(monto), quien))) return { ok: false, status: 409, motivo: 'Ese pendiente ya se resolvió' };
   const nowIso = new Date().toISOString();
@@ -7377,15 +7745,33 @@ async function corteFrenoAFavor(env, cfg, f, quien) {
   await corteFrenoQuemarComp(env, f);
   let via = 'queda para el próximo cobro';
   try {
-    const cob = await env.DB.prepare("SELECT 1 AS x FROM corte_pedidos WHERE telefono=? AND estado_pago='cobrando' AND precio>0 LIMIT 1").bind(f.telefono).first();
-    if (cob) { const r = await corteCobrarUno(env, f.telefono, { ...(await corteCobrarCtx(env)), nowIso, nowMs: Date.now(), recobrar: true, forzar: true, tandaId: 0, intro: 'te descontamos lo que tenías a favor. Te paso el detalle actualizado:' }); via = r.ok ? (r.via === 'seña' ? 'lo cubrió: quedó pagado' : 're-cobro por ' + r.via) : 'el re-cobro no salió: ' + (r.error || ''); }
+    // El re-cobro es de ESE cobro (las piezas en 'cobrando', por id) y sin forzar el control de teléfono.
+    const cobIds = ((await env.DB.prepare("SELECT id FROM corte_pedidos WHERE telefono=? AND estado_pago='cobrando' AND precio>0").bind(f.telefono).all()).results || []).map(r => r.id);
+    if (cobIds.length) { const r = await corteCobrarUno(env, f.telefono, { ...(await corteCobrarCtx(env)), nowIso, nowMs: Date.now(), recobrar: true, forzar: false, ids: cobIds, tandaId: 0, intro: 'te descontamos lo que tenías a favor. Te paso el detalle actualizado:' }); via = r.ok ? (r.via === 'seña' ? 'lo cubrió: quedó pagado' : 're-cobro por ' + r.via) : 'el re-cobro no salió: ' + (r.error || '') + ' (mandáselo desde Cobrar la semana)'; }
   } catch (_) {}
   return { ok: true, resultado: { via, total: monto } };
+}
+// Deshacer "Dejar a favor" (los saldos a favor no se ven en Señas web): si ningún cobro usó ese saldo todavía (corte_senas
+// 'pagada', no 'aplicada'), se anula y el freno vuelve a abrirse para decidir de nuevo. Si ya lo descontó un cobro, 409.
+async function corteFrenoDeshacerAFavor(env, f, quien) {
+  if (f.estado === 'abierto' || !/^a favor/.test(String(f.resolucion || ''))) return { ok: false, status: 400, motivo: 'Ese pendiente no quedó a favor' };
+  if (!(await ensureCorteSenaSchema(env))) return { ok: false, status: 500, motivo: 'No se pudo preparar la base. Probá de nuevo.' };
+  const nowIso = new Date().toISOString();
+  let s = null;
+  try { s = await env.DB.prepare("SELECT id, monto FROM corte_senas WHERE telefono=? AND tipo='a_favor' AND estado='pagada' AND nota LIKE ? ORDER BY id DESC LIMIT 1").bind(f.telefono, '%(freno #' + f.id + ')%').first(); } catch (_) {}
+  if (!s) return { ok: false, status: 409, motivo: 'Ese saldo ya lo usó un cobro (o no está): no se puede deshacer' };
+  let u = null;
+  try { u = await env.DB.prepare("UPDATE corte_senas SET estado='anulada', updated_at=?, nota=IFNULL(nota,'') || ? WHERE id=? AND estado='pagada'").bind(nowIso, ' · anulado por ' + String(quien || '').slice(0, 40), s.id).run(); } catch (_) {}
+  if (!u || !u.meta || !u.meta.changes) return { ok: false, status: 409, motivo: 'Ese saldo ya lo usó un cobro: no se puede deshacer' };
+  try { await env.DB.prepare("UPDATE corte_frenos SET estado='abierto', resolucion=NULL, resuelto_por=NULL, resuelto_at=NULL, updated_at=?, nota=? WHERE id=? AND estado!='abierto'").bind(nowIso, ('Se deshizo el a favor (' + String(quien || '') + ')').slice(0, 200), f.id).run(); } catch (_) {}
+  if (!+f.prueba) await corteFrenoEtiqueta(env, f.telefono, true);
+  return { ok: true, resultado: { via: 'saldo a favor anulado: decidí de nuevo', total: Math.round(+s.monto || 0) } };
 }
 // "Marcar pagado lo pendiente" (pagó sin que le hayamos cobrado y el monto coincide): pagado por id con ese comprobante, la
 // planilla (por fecha de la hoja, con la caja del comprobante) y un "recibido" si tiene la ventana abierta.
 async function corteFrenoPagarPendiente(env, cfg, f, quien) {
   if (f.tipo !== 'pago_sin_cobro') return { ok: false, status: 400, motivo: 'Solo para un comprobante sin cobro' };
+  const yc = await corteFrenoYaContado(env, f, quien); if (yc) return yc;
   const rows = (await env.DB.prepare("SELECT id, tanda_id, telefono, cliente_nombre, hoja_cliente, hoja_fecha, hoja_fila, diseno_nombre, producto, precio FROM corte_pedidos WHERE telefono=? AND " + CORTE_PAGABLE_SQL + " AND estado_pago IN ('pendiente','cobrando') ORDER BY id").bind(f.telefono).all()).results || [];
   const total = Math.round(rows.reduce((s, r) => s + (+r.precio || 0), 0));
   const monto = Math.round(+f.comprobante_monto || 0);
@@ -7423,13 +7809,16 @@ async function corteCobrarCtx(env) {
 }
 // El cobro de UN cliente: candado por cliente, piezas a cobrar, control de teléfono, seña, texto o plantilla y el paso a
 // 'cobrando' por id. opt = { recobrar (re-envío: entran también las 'cobrando'), forzar (teléfono confirmado por el admin),
-// tandaId (0 = todas), nowIso, nowMs, ltvGuard, dueniosGuard, corteLabelId }. Devuelve el ítem del resultado:
-// { tel, ok, total, via, recobro, sena } o { tel, ok: false, error, conflicto? }.
+// tandaId (0 = todas), ids (solo esas piezas: el cobro que sale al aprobar un freno, sin deuda de otras semanas), nowIso,
+// nowMs, ltvGuard, dueniosGuard, corteLabelId }. Devuelve el ítem del resultado:
+// { tel, ok, total, via, recobro, sena, ids } o { tel, ok: false, error, conflicto? }.
 async function corteCobrarUno(env, tel, opt) {
   const { ltvGuard, dueniosGuard, corteLabelId, nowIso, nowMs } = opt;
   const tandaId = parseInt(opt.tandaId, 10) || 0;
-  const tf = tandaId ? ' AND tanda_id=?' : '';
-  const tb = tandaId ? [tandaId] : [];
+  const soloIds = Array.isArray(opt.ids) ? [...new Set(opt.ids.map(x => parseInt(x, 10)).filter(Boolean))].slice(0, 90) : null;
+  if (soloIds && !soloIds.length) return { tel, ok: false, error: 'nada para cobrar' };
+  const tf = (tandaId ? ' AND tanda_id=?' : '') + (soloIds ? ' AND id IN (' + soloIds.map(() => '?').join(',') + ')' : '');
+  const tb = [...(tandaId ? [tandaId] : []), ...(soloIds || [])];
   // CANDADO POR CLIENTE (90s): si corren dos pedidos de cobro a la vez (doble click, o el botón vuelve a
   // habilitarse por un refresco mientras se envía), solo UNO le manda el cobro a cada cliente. Caso real:
   // 5-oct, 19 clientes recibieron la plantilla de cobro DOS veces. FAIL-CLOSED: si el candado mismo falla,
@@ -7487,7 +7876,7 @@ async function corteCobrarUno(env, tel, opt) {
       try { const cfgF = await corteFrenosCfg(env); if (cfgF.dif && cortePagoBanda(g.sena, g.total, cfgF).banda === 'de_mas') { frSob = await corteFrenoPago(env, cfgF, { tipo: 'pago_de_mas', tel, nombre: g.cliente_nombre, cobro_total: g.total, monto: g.sena, diferencia: sobra, caja: senaCr.caja || '', key: null, wamid: null, ts: null, sinAviso: true }); if (frSob) frSob._frena = cfgF.freno && frSob.frena; } } catch (_) {}
       try { await precotizNotifyGaspar(env, 'Corte · ' + (g.cliente_nombre || tel) + ': el cobro de esta semana ($' + Math.round(g.total).toLocaleString('es-AR') + ') quedó cubierto con ' + (conAFavor ? 'lo que tenía a favor' : 'la seña web') + ' ($' + Math.round(g.sena).toLocaleString('es-AR') + '). Lo marqué PAGADO' + (ven ? ' y se lo avisé.' : ' (no le escribí: no tiene la ventana de 24 h abierta).') + (sobra > 1 ? ' Le sobran $' + sobra.toLocaleString('es-AR') + (conAFavor ? ' a favor: ' : ' de seña: ') + (frSob ? 'decidí en el CRM si quedan a favor o los devolvés' + (frSob._frena ? ' (frené el paquete hasta entonces) ' + CORTE_FRENO_LINK : '') + '.' : 'devolvelos o dejalos a cuenta.') : '') + sheetMsg, { tipo: 'corte_sena', prioridad: frSob ? 'P1' : (sobra > 1 ? 'P2' : 'P3'), refPhone: tel, plata: !!frSob }); } catch (_) {}
     }
-    await soltarLock(); return { tel, ok: !!ch, total: g.total, sena: g.sena, via: 'seña', error: ch ? undefined : 'no se pudo marcar' };
+    await soltarLock(); return { tel, ok: !!ch, total: g.total, sena: g.sena, via: 'seña', ids: rows.map(x => x.id), error: ch ? undefined : 'no se pudo marcar' };
   }
   let ventana = false;
   try { const li = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone=? AND direction='inbound'").bind(tel).first(); ventana = !!(li && li.t && (nowMs - new Date(li.t).getTime()) < 23 * 3600 * 1000); } catch (_) {}
@@ -7538,7 +7927,7 @@ async function corteCobrarUno(env, tel, opt) {
     if (via !== 'texto') { try { await env.DB.prepare("DELETE FROM corte_detalle_sent WHERE phone=?").bind(tel).run(); } catch (_) {} }
     else if (!detMarcado) { try { await env.DB.prepare("INSERT INTO corte_detalle_sent (phone, cobro_at, sent_at) VALUES (?,?,?) ON CONFLICT(phone) DO UPDATE SET cobro_at=excluded.cobro_at, sent_at=excluded.sent_at").bind(tel, nowIso, nowIso).run(); } catch (_) {} }
     if (corteLabelId) { try { await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, datetime('now'))").bind(tel, corteLabelId).run(); } catch (_) {} }
-    return { tel, ok: true, total: g.total, via, recobro: esRecobro, sena: g.sena || 0 };
+    return { tel, ok: true, total: g.total, via, recobro: esRecobro, sena: g.sena || 0, ids: rows.map(x => x.id) };
   } else { await restaurarDet(); await soltarLock(); return { tel, ok: false, error: 'no se pudo enviar', total: g.total, via }; }
 }
 // ===== Google Drive (cuenta de servicio) — respaldo de archivos del corte =====
@@ -9175,7 +9564,7 @@ async function corteExpressPreparar(env, ahora) {
             if (paq && !ya) {
               const items = piezas.map(p => ({ codigo: p.producto, nombre: p.diseno_nombre || p.producto, color: null, cantidad: parseInt(p.cantidad, 10) || 1, unit: Math.round((+p.precio || 0) / (parseInt(p.cantidad, 10) || 1)), precio: +p.precio || 0, texto: 'pedido web' }));
               const prueba = cfgF.agregar === 'dry' ? 1 : 0;
-              const f = await corteFrenoCrear(env, { telefono: tel, nombre: paq.cliente_nombre || e.nombre_hoja, tipo: 'agregar', origen: 'web', frena: prueba ? 0 : 1, prueba, texto_cliente: 'Pedido web #' + e.id + ' (' + corteHoraAR(e.created_at) + ')', items, items_total: total, entendido: true, tanda_id: paq.tanda_id, hoja_fecha: paq.hoja_fecha, web_envio_id: e.id });
+              const f = await corteFrenoCrear(env, { telefono: tel, nombre: paq.cliente_nombre || e.nombre_hoja, tipo: 'agregar', origen: 'web', frena: (prueba || !cfgF.freno) ? 0 : 1, prueba, texto_cliente: 'Pedido web #' + e.id + ' (' + corteHoraAR(e.created_at) + ')', items, items_total: total, entendido: true, tanda_id: paq.tanda_id, hoja_fecha: paq.hoja_fecha, web_envio_id: e.id });
               if (f) {
                 try { await env.DB.prepare('UPDATE corte_frenos SET aviso_at=? WHERE id=?').bind(nowIso, f.id).run(); } catch (_) {}
                 if (!prueba) await corteFrenoEtiqueta(env, tel, true);
@@ -10516,7 +10905,8 @@ async function logisticaTandas(env, rol) {
 async function logisticaArmar(env, tanda, opts = {}) {
   if (!(await ensureCorteDespachoSchema(env))) throw new Error('schema');
   const tablaOk = await ensureLogiTablaSchema(env); // columnas de la planilla de logística (si falla, sin ellas)
-  const COLS = 'id, tanda_id, telefono, cliente_nombre, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, producto, estado, estado_pago, entrega, precio, despachado_at, entregado_at, IFNULL(express,0) AS express';
+  // freno_id (frenos del corte): solo si la columna existe (la crea el primer freno).
+  const COLS = 'id, tanda_id, telefono, cliente_nombre, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, producto, estado, estado_pago, entrega, precio, despachado_at, entregado_at, IFNULL(express,0) AS express' + ((await corteFrenoColOk(env)) ? ', freno_id' : '');
   const NO_NEON = "IFNULL(producto,'')!='NEON' AND lower(IFNULL(cliente_nombre,''))!='neon'";
   const rows = (await env.DB.prepare(`SELECT ${COLS} FROM corte_pedidos WHERE tanda_id=? AND ${NO_NEON} ORDER BY cliente_nombre, id`).bind(tanda.id).all()).results || [];
   const origen = {}; // tanda_id anterior → fecha_corte (de dónde viene el arrastre)
@@ -10598,7 +10988,10 @@ async function logisticaArmar(env, tanda, opts = {}) {
     let bloqueo = null;
     // Frenado tiene prioridad (sin montos ni lo que dijo el cliente: logística es un usuario externo).
     const frenado = !despachado && !!c.telefono && frenosMap.has(String(c.telefono));
-    if (!despachado) { if (frenado) bloqueo = 'Frenado por Neon: esperá el OK de Gaspar'; else if (!pedidoPagado) bloqueo = 'Pedido impago'; else if (entrega === 'sin definir') bloqueo = 'Entrega sin definir'; else if (!envioPagado) bloqueo = 'Falta pagar el envío'; }
+    // Algo que Gaspar aprobó sumar (freno_id) todavía en 'cortado' en un paquete que ya estaba embalado: la caja está cerrada
+    // sin eso. Hasta que Neyen lo embale, no se despacha (antes "Enviado" lo marcaba despachado sin que estuviera en la caja).
+    const faltaSumar = !despachado && pend.some(p => p.estado === 'cortado' && +p.freno_id > 0) && pend.some(p => p.estado === 'embalado');
+    if (!despachado) { if (frenado) bloqueo = 'Frenado por Neon: esperá el OK de Gaspar'; else if (faltaSumar) bloqueo = 'Falta sumar algo a la caja: esperá a Neyen'; else if (!pedidoPagado) bloqueo = 'Pedido impago'; else if (entrega === 'sin definir') bloqueo = 'Entrega sin definir'; else if (!envioPagado) bloqueo = 'Falta pagar el envío'; }
     const arrP = pend.filter(p => p._arrastre).sort((a, b) => a.tanda_id - b.tanda_id);
     // Pago de las piezas del paquete (sin montos): las de $0 no cuentan (nunca se cobran y trababan el paquete para siempre).
     const pagos = new Set(logi.filter(p => Number(p.precio) > 0).map(p => p.estado_pago || 'pendiente'));
@@ -10631,7 +11024,7 @@ async function logisticaArmar(env, tanda, opts = {}) {
       contacto_estado: contactoEstado, contacto_at: (her ? her.contacto_at : mkCur.contacto_at) || null, intentos: +mkCur.intentos || 0,
       envio_pagado: envioPagado, envio_pagado_at: (her ? her.envio_pagado_at : mkCur.envio_pagado_at) || null,
       pedido_pagado: pedidoPagado,
-      listo: pedidoPagado && envioPagado && entrega === 'envio' && pend.length > 0 && !frenado,
+      listo: pedidoPagado && envioPagado && entrega === 'envio' && pend.length > 0 && !frenado && !faltaSumar,
       bloqueo,
       arrastre: arrP.length ? arrP[0]._arrastre : null,
       express: !despachado && pend.some(p => +p.express === 1), // insumos exprés ya pagados: sale hoy
@@ -19607,12 +20000,20 @@ async function analyzePaymentProof(env, r2Key, mimeHint, meta) {
   if (!env.ANTHROPIC_API_KEY || !env.MEDIA || !r2Key) return null;
   let obj; try { obj = await env.MEDIA.get(r2Key); } catch (_) { return null; }
   if (!obj) return null;
-  const mime = (String(obj.httpMetadata?.contentType || mimeHint || '').split(';')[0].trim().toLowerCase()) || 'image/jpeg';
+  let mime = (String(obj.httpMetadata?.contentType || mimeHint || '').split(';')[0].trim().toLowerCase()) || 'image/jpeg';
   // Videos, audios, .ai, .docx o archivos de más de 10 MB no son comprobantes: no se mandan (Anthropic los rechaza y
-  // un archivo grande en base64 puede pasar la memoria del worker).
+  // un archivo grande en base64 puede pasar la memoria del worker). Tampoco lo que Anthropic nunca acepta (SVG, DXF, HEIC, un
+  // octet-stream sin extensión de imagen o PDF, una imagen de más de ~3,7 MB): antes viajaba como image/jpeg, volvía error y
+  // quedaba null, y los vigías lo reintentaban para siempre (el detector del corte clavaba su cursor 6 h con un .svg).
   const NO_COMPROBANTE = { es_comprobante: false, monto: 0, moneda: 'ARS', cuenta: 'desconocida', titular_destino: '', banco: '', fecha: '', confianza: 0, motivo: 'tipo_no_soportado' };
-  if (/^(video|audio)\//.test(mime) || (/^application\//.test(mime) && !/pdf|octet-stream/.test(mime))) return NO_COMPROBANTE;
+  if (/^(application|binary)\/octet-stream$/.test(mime)) {
+    const ext = ((String(r2Key).split('?')[0].match(/\.([a-z0-9]{2,5})$/i) || [])[1] || '').toLowerCase();
+    mime = { pdf: 'application/pdf', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif' }[ext] || mime;
+  }
+  if (mime === 'image/jpg') mime = 'image/jpeg';
+  if (!(mime === 'application/pdf' || /^image\/(jpeg|png|webp|gif)$/.test(mime))) return NO_COMPROBANTE;
   if (obj.size > 10 * 1024 * 1024) return NO_COMPROBANTE;
+  if (mime !== 'application/pdf' && obj.size > 3.7 * 1024 * 1024) return { ...NO_COMPROBANTE, motivo: 'imagen_muy_grande' };
   let buf; try { buf = await obj.arrayBuffer(); } catch (_) { return null; }
   if (!buf || buf.byteLength < 64) return null;
   const isPdf = mime.includes('pdf');
@@ -32702,9 +33103,17 @@ const handler = {
           return json({ ok: true, piezas: n });
         }
         let rows;
-        try { rows = ((await env.DB.prepare("SELECT id, telefono, cliente_nombre FROM corte_pedidos WHERE " + sel.where + " AND entrega='retira' AND estado IN ('cortado','embalado') AND IFNULL(producto,'')!='NEON' AND lower(IFNULL(cliente_nombre,''))!='neon'" + fIds).bind(...sel.binds, ...idsF).all()).results || []).filter(sel.match); }
+        const _conFreno = await corteFrenoColOk(env);
+        try { rows = ((await env.DB.prepare("SELECT id, telefono, cliente_nombre, estado" + (_conFreno ? ', freno_id' : '') + " FROM corte_pedidos WHERE " + sel.where + " AND entrega='retira' AND estado IN ('cortado','embalado') AND IFNULL(producto,'')!='NEON' AND lower(IFNULL(cliente_nombre,''))!='neon'" + fIds).bind(...sel.binds, ...idsF).all()).results || []).filter(sel.match); }
         catch (_) { return json({ error: 'db', motivo: 'No se pudo leer la base. Probá de nuevo.' }, 500); }
         if (!rows.length) return json({ error: 'nada', motivo: 'No hay piezas para entregar' }, 409);
+        // Lo que Gaspar aprobó sumar a una caja que ya estaba embalada: primero se embala (que no se entregue la caja sin eso).
+        // (Mira todas las piezas del cliente que retira, no solo las elegidas: si no, se entregaba la caja dejando afuera lo sumado.)
+        if (_conFreno && rows.some(p => p.estado === 'embalado')) {
+          let sumadas = [];
+          try { sumadas = ((await env.DB.prepare("SELECT id, telefono, cliente_nombre FROM corte_pedidos WHERE " + sel.where + " AND entrega='retira' AND estado='cortado' AND freno_id > 0 AND IFNULL(producto,'')!='NEON'").bind(...sel.binds).all()).results || []).filter(sel.match); } catch (_) {}
+          if (sumadas.length) return json({ error: 'falta_sumar', motivo: 'Falta sumar algo a la caja: marcalo embalado primero' }, 409);
+        }
         const deuda = await corteDeudaKeys(env);
         if (corteTieneDeuda(deuda, sel.key, [body.nombre, ...rows.map(r => r.cliente_nombre)])) return json({ error: 'impago', motivo: 'Falta el pago: avisale a Gaspar' }, 409);
         if (sel.tel && (await corteFrenosAbiertosOFail(env)).has(sel.tel)) return json({ error: 'frenado', motivo: 'Frenado: esperá a Gaspar' }, 409); // frenos del corte
@@ -33121,7 +33530,8 @@ const handler = {
         const nowMs = Date.now(); const out = [];
         // Frenos del corte abiertos por cliente (pidió sumar algo, diferencia de plata): la vista previa los marca en rojo.
         const frPor = new Map();
-        try { (await corteFrenosLista(env, { rol: 'admin' })).filter(f => f.estado === 'abierto').forEach(f => { if (!frPor.has(f.telefono)) frPor.set(f.telefono, []); frPor.get(f.telefono).push({ id: f.id, tipo: f.tipo, corto: f.tipo === 'agregar' ? 'pidió sumar ' + (corteItemsTxt(f.items, false) || 'algo') : corteFrenoCorto(f) }); }); } catch (_) {}
+        // Los de prueba (modo 'dry') no: ese modo no toca nada, y dejarlos sin tildar hacía que esa semana no se les cobrara.
+        try { (await corteFrenosLista(env, { rol: 'admin' })).filter(f => f.estado === 'abierto' && !+f.prueba).forEach(f => { if (!frPor.has(f.telefono)) frPor.set(f.telefono, []); frPor.get(f.telefono).push({ id: f.id, tipo: f.tipo, corto: f.tipo === 'agregar' ? 'pidió sumar ' + (corteItemsTxt(f.items, false) || 'algo') : corteFrenoCorto(f) }); }); } catch (_) {}
         for (const k of Object.keys(grupos)) {
           const g = grupos[k];
           let ventana = false;
@@ -33196,14 +33606,22 @@ const handler = {
         if (!(await ensureCorteFrenosSchema(env))) return json({ error: 'db', motivo: 'No se pudo preparar la base. Probá de nuevo.' }, 500);
         const f = await env.DB.prepare(`SELECT ${CORTE_FRENO_COLS} FROM corte_frenos WHERE id = ?`).bind(parseInt(_frenoM[1], 10)).first();
         if (!f) return json({ error: 'no', motivo: 'No encontré ese pendiente' }, 404);
-        if (f.estado !== 'abierto') return json({ error: 'estado', motivo: 'Ese pendiente ya está ' + f.estado + (f.resolucion ? ' (' + f.resolucion + ')' : ''), frenos: await corteFrenosLista(env).catch(() => []) }, 409);
         const quien = String(session.user || ''), acc = String(body.accion || ''), cfgF = await corteFrenosCfg(env);
+        // 'deshacer_a_favor': sobre uno ya resuelto como "a favor" cuyo saldo no usó ningún cobro → se anula y vuelve a abrirse.
+        if (acc === 'deshacer_a_favor') {
+          const r0 = await corteFrenoDeshacerAFavor(env, f, quien);
+          let frenos = []; try { frenos = await corteFrenosLista(env, { rol: 'admin', cfg: cfgF }); } catch (_) {}
+          return json({ ok: !!r0.ok, frenos, resultado: r0.resultado || null, motivo: r0.ok ? '' : (r0.motivo || 'No se pudo') }, r0.ok ? 200 : (r0.status || 409));
+        }
+        if (f.estado !== 'abierto') return json({ error: 'estado', motivo: 'Ese pendiente ya está ' + f.estado + (f.resolucion ? ' (' + f.resolucion + ')' : ''), frenos: await corteFrenosLista(env).catch(() => []) }, 409);
         let r;
         if (acc === 'sumar') { const w = corteFrenoSumar(env, cfgF, f, body.items, quien); ctx.waitUntil(w.catch(() => {})); r = await w; }
         else if (acc === 'a_favor') r = await corteFrenoAFavor(env, cfgF, f, quien);
         else if (acc === 'pagar_pendiente') r = await corteFrenoPagarPendiente(env, cfgF, f, quien);
         else if (['devolver', 'liberar', 'descartar'].includes(acc)) {
           if (acc === 'devolver' && !/^pago_/.test(f.tipo)) return json({ error: 'accion', motivo: 'Eso no es una diferencia de plata' }, 400);
+          const yc = acc === 'devolver' ? await corteFrenoYaContado(env, f, quien) : null; // ya contado como pago: no se devuelve
+          if (yc) { let frenos = []; try { frenos = await corteFrenosLista(env, { rol: 'admin', cfg: cfgF }); } catch (_) {} return json({ ok: false, frenos, resultado: null, motivo: yc.motivo }, 409); }
           const res = acc === 'devolver' ? 'devolver ' + corteLandingPesos(f.tipo === 'pago_de_mas' ? f.diferencia : f.comprobante_monto) + ' (la transferencia la hacés vos)' : (acc === 'descartar' ? 'no era un pedido' : String(body.motivo || 'ya lo resolví').replace(/\s+/g, ' ').trim().slice(0, 80));
           const ok = await corteFrenoCerrar(env, f.id, acc === 'descartar' ? 'descartado' : 'resuelto', res, quien);
           if (ok && /^pago_/.test(f.tipo)) await corteFrenoQuemarComp(env, f);
