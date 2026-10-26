@@ -4857,12 +4857,16 @@ table.t.t-pedidos .prod-celda-linea { white-space: normal; line-height: 1.35; }
 /* ===== Cortes de Sin Frontera en tablero (26-oct-2026): columnas Pedido · En corte · Listo · Entregado con las piezas del de
    corpóreos (.sfk-col, .sfk-tabs) y los cancelados plegados abajo. La tarjeta es la fila de la lista (.sfc-row, sfcFilaHtml)
    adentro de .sfcb-card: sus cajas (.sfc-row, .sfc-head, .lb-nom, .sfc-det) pasan a display: contents y cada pieza se
-   acomoda con order. Arriba: número, "sin nombre" y el plazo; el nombre; material; archivos; aclaraciones; quién y cuándo;
-   abajo, Editar y el estado. ===== */
-.sfk-board.sfcb-board { grid-template-columns: repeat(4, minmax(200px, 1fr)); }
-.sfcb-card { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; flex: 0 0 auto; min-width: 0; padding: 8px 10px 9px; background: var(--ink-100); border: 1px solid var(--border); border-radius: 12px; font-size: 12.5px; transition: border-color .12s, opacity .12s; }
+   acomoda con order. Arriba: número, "sin nombre" y el plazo; el nombre; material; archivos; aclaraciones; quién y cuándo
+   (un renglón); abajo a la derecha, Editar y el estado. ===== */
+/* 168 px de mínimo: las cuatro columnas entran desde ~720 px de ancho (tablet vertical, 1024 con la barra lateral). */
+.sfk-board.sfcb-board { grid-template-columns: repeat(4, minmax(168px, 1fr)); }
+.sfcb-col .sfk-col-list { gap: 6px; padding: 0 6px 6px; }
+.sfcb-card { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 6px; flex: 0 0 auto; min-width: 0; padding: 6px 8px 7px; background: var(--ink-100); border: 1px solid var(--border); border-radius: 10px; font-size: 12.5px; transition: border-color .12s, opacity .12s; }
 .sfcb-card:hover { border-color: var(--border-strong); }
-.sfcb-card[draggable="true"] { cursor: grab; }
+/* Se agarra del número, el plazo, los bordes y el espacio libre; los textos se seleccionan (sfcbBindDrag). */
+.sfcb-card[draggable], .sfcb-card[draggable] .ln-num, .sfcb-card[draggable] .lb-nom > .logi-pill { cursor: grab; }
+.sfcb-card[draggable] .lb-nom .n, .sfcb-card[draggable] .sfc-mat, .sfcb-card[draggable] .sfc-acl-txt, .sfcb-card[draggable] .sfc-meta { cursor: text; }
 .sfcb-card.u-roja { box-shadow: inset 4px 0 0 #ef4444; }
 .sfcb-card.u-ambar { box-shadow: inset 4px 0 0 #f59e0b; }
 .sfcb-card.fin { opacity: .8; }
@@ -4881,10 +4885,11 @@ table.t.t-pedidos .prod-celda-linea { white-space: normal; line-height: 1.35; }
 .sfcb-card.acl-larga:not(.acl-abierta) .sfc-acl-txt { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .sfcb-mas { order: 75; margin-top: -3px; padding: 0; border: 0; background: none; font: inherit; font-size: 11.5px; font-weight: 700; color: var(--neon-cyan); cursor: pointer; }
 .sfcb-mas:hover, .sfcb-mas:focus-visible { text-decoration: underline; outline: none; }
-.sfcb-card .sfc-meta { order: 80; flex: 1 1 100%; min-width: 0; font-size: 11px; line-height: 1.35; }
-.sfcb-card .sfc-acc { order: 90; flex: 1 1 100%; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; margin: 1px 0 0; padding-top: 6px; border-top: 1px solid var(--border); }
-.sfcb-card select.lb-sel.sfc-est { font-size: 12px; line-height: 18px; padding: 3px 22px 3px 9px; }
-.sfcb-card .sfc-cancelar, .sfcb-card .sfc-editar { font-size: 12px !important; padding: 3px 10px !important; }
+/* Quién y cuándo, en un renglón (entero en el title, sfcbTitulos: al lado de los botones quedaba en "Pedido el 18/10 0…"). */
+.sfcb-card .sfc-meta { order: 80; flex: 1 1 100%; min-width: 0; font-size: 11px; line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sfcb-card .sfc-acc { order: 90; flex: 1 1 100%; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; margin: 1px 0 0; padding: 0; border: 0; }
+.sfcb-card select.lb-sel.sfc-est { font-size: 12px; line-height: 16px; padding: 2px 20px 2px 8px; }
+.sfcb-card .sfc-cancelar, .sfcb-card .sfc-editar { font-size: 12px !important; line-height: 16px; padding: 2px 9px !important; }
 .sfcb-col .sfk-todos { margin-top: 0; }
 .sfcb-ayuda { margin-top: 2px; }
 /* Cancelados: una barra plegable debajo del tablero; abierta, las tarjetas en grilla. */
@@ -4899,16 +4904,27 @@ table.t.t-pedidos .prod-celda-linea { white-space: normal; line-height: 1.35; }
 .sfcb-canc.drop-ok { border-color: var(--c); background: color-mix(in srgb, var(--c) 8%, var(--ink-050, #0f0f15)); }
 .sfcb-canc-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px; align-items: start; padding: 0 10px 10px; }
 @media (max-width: 760px) {
-  /* Las 4 pestañas entran en 375 px; si no, se deslizan como las del tablero de corpóreos. */
-  .sfcb-tabs { gap: 5px; }
-  .sfcb-tabs .sfk-tab { flex: 1 0 auto; padding: 6px 9px; font-size: 12.5px; }
-  .sfcb-tabs .sfk-tab b { margin-left: 2px; }
-  .sfcb-card { padding: 11px 12px 12px; font-size: 13px; }
+  /* Las 4 pestañas siempre entran (360 px con contadores de dos o tres cifras): se achican y, si hace falta, el nombre se corta
+     con "…" y el número queda entero. */
+  .sfcb-tabs { gap: 4px; }
+  .sfcb-tabs .sfk-tab { flex: 1 1 auto; min-width: 0; display: inline-flex; align-items: center; justify-content: center; padding: 6px 7px; font-size: 12.5px; }
+  .sfcb-tabs .sfk-tab .t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sfcb-tabs .sfk-tab b { flex: 0 0 auto; margin-left: 4px; }
+  .sfcb-col .sfk-col-list { gap: 8px; padding: 0; }
+  .sfcb-card { padding: 11px 12px 12px; gap: 4px 6px; border-radius: 12px; font-size: 13px; }
+  /* En el celular no hay mouse para ver el title: quién y cuándo, entero. Editar y el estado, separados por una raya. */
+  .sfcb-card .sfc-meta { white-space: normal; }
+  .sfcb-card .sfc-acc { gap: 6px; padding-top: 8px; border-top: 1px solid var(--border); }
   .sfcb-card .lb-nom .n { font-size: 16.5px; }
   .sfcb-card .sfc-mat { font-size: 13px; }
   .sfcb-card select.lb-sel.sfc-est { font-size: 13px; line-height: 20px; padding: 6px 24px 6px 11px; }
-  .sfcb-card .sfc-cancelar, .sfcb-card .sfc-editar { font-size: 13px !important; padding: 6px 12px !important; }
+  .sfcb-card .sfc-cancelar, .sfcb-card .sfc-editar { font-size: 13px !important; line-height: 20px; padding: 6px 12px !important; }
   .sfcb-canc-list { grid-template-columns: minmax(0, 1fr); padding: 0 8px 8px; }
+}
+@media (max-width: 359px) {
+  /* Celulares de 320 px: pestañas un poco más chicas para que los nombres no queden en "L…". */
+  .sfcb-tabs .sfk-tab { padding: 6px 5px; font-size: 11.5px; }
+  .sfcb-tabs .sfk-tab b { margin-left: 3px; }
 }
 
 /* Chat: en la compu los filtros (Todos, No leídos, Para cotizar, Por cobrar, Etiquetas, Servicio de corte) bajan a otra fila

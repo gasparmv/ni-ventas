@@ -9566,13 +9566,14 @@ async function sfcCambiarEstado(id, estado, el) {
   const volver = () => { if (el && el.tagName === 'SELECT') el.value = c.estado; };
   if (estado === 'cancelado' && !(await showConfirm((isAdmin() || isFranOnly()) ? '¿Cancelar el pedido de corte #' + id + '?' : '¿Cancelar el pedido #' + id + '? A Gaspar le llega el aviso.', { title: 'Cancelar pedido', confirmLabel: 'Sí, cancelar', cancelLabel: 'No' }).catch(() => false))) { volver(); return; }
   if (el) el.disabled = true;
-  const card = document.querySelector('.sfc-wrap [data-sfcb-card="' + id + '"]'); if (card) card.classList.add('is-moviendo');
+  sfcbMoviendo(id, true);   // la tarjeta queda atenuada mientras se guarda
   try {
     const j = await sfFetch('/admin/sinfrontera/corte/estado', { id, estado, quien: isSinFronteraOnly() ? sfOperador() : '' });
     if (j.corte) { sfcCambioGuardado(); Object.assign(c, j.corte); }
     STATE._sfcbMovido = id; // el tablero la marca en su columna nueva (sfcbPintar)
     niToast('#' + id + ': ' + sfcEstado(c.estado)[1].toLowerCase());
-  } catch (e) { volver(); if (card) card.classList.remove('is-moviendo'); niToast('No se guardó: ' + String((e && e.message) || 'error'), { error: true }); }
+  } catch (e) { volver(); niToast('No se guardó: ' + String((e && e.message) || 'error'), { error: true }); }
+  sfcbMoviendo(id, false);
   if (el) el.disabled = false;
   // Sin Frontera canceló el pedido que tenía abierto para editar: ya no se puede editar, se cierra el formulario.
   if (STATE.sfcEditId === id && !sfcPuedeEditar(c)) sfcEditarCancelar(); else sfcPintarLista();
@@ -9661,10 +9662,18 @@ function sfcbCardHtml(c, drag) {
   const abierta = larga && !!(STATE.sfcbAclAbiertas && STATE.sfcbAclAbiertas.has(c.id));
   // Borde como la pastilla del plazo: vencido en rojo; para hoy o mañana, en ámbar. Solo lo que falta cortar.
   const urg = (e === 'pedido' || e === 'en_corte') && !isNaN(dias) ? (dias < 0 ? ' u-roja' : dias <= 1 ? ' u-ambar' : '') : '';
-  return `<article class="sfcb-card${urg}${e === 'entregado' || e === 'cancelado' ? ' fin' : ''}${larga ? ' acl-larga' : ''}${abierta ? ' acl-abierta' : ''}" data-sfcb-card="${c.id}"${drag ? ' draggable="true"' : ''}>`
+  const mov = STATE._sfcbMoviendo && STATE._sfcbMoviendo.has(c.id) ? ' is-moviendo' : '';
+  return `<article class="sfcb-card${urg}${e === 'entregado' || e === 'cancelado' ? ' fin' : ''}${larga ? ' acl-larga' : ''}${abierta ? ' acl-abierta' : ''}${mov}" data-sfcb-card="${c.id}"${drag ? ' draggable="true"' : ''}>`
     + sfcFilaHtml(c)
     + (larga ? `<button type="button" class="sfcb-mas" data-sfcb-mas="${c.id}" aria-expanded="${abierta ? 'true' : 'false'}">${abierta ? 'ver menos' : 'ver todo'}</button>` : '')
     + `</article>`;
+}
+// Tarjeta guardando su cambio de estado (sfcCambiarEstado): atenuada. Va en STATE para que siga así si el tablero se repinta
+// mientras tanto (sfcbCardHtml).
+function sfcbMoviendo(id, on) {
+  const S = STATE._sfcbMoviendo || (STATE._sfcbMoviendo = new Set());
+  if (on) S.add(id); else S.delete(id);
+  const card = document.querySelector('.sfc-wrap [data-sfcb-card="' + id + '"]'); if (card) card.classList.toggle('is-moviendo', on);
 }
 function sfcbColHtml(id, cs, cel, drag) {
   const E = sfcEstado(id), v = sfcbVisibles(cs, id), ent = id === 'entregado';
@@ -9679,7 +9688,8 @@ function sfcbColHtml(id, cs, cel, drag) {
 function sfcbTabsHtml(cs, cel) {
   return `<div class="sfk-tabs sfcb-tabs" data-sfcb-tabs>${SFCB_COLS.map(id => {
     const E = sfcEstado(id), n = sfcbVisibles(cs, id).lista.length;
-    return `<button type="button" class="sfk-tab${id === cel ? ' on' : ''}${n ? '' : ' cero'}" data-sfcb-tab="${id}" style="--c:${E[2]}">${escapeHtml(E[1])} <b>${n}</b></button>`;
+    // El nombre va aparte del contador: si no entran las cuatro, se achica el nombre ("Entreg…") y el número queda entero.
+    return `<button type="button" class="sfk-tab${id === cel ? ' on' : ''}${n ? '' : ' cero'}" data-sfcb-tab="${id}" style="--c:${E[2]}" title="${escapeHtml(E[1])}: ${n}"><span class="t">${escapeHtml(E[1])}</span><b>${n}</b></button>`;
   }).join('')}</div>`;
 }
 function sfcbBoardHtml(cs, cel, drag) { return `<div class="sfk-board sfcb-board" data-sfcb-board>${SFCB_COLS.map(id => sfcbColHtml(id, cs, cel, drag)).join('')}</div>`; }
@@ -9697,22 +9707,47 @@ function sfcbSig() {
   return JSON.stringify([D ? (D.error || '') : null, D && D.cortes ? D.cortes : null, sfcbEtapaCel((D && D.cortes) || []), !!STATE.sfcbEntTodos,
     new Date().toDateString(), isAdmin(), isFranOnly(), sfkFino()]);
 }
+// Scroll del tablero (cada columna, el tablero de costado y las pestañas del celular): se anota cuando se mueve (sfcbBind lo
+// escucha en captura) y se devuelve después de cada redibujo: el del tablero solo (sfcbPintar) y el de la pantalla entera
+// (Editar, cancelar o guardar la edición, mandar un pedido, abrir o cerrar "Cargar un pedido": renderSinFrontera → sfcBind →
+// sfcbBind). Así la tarjeta que se estaba mirando sigue a la vista.
+function sfcbScrollAnotar(x) {
+  if (!x || x.nodeType !== 1) return;
+  const S = STATE._sfcbScroll || (STATE._sfcbScroll = { cols: {} }), k = x.getAttribute('data-sfcb-list');
+  if (k) S.cols[k] = x.scrollTop;
+  else if (x.hasAttribute('data-sfcb-board')) S.board = x.scrollLeft;
+  else if (x.hasAttribute('data-sfcb-tabs')) S.tabs = x.scrollLeft;
+}
+function sfcbScrollPoner(l) {
+  const S = STATE._sfcbScroll; if (!S || !l) return;
+  l.querySelectorAll('[data-sfcb-list]').forEach(x => { const s = S.cols[x.getAttribute('data-sfcb-list')]; if (s) x.scrollTop = s; });
+  const tb = l.querySelector('[data-sfcb-tabs]'), bd = l.querySelector('[data-sfcb-board]');
+  if (tb && S.tabs) tb.scrollLeft = S.tabs;
+  if (bd && S.board) bd.scrollLeft = S.board;
+}
+// Quién y cuándo va en un renglón (cortado con "…" si no entra): el texto entero, al pasar el mouse.
+function sfcbTitulos(l) { if (l) l.querySelectorAll('.sfcb-card .sfc-meta').forEach(m => { m.title = m.textContent; }); }
+// ¿Hay un selector de estado del tablero abierto o con el foco (salvo el de la tarjeta que se acaba de mover, que ya guardó)?
+// Repintar lo destruiría y lo que se elija ahí se perdería (en el celular, sin aviso).
+function sfcbEligiendo(l) {
+  const a = document.activeElement;
+  return !!(a && a.tagName === 'SELECT' && !a.disabled && l.contains(a) && +a.getAttribute('data-sfc-estado') !== STATE._sfcbMovido);
+}
 // Repinta el tablero (no el formulario ni la barra de arriba) conservando el scroll de cada columna y de las pestañas. Sin
-// `forzar`, solo si cambió algo. Mientras se arrastra una tarjeta, espera a que la suelten.
+// `forzar`, solo si cambió algo. Mientras se arrastra una tarjeta o se elige un estado en otra, espera (STATE._sfcbPend: lo
+// repinta sfcbFinDrag al soltar, o sfcbBind cuando el selector pierde el foco o cambia).
 function sfcbPintar(l, forzar) {
   if (STATE._sfcbDrag) { STATE._sfcbPend = true; return; }
   const sig = sfcbSig();
   if (forzar || l.getAttribute('data-sig') !== sig) {
-    const scroll = {}, tb0 = l.querySelector('[data-sfcb-tabs]'), bd0 = l.querySelector('[data-sfcb-board]');
-    const tabsX = tb0 ? tb0.scrollLeft : 0, boardX = bd0 ? bd0.scrollLeft : 0;
-    l.querySelectorAll('[data-sfcb-list]').forEach(x => { scroll[x.getAttribute('data-sfcb-list')] = x.scrollTop; });
+    if (!forzar && sfcbEligiendo(l)) { STATE._sfcbPend = true; return; }
+    l.querySelectorAll('[data-sfcb-list], [data-sfcb-board], [data-sfcb-tabs]').forEach(x => sfcbScrollAnotar(x));
     l.setAttribute('data-sig', sig);
     l.innerHTML = sfcListaHtml();
-    l.querySelectorAll('[data-sfcb-list]').forEach(x => { const s = scroll[x.getAttribute('data-sfcb-list')]; if (s) x.scrollTop = s; });
-    const tb = l.querySelector('[data-sfcb-tabs]'), bd = l.querySelector('[data-sfcb-board]');
-    if (tb) tb.scrollLeft = tabsX;
-    if (bd) bd.scrollLeft = boardX;
+    sfcbScrollPoner(l);
+    sfcbTitulos(l);
   }
+  STATE._sfcbPend = false;
   // La que se acaba de mover: titila en su columna nueva (a la vista si quedó más abajo) y, en el celular, su pestaña.
   const id = STATE._sfcbMovido; STATE._sfcbMovido = null;
   const card = id ? l.querySelector('[data-sfcb-card="' + id + '"]') : null;
@@ -9756,6 +9791,18 @@ function sfcbBind(root) {
     STATE.sfcbCancAbierto = d.open;
     const v = d.querySelector('.sfcb-canc-ver'); if (v) v.textContent = d.open ? 'ocultar' : 'ver';
   }, true);
+  // Scroll de las columnas: 'scroll' tampoco burbujea. Se anota para devolverlo después de un redibujo (sfcbScrollPoner).
+  root.addEventListener('scroll', e => { const t = e.target; if (t && t.nodeType === 1 && t.matches('[data-sfcb-list], [data-sfcb-board], [data-sfcb-tabs]')) sfcbScrollAnotar(t); }, true);
+  // Lo que llegó mientras se elegía un estado en otra tarjeta (sfcbPintar esperó): se pinta cuando ese selector suelta el foco o
+  // cambia (si cambió, sfcCambiarEstado ya lo deshabilitó y la tarjeta se repinta atenuada en su lugar hasta que guarde).
+  const pendiente = e => {
+    if (!STATE._sfcbPend || STATE._sfcbDrag || !(e.target && e.target.tagName === 'SELECT')) return;
+    setTimeout(() => { if (STATE._sfcbPend && !STATE._sfcbDrag) sfcPintarLista(); }, 0);
+  };
+  root.addEventListener('focusout', pendiente);
+  root.addEventListener('change', pendiente);
+  // Redibujo de la pantalla entera: vuelve el scroll de cada columna y el detalle de quién y cuándo.
+  const l = root.querySelector('[data-sfc-lista]'); sfcbScrollPoner(l); sfcbTitulos(l);
   if ((isAdmin() || isFranOnly()) && sfkFino()) sfcbBindDrag(root);
 }
 // ---------- Arrastrar entre columnas (solo compu con mouse; solo Gaspar y Fran, los que cambian el estado) ----------
@@ -9768,11 +9815,13 @@ function sfcbFinDrag(root) {
   if (STATE._sfcbPend) { STATE._sfcbPend = false; sfcPintarLista(); } // algo llegó mientras se arrastraba
 }
 function sfcbBindDrag(root) {
-  // Empezar a arrastrar desde las aclaraciones no arrastra (así se pueden seleccionar y copiar), ni desde el selector, un
-  // botón o un archivo (en Firefox un select adentro de algo draggable no se deja usar; el archivo se arrastra como link).
+  // Empezar a arrastrar desde un texto (el nombre, el material, las aclaraciones o quién y cuándo) no arrastra: así se puede
+  // seleccionar y copiar (Fran copia el nombre para el archivo del láser). Tampoco desde el selector, un botón o un archivo (en
+  // Firefox un select adentro de algo draggable no se deja usar; el archivo se arrastra como link). La tarjeta se agarra del
+  // número, el plazo, los bordes y el espacio libre (ahí el cursor es la mano).
   root.addEventListener('mousedown', e => {
     const card = e.target.closest && e.target.closest('.sfcb-card[draggable]');
-    if (card) card.setAttribute('draggable', e.target.closest('.sfc-acl-txt, select, button, a, input') ? 'false' : 'true');
+    if (card) card.setAttribute('draggable', e.target.closest('.lb-nom .n, .sfc-mat, .sfc-acl-txt, .sfc-meta, select, button, a, input') ? 'false' : 'true');
   });
   root.addEventListener('dragstart', e => {
     const card = e.target.closest && e.target.closest('.sfcb-card[draggable="true"]');
