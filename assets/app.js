@@ -5418,7 +5418,8 @@ function renderCorte() {
 // ped_estado incluido: si el pedido pasa a Entregado (o vuelve a producción) la pieza sale/entra de la línea de Emma.
 // estado_pago / entrega / despachado_at / entregado_at: por si algún camino del server los cambia sin tocar updated_at
 // (el backfill del despacho no lo toca a propósito).
-function corteSig(list) { return (list || []).map(p => [p.id, p.estado, p.foto_key || '', p.updated_at || '', p.ped_productor || '', p.ped_estado || '', p.pedido_numero || '', p.ancho_real || '', p.estado_pago || '', p.entrega || '', p.despachado_at || '', p.entregado_at || ''].join(':')).join('|'); }
+function corteSig(list) { return (list || []).map(p => [p.id, p.estado, p.foto_key || '', p.updated_at || '', p.ped_productor || '', p.ped_estado || '', p.pedido_numero || '', p.ancho_real || '', p.estado_pago || '', p.entrega || '', p.despachado_at || '', p.entregado_at || '',
+  (p.ped_partes || []).map(x => [x.id, x.unidades, x.prod_estado, x.entregado_at || ''].join('.')).join(',')].join(':')).join('|'); }   // + las partes de un neón repartido (paquetes de Neyen)
 // ¿Se puede re-renderizar el corte "de fondo" sin romperle algo al usuario? No si está tipeando, con la
 // cobranza abierta (sus checkboxes viven solo en el DOM: re-tildaría alumnos que Gaspar destildó), con el
 // detalle de una pieza abierto (radio de entrega / select de estado) o con un archivo elegido sin subir.
