@@ -6314,9 +6314,16 @@ async function cortePagoParcialGuardar(env, phone, total, monto, wamid, nowIso) 
 }
 async function corteVigiaPago(env, phone, opts = {}) {
   if ((await kvGet(env, 'corte_vigia_on', '1')) !== '1') return false; // kill-switch: aplica a TODOS los callers (cron, bot y sweep manual)
-  let cobr;
-  try { cobr = await env.DB.prepare("SELECT COUNT(*) AS n, COALESCE(SUM(precio),0) AS total, MAX(cliente_nombre) AS nombre FROM corte_pedidos WHERE telefono=? AND estado_pago='cobrando'").bind(phone).first(); } catch (_) { return false; }
-  if (!cobr || !cobr.n) return false; // no hay cobranza en curso para este número
+  // Las FILAS del cobro (no solo la suma): el total, el recibo y la transición salen de estos ids. Si mientras se lee el
+  // comprobante entra otra pieza en 'cobrando' (Gaspar aprueba sumar algo y sale el re-cobro), esa no se marca pagada con el
+  // monto viejo: queda para el comprobante nuevo.
+  let cob;
+  try { cob = (await env.DB.prepare("SELECT id, precio, cliente_nombre FROM corte_pedidos WHERE telefono=? AND estado_pago='cobrando'").bind(phone).all()).results || []; } catch (_) { return false; }
+  if (!cob.length) return false; // no hay cobranza en curso para este número
+  const cobIds = cob.map(r => r.id);
+  const cobr = { n: cob.length, total: cob.reduce((s, r) => s + (Number(r.precio) || 0), 0), nombre: cob.map(r => r.cliente_nombre).filter(Boolean).sort().pop() || null };
+  const porIds = cobIds.length <= 90; // tope de parámetros de D1: con más filas (nunca pasó), por teléfono como antes
+  const fIds = porIds ? ' AND id IN (' + cobIds.map(() => '?').join(',') + ')' : '';
   try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_pago_check (wamid TEXT PRIMARY KEY, phone TEXT, monto REAL, es_comprobante INTEGER, checked_at TEXT)").run(); } catch (_) {}
   // Ventana de búsqueda del comprobante: default 6h (mayor que el cooldown de billing de 3h para no perder
   // pagos tras un bloqueo); el sweep manual pasa una ventana amplia para recuperar comprobantes viejos.
@@ -6336,7 +6343,7 @@ async function corteVigiaPago(env, phone, opts = {}) {
   // La transición 'cobrando' → pagado/parcial es CONDICIONAL: solo la ejecución que efectivamente cambió filas confirma,
   // avisa y marca la planilla (si dos corridas procesan el mismo comprobante, la segunda no repite nada).
   const transicion = async (estado) => {
-    try { const u = await env.DB.prepare("UPDATE corte_pedidos SET estado_pago=?, comprobante_key=?, updated_at=? WHERE telefono=? AND estado_pago='cobrando'").bind(estado, img.r2Key, nowIso, phone).run(); return (u && u.meta && u.meta.changes) || 0; }
+    try { const u = await env.DB.prepare("UPDATE corte_pedidos SET estado_pago=?, comprobante_key=?, updated_at=? WHERE telefono=? AND estado_pago='cobrando'" + fIds).bind(estado, img.r2Key, nowIso, phone, ...(porIds ? cobIds : [])).run(); return (u && u.meta && u.meta.changes) || 0; }
     catch (_) { return -1; }
   };
   // ch===0 (no cambió ninguna fila): si ESTE comprobante ya quedó registrado en las filas, es un duplicado legítimo
@@ -6354,7 +6361,7 @@ async function corteVigiaPago(env, phone, opts = {}) {
   if (total > 0 && monto >= total * 0.99) {
     // Piezas de ESTE cobro, leídas ANTES de la transición (después pasan a 'pagado') → para el recibo con detalle.
     let piezas = [];
-    try { piezas = (await env.DB.prepare("SELECT cliente_nombre, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, precio, producto, hoja_fila, hoja_cliente, hoja_fecha FROM corte_pedidos WHERE telefono=? AND estado_pago='cobrando' AND precio>0").bind(phone).all()).results || []; } catch (_) {}
+    try { piezas = (await env.DB.prepare("SELECT cliente_nombre, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, precio, producto, hoja_fila, hoja_cliente, hoja_fecha FROM corte_pedidos WHERE telefono=? AND estado_pago='cobrando' AND precio>0" + fIds).bind(phone, ...(porIds ? cobIds : [])).all()).results || []; } catch (_) {}
     const ch = await transicion('pagado');
     if (ch === 0) return await ch0(); // no confirmar ni avisar dos veces (o reintentar si el pago quedó sin marcar)
     if (ch < 0) { try { await precotizNotifyGaspar(env, 'Corte: ' + quien + ' mandó comprobante por $' + monto.toLocaleString('es-AR') + ' pero falló marcarlo PAGADO en la base. Revisalo a mano.', { tipo: 'corte_pago', prioridad: 'P1', refPhone: phone, plata: true }); } catch (_) {} return true; }
