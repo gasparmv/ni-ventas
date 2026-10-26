@@ -13,7 +13,7 @@
   const C = raiz.ClipperLib || (typeof require === 'function' ? require('./clipper.js') : null);
   const ESC = 1000; // Clipper trabaja con enteros: micrones
   const PERFIL_DEF = {
-    fresa: 6, seguridad: 5, inicio: 20, sentido: 'trepado', ext: 'nc', aire: 0, vacio: 100,
+    fresa: 6, seguridad: 5, inicio: 20, sentido: 'trepado', ext: 'nc', aire: 0, vacio: 100, acel: 500, ajuste: 100,
     corte: { avance: 200, bajada: 10, rpm: 18000, inicial: 0, final: 3, pasada: 3 },
     calado: { avance: 300, bajada: 10, rpm: 18000, inicial: 0, final: 1, pasada: 1 },
     agujero: { avance: 200, bajada: 10, rpm: 18000, inicial: 0, final: 3, pasada: 3 },
@@ -172,24 +172,71 @@
     L.push('M30');
     return { texto: L.join('\r\n') + '\r\n', segundos: t, avisos: rec.avisos };
   }
-  // Lee un G-code (solo G0/G1 con X, Y, Z) y devuelve los tramos, para dibujar lo que va a hacer la máquina.
+  // Lee un G-code y devuelve los tramos en orden: { a, b, rapido, f (mm/min), op }. Entiende G0/G1 y arcos G2/G3 con I J
+  // (los pasa a tramos rectos); op sale de los comentarios de sección que escribe escribir() ("(Calado: ...)", etc.).
   function leer(texto) {
-    const tramos = [];
-    let x = 0, y = 0, z = 0, modo = 0;
+    const tramos = [], num = '([-+]?(?:\\d+\\.?\\d*|\\.\\d+))';
+    let x = 0, y = 0, z = 0, modo = 0, f = 0, op = '';
     for (const crudo of texto.split(/\r?\n/)) {
-      const l = crudo.replace(/\(.*?\)/g, '').trim().toUpperCase();
+      const com = crudo.match(/\((Calado|Agujeros grandes|Agujeros|Cortes de adentro|Contornos)\b/i);
+      if (com) op = com[1];
+      const l = crudo.replace(/\(.*?\)/g, '').replace(/;.*$/, '').trim().toUpperCase();
       if (!l) continue;
-      const g = l.match(/G0*([01])(?!\d)/); if (g) modo = +g[1];
-      const v = (k) => { const m = l.match(new RegExp(k + '(-?\\d+(?:\\.\\d+)?)')); return m ? parseFloat(m[1]) : null; };
+      const g = l.match(/G0*([0-3])(?!\d)/); if (g) modo = +g[1];
+      const v = (k) => { const m = l.match(new RegExp(k + num)); return m ? parseFloat(m[1]) : null; };
+      const nf = v('F'); if (nf != null) f = nf;
       const nx = v('X'), ny = v('Y'), nz = v('Z');
       if (nx == null && ny == null && nz == null) continue;
-      const a = [x, y, z];
-      if (nx != null) x = nx; if (ny != null) y = ny; if (nz != null) z = nz;
-      tramos.push({ a, b: [x, y, z], rapido: modo === 0 });
+      const a = [x, y, z], bx = nx != null ? nx : x, by = ny != null ? ny : y, bz = nz != null ? nz : z;
+      if (modo >= 2) {
+        // arco en XY: centro = inicio + (I, J); horario con G2
+        const cx = x + (v('I') || 0), cy = y + (v('J') || 0), r = Math.hypot(x - cx, y - cy);
+        let a0 = Math.atan2(y - cy, x - cx), a1 = Math.atan2(by - cy, bx - cx);
+        if (modo === 2) { while (a1 >= a0) a1 -= 2 * Math.PI; } else { while (a1 <= a0) a1 += 2 * Math.PI; }
+        const n = Math.max(2, Math.ceil(Math.abs(a1 - a0) * r / 0.5));
+        let p = a;
+        for (let k = 1; k <= n; k++) { const ang = a0 + (a1 - a0) * k / n, q = [cx + r * Math.cos(ang), cy + r * Math.sin(ang), z + (bz - z) * k / n]; tramos.push({ a: p, b: q, rapido: false, f, op }); p = q; }
+      } else tramos.push({ a, b: [bx, by, bz], rapido: modo === 0, f, op });
+      x = bx; y = by; z = bz;
     }
     return tramos;
   }
-  const api = { PERFIL_DEF, desplazar, recorridos, escribir, leer, profundidades };
+  // Tiempo de máquina: simula el planificador de un controlador. Cada tramo va hasta su velocidad (avance o vacío) con
+  // aceleración acel; en una cadena de cortes en XY la velocidad de paso por cada vértice se limita por el ángulo (desvío de
+  // unión, como GRBL), y en los movimientos en vacío, subidas y bajadas la máquina arranca y termina parada.
+  // Devuelve { tramos (con t0 y t1 en segundos), total }.
+  function simular(texto, maq) {
+    const tr = leer(texto), a = Math.max(10, +maq.acel || 500), dj = 0.02, vR = Math.max(1, +maq.vacio || 100), n = tr.length;
+    for (const t of tr) {
+      const dx = t.b[0] - t.a[0], dy = t.b[1] - t.a[1], dz = t.b[2] - t.a[2];
+      t.L = Math.hypot(dx, dy, dz); t.v = t.rapido ? vR : Math.max(0.1, t.f / 60); t.xy = !t.rapido && Math.abs(dz) < 1e-9 && t.L > 0;
+    }
+    const vin = new Float64Array(n + 1);
+    for (let i = 1; i < n; i++) {
+      const t = tr[i], p = tr[i - 1];
+      if (!t.xy || !p.xy) continue;
+      const cos = -(((p.b[0] - p.a[0]) * (t.b[0] - t.a[0]) + (p.b[1] - p.a[1]) * (t.b[1] - t.a[1])) / (p.L * t.L));
+      let vj;
+      if (cos <= -0.999999) vj = Infinity; else if (cos >= 0.999999) vj = 0;
+      else { const s = Math.sqrt(0.5 * (1 - cos)); vj = Math.sqrt(a * dj * s / (1 - s)); }
+      vin[i] = Math.min(vj, t.v, p.v);
+    }
+    for (let i = n - 1; i >= 0; i--) vin[i] = Math.min(vin[i], Math.sqrt(vin[i + 1] * vin[i + 1] + 2 * a * tr[i].L));
+    for (let i = 0; i < n; i++) vin[i + 1] = Math.min(vin[i + 1], Math.sqrt(vin[i] * vin[i] + 2 * a * tr[i].L));
+    let T = 0;
+    for (let i = 0; i < n; i++) {
+      const t = tr[i], v0 = vin[i], v1 = vin[i + 1], vm = t.v, L = t.L;
+      let dt = 0;
+      if (L > 0) {
+        const vp2 = (2 * a * L + v0 * v0 + v1 * v1) / 2;
+        if (vp2 >= vm * vm) dt = (vm - v0) / a + (vm - v1) / a + Math.max(0, L - (vm * vm - v0 * v0) / (2 * a) - (vm * vm - v1 * v1) / (2 * a)) / vm;
+        else { const vp = Math.sqrt(vp2); dt = (vp - v0) / a + (vp - v1) / a; }
+      }
+      t.t0 = T; T += dt; t.t1 = T;
+    }
+    return { tramos: tr, total: T };
+  }
+  const api = { PERFIL_DEF, desplazar, recorridos, escribir, leer, simular, profundidades };
   raiz.NestGcode = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof self !== 'undefined' ? self : this);

@@ -104,8 +104,19 @@
   table.gtabla input[type=number] { width: 84px; }
   .placa .cap .tiempo { color: var(--mute); font-size: 12.5px; }
   .placa .cap .aviso-g { color: var(--aviso); font-size: 12.5px; flex-basis: 100%; }
-  .placa .leyenda-g { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--mute); padding: 6px 12px; border-top: 1px solid var(--borde); }
-  .placa .leyenda-g i { display: inline-block; width: 16px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 5px; }
+  .leyenda-g { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--mute); padding: 6px 14px 10px; }
+  .leyenda-g i { display: inline-block; width: 16px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 5px; }
+  .anim-fondo { position: fixed; inset: 0; background: rgba(5, 6, 9, .84); z-index: 50; display: flex; align-items: center; justify-content: center; padding: 16px; }
+  .anim-caja { background: var(--panel); border: 1px solid var(--borde); border-radius: 14px; width: min(1240px, 100%); max-height: 100%; overflow: auto; }
+  .anim-cab { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; padding: 10px 14px; border-bottom: 1px solid var(--borde); }
+  .anim-cab button { margin-left: auto; }
+  .anim-lienzo { background: #0b0d11; }
+  .anim-lienzo canvas { display: block; width: 100%; }
+  .anim-ctrl { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 10px 14px; border-top: 1px solid var(--borde); }
+  .anim-ctrl input[type=range] { flex: 1; min-width: 160px; accent-color: var(--acento); }
+  .reloj { font-variant-numeric: tabular-nums; font-size: 13px; min-width: 104px; }
+  #an-play { min-width: 112px; }
+  @media (max-width: 560px) { .anim-fondo { padding: 0; } .anim-caja { border-radius: 0; height: 100%; } }
   @media (max-width: 560px) { main { padding: 16px 12px 60px; } h1 { font-size: 19px; } .archivo button { margin-left: 0; } }
 </style>
 </head>
@@ -197,7 +208,7 @@
       <button id="b-seguir" disabled>Seguir optimizando</button>
       <button id="b-detener" disabled>Detener</button>
     </div>
-    <p class="nota">Cada DXF tiene la placa en milímetros, con el origen abajo a la izquierda (largo en X, ancho en Y). Los agujeros redondos salen como círculos; lo demás, como polilíneas. El ZIP lleva también el código G de cada placa (se configura en el paso 6).</p>
+    <p class="nota">Cada DXF tiene la placa en milímetros, con el origen abajo a la izquierda (largo en X, ancho en Y), y tres grupos (bloques) en sus capas: CORTE, CALADO y AGUJEROS. Los agujeros redondos salen como círculos; lo demás, como polilíneas. El ZIP lleva también el código G de cada placa (se configura en el paso 6).</p>
     <div class="placas" id="placas"></div>
   </section>
 
@@ -221,15 +232,35 @@
       <label>Archivo<span class="fila"><select data-g="ext"><option value="nc">.nc</option><option value="tap">.tap</option><option value="gcode">.gcode</option></select></span></label>
       <label>Prueba en el aire (mm)<span class="fila"><input type="number" data-g="aire" min="0" step="5"><span class="sutil">0 = corte de verdad</span></span></label>
     </div>
+    <h3 style="font-size:13.5px;margin:16px 0 8px">Máquina <span class="sutil" style="font-weight:400">(solo para calcular cuánto tarda; no cambia el archivo)</span></h3>
+    <div class="config">
+      <label>Velocidad en vacío (mm/s)<span class="fila"><input type="number" data-g="vacio" min="1" step="5"></span></label>
+      <label>Aceleración (mm/s²)<span class="fila"><input type="number" data-g="acel" min="10" step="50"></span></label>
+      <label>Ajuste del tiempo (%)<span class="fila"><input type="number" data-g="ajuste" min="10" step="5"><span class="sutil">100 = sin ajuste</span></span></label>
+    </div>
     <label class="check" style="margin-top:12px"><input type="checkbox" id="g-zip"> Sumar el código G al ZIP</label>
     <p class="nota">El avance y la bajada van en mm/s como en Aspire (en el archivo quedan en mm/min). Cero: X0 Y0 en la esquina de abajo a la izquierda de cada placa y Z0 arriba del material. El corte va por fuera de cada pieza (se corre el radio de la fresa), los cortes de adentro por dentro, el calado sobre la línea y los agujeros de la medida de la fresa con un taladro en el centro. Orden: calado, agujeros, cortes de adentro y contornos. "Prueba en el aire" sube todo esos milímetros para correr el programa sin tocar la placa.</p>
   </section>
 </main>
 
+<div class="anim-fondo" id="anim" hidden>
+  <div class="anim-caja" role="dialog" aria-modal="true" aria-labelledby="an-titulo">
+    <div class="anim-cab"><b id="an-titulo">Recorrido</b><span class="sutil" id="an-op"></span><button class="chico" id="an-cerrar">Cerrar</button></div>
+    <div class="anim-lienzo"><canvas id="an-cv"></canvas></div>
+    <div class="anim-ctrl">
+      <button class="primario" id="an-play">⏸ Pausa</button>
+      <input type="range" id="an-pos" min="0" max="1000" value="0" aria-label="Momento del recorrido">
+      <span class="reloj" id="an-t">0:00 / 0:00</span>
+      <label class="sutil">Velocidad <select id="an-vel"></select></label>
+    </div>
+    <div class="leyenda-g"><span><i style="background:#facc15"></i>calado</span><span><i style="background:#22d3ee"></i>corte</span><span><i style="background:#4d8dff"></i>taladros</span><span><i style="background:repeating-linear-gradient(90deg,#9aa4b8 0 3px,transparent 3px 6px)"></i>movimientos en el aire</span><span>el tiempo es el de la máquina, simulado con su aceleración</span></div>
+  </div>
+</div>
+
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" integrity="sha384-/1qUCSGwTur9vjf/z9lmu/eCUYbpOTgSjmpbMQZ1/CtX2v/WcAIKqRv+U1DUCG6e" crossorigin="anonymous"></script>
 <script src="nest-core.js?v=3"></script>
 <script src="clipper.js?v=1"></script>
-<script src="gcode.js?v=1"></script>
+<script src="gcode.js?v=2"></script>
 <script>
 'use strict';
 // Nesting de placas para el corte (Gaspar 25-oct-2026). Lee los .ai/.pdf de Emma con pdf.js, separa por color (corte rojo,
@@ -243,7 +274,7 @@ const COL = { corte: '#ff4d4d', calado: '#f2f2f2', agujero: '#4d8dff', suelto: '
 const CLASES = [['corte', 'Corte'], ['calado', 'Calado'], ['agujero', 'Agujeros'], ['ignorar', 'Ignorar']];
 const CFG_DEF = { largo: 2440, ancho: 1220, sep: 6.5, margen: 5, paso: 5, seg: 20, borde: true, enteras: true, gzip: true };
 const VERSION_MOTOR = '3'; // subirla (y la de nest-core.js?v= arriba) cada vez que cambian nest-core.js o nest-worker.js: GitHub Pages los cachea 10 min
-const S = { archivos: [], sec: 0, mapa: {}, piezas: [], grandes: [], cfg: cargarCfg(), recortes: cargarRecortes(), recNest: [], perfiles: cargarPerfiles(), gcodeCache: new Map(), verRec: new Set(), mejor: null, firmaMejor: '', workers: [], firmaWorkers: '', vivos: 0, corridas: 0, t0: 0, ronda: 0, corriendo: false, timer: null, nest: null, cfgNest: null, pintarPend: false };
+const S = { archivos: [], sec: 0, mapa: {}, piezas: [], grandes: [], cfg: cargarCfg(), recortes: cargarRecortes(), recNest: [], perfiles: cargarPerfiles(), gcodeCache: new Map(), mejor: null, firmaMejor: '', workers: [], firmaWorkers: '', vivos: 0, corridas: 0, t0: 0, ronda: 0, corriendo: false, timer: null, nest: null, cfgNest: null, pintarPend: false };
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const fmt = (n, d = 0) => Number(n).toLocaleString('es-AR', { minimumFractionDigits: d, maximumFractionDigits: d });
@@ -439,6 +470,29 @@ function dentro(pt, poly) {
 function muestras(pts, n) { const out = []; const k = Math.min(n, pts.length); for (let i = 0; i < k; i++) out.push(pts[Math.floor(i * pts.length / k)]); return out; }
 const seTocan = (a, b) => !(a.x1 < b.x0 || b.x1 < a.x0 || a.y1 < b.y0 || b.y1 < a.y0);
 const cajaParecida = (a, b, t) => Math.abs(a.x0 - b.x0) < t && Math.abs(a.y0 - b.y0) < t && Math.abs(a.x1 - b.x1) < t && Math.abs(a.y1 - b.y1) < t;
+function distBorde(p, poly) {
+  let m = Infinity;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const ax = poly[j][0], ay = poly[j][1], vx = poly[i][0] - ax, vy = poly[i][1] - ay, L = vx * vx + vy * vy;
+    let t = L ? ((p[0] - ax) * vx + (p[1] - ay) * vy) / L : 0; t = Math.max(0, Math.min(1, t));
+    const d = Math.hypot(p[0] - ax - t * vx, p[1] - ay - t * vy); if (d < m) m = d;
+  }
+  return m;
+}
+// Trazo expandido: un trazo alineado por dentro o por fuera Illustrator lo escribe en el PDF como un relleno con dos bordes
+// (un anillo del ancho del trazo). Si el borde de adentro va parejo al de afuera a 12 mm o menos, es eso y no una pieza con
+// un hueco. Emma alinea el trazo rojo por dentro: el borde de afuera coincide exacto con la base (25-oct, semana 47).
+function anillo(subs) {
+  if (subs.length !== 2 || !subs[0].cerrado || !subs[1].cerrado) return null;
+  let A = { pts: subs[0].pts, area: areaPts(subs[0].pts) }, B = { pts: subs[1].pts, area: areaPts(subs[1].pts) };
+  if (A.area < B.area) { const t = A; A = B; B = t; }
+  A.bb = caja(A.pts); B.bb = caja(B.pts);
+  if (!contiene(A, B)) return null;
+  const d = muestras(B.pts, 24).map((p) => distBorde(p, A.pts)).sort((u, v) => u - v), med = d[Math.floor(d.length / 2)];
+  if (!(med > 0.05 && med <= 12)) return null;
+  const parejos = d.filter((x) => Math.abs(x - med) <= Math.max(0.3, 0.25 * med)).length;
+  return parejos >= 0.8 * d.length ? { ancho: med, afuera: A.pts, adentro: B.pts } : null;
+}
 function contiene(A, B) {
   if (B.bb.x0 < A.bb.x0 - 0.01 || B.bb.x1 > A.bb.x1 + 0.01 || B.bb.y0 < A.bb.y0 - 0.01 || B.bb.y1 > A.bb.y1 + 0.01) return false;
   const mu = muestras(B.pts, 7); let d = 0;
@@ -452,12 +506,18 @@ function armar() {
   const piezas = [];
   for (const a of S.archivos) {
     if (a.estado !== 'ok') continue;
-    const r = a.res = { piezas: 0, calados: 0, agujeros: 0, sueltos: 0, abiertosSueltos: 0, cerrados: 0, repetidos: 0, chicos: 0, fondos: 0, ignorados: 0 };
+    const r = a.res = { piezas: 0, calados: 0, agujeros: 0, sueltos: 0, abiertosSueltos: 0, cerrados: 0, repetidos: 0, chicos: 0, fondos: 0, ignorados: 0, anillos: 0 };
     for (const pg of a.paginas) {
       const cortes = [], abiertos = [], detalles = [], ignorados = [];
       for (const el of pg.els) {
         const { cl, porTrazo } = claseDe(el);
-        for (const s of el.subs) {
+        let subs = el.subs;
+        if (cl !== 'ignorar' && !porTrazo) {
+          const an = anillo(subs);
+          if (an && cl === 'corte') { subs = [{ pts: an.afuera, cerrado: true, lw: 0 }]; r.anillos++; }
+          else if (an && cl === 'calado') { const lz = NestGcode.desplazar(an.afuera, -an.ancho / 2); if (lz.length) { subs = lz.map((p) => ({ pts: p, cerrado: true, lw: an.ancho })); r.anillos++; } }
+        }
+        for (const s of subs) {
           if (cl === 'ignorar') { ignorados.push(s); continue; }
           if (cl === 'corte') {
             if (s.cerrado) cortes.push(s.pts);
@@ -573,27 +633,89 @@ function dibujarLamina(cv, s) {
   ctx.fillStyle = COL.placa; ctx.fill('evenodd'); ctx.strokeStyle = '#4a5263'; ctx.lineWidth = 1; ctx.stroke();
   if (lam.tipo === 'placa') { ctx.strokeStyle = '#3b4252'; ctx.setLineDash([4, 4]); const m = S.cfgNest.margen * e; ctx.strokeRect(X(0) + m, m, lam.largo * e - 2 * m, H - 2 * m); ctx.setLineDash([]); }
   for (const c of S.mejor.coloc) if (c.hoja === s) dibujarPieza(ctx, colocada(S.piezas[c.id], c), X, Y, e);
-  if (S.verRec.has(s) && !S.corriendo) dibujarRecorrido(ctx, s, X, Y);
 }
-// Lo que va a hacer la máquina, leído del mismo código G que se baja: movimientos en el aire punteados, calado en amarillo,
-// cortes en celeste y taladros como puntos azules.
-function dibujarRecorrido(ctx, s, X, Y) {
-  const tr = NestGcode.leer(gcodeLamina(s).texto), cal = -(+perfilActual().calado.final || 0) - 0.001;
-  ctx.save();
-  ctx.lineWidth = 1; ctx.setLineDash([3, 3]); ctx.strokeStyle = 'rgba(154,164,184,.55)';
-  ctx.beginPath(); for (const t of tr) if (t.rapido && (t.a[0] !== t.b[0] || t.a[1] !== t.b[1])) { ctx.moveTo(X(t.a[0]), Y(t.a[1])); ctx.lineTo(X(t.b[0]), Y(t.b[1])); } ctx.stroke();
-  ctx.setLineDash([]); ctx.lineWidth = 1.4;
-  for (const [hondo, color] of [[false, '#facc15'], [true, '#22d3ee']]) {
-    ctx.strokeStyle = color; ctx.beginPath();
-    for (const t of tr) if (!t.rapido && (t.a[0] !== t.b[0] || t.a[1] !== t.b[1]) && (t.b[2] < cal) === hondo) { ctx.moveTo(X(t.a[0]), Y(t.a[1])); ctx.lineTo(X(t.b[0]), Y(t.b[1])); }
-    ctx.stroke();
+
+// ───────────── animación del recorrido ─────────────
+// "Ver recorrido" abre un reproductor: la fresa recorre el mismo código G que se baja, con el tiempo de máquina simulado
+// (aceleraciones incluidas). Lo hecho queda dibujado: calado en amarillo, cortes en celeste, taladros en azul y los
+// movimientos en el aire punteados.
+const AN = { s: null, sim: null, t: 0, play: false, vel: 60, k: 0, ult: 0, raf: 0, base: null, rastro: null, W: 0, H: 0, e: 1, ox: 0, dpr: 1, cal: -1, arrastrando: false };
+const VELS = [5, 10, 20, 30, 60, 120, 300, 600];
+const fmtReloj = (s) => { s = Math.max(0, Math.round(s)); const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = s % 60; return (h ? h + ':' + String(m).padStart(2, '0') : String(m)) + ':' + String(x).padStart(2, '0'); };
+const fmtDur = (s) => { const m = Math.max(1, Math.round(s / 60)); return m < 60 ? m + ' min' : Math.floor(m / 60) + ' h ' + String(m % 60).padStart(2, '0') + ' min'; };
+const anX = (x) => AN.ox + x * AN.e, anY = (y) => AN.H - y * AN.e;
+function abrirAnimacion(s) {
+  const g = gcodeLamina(s);
+  AN.s = s; AN.sim = g.sim; AN.t = 0; AN.k = 0; AN.play = true;
+  AN.cal = -(+perfilActual().calado.final || 0) - 0.001;
+  // velocidad para ver la lámina entera en unos 30 segundos
+  const objetivo = AN.sim.total / 30;
+  AN.vel = VELS.reduce((m, v) => (Math.abs(v - objetivo) < Math.abs(m - objetivo) ? v : m), 60);
+  $('an-vel').innerHTML = VELS.map((v) => `<option value="${v}"${v === AN.vel ? ' selected' : ''}>×${v}</option>`).join('');
+  $('an-titulo').textContent = 'Recorrido · ' + laminaInfo(s).titulo;
+  $('anim').hidden = false; document.body.style.overflow = 'hidden';
+  prepararAnimacion();
+  AN.ult = performance.now(); cancelAnimationFrame(AN.raf); AN.raf = requestAnimationFrame(cuadroAnim);
+}
+function cerrarAnimacion() { $('anim').hidden = true; document.body.style.overflow = ''; cancelAnimationFrame(AN.raf); AN.play = false; }
+function prepararAnimacion() {
+  const cv = $('an-cv'), lam = laminaInfo(AN.s);
+  const W = cv.parentElement.clientWidth || 900, Hmax = Math.max(220, window.innerHeight - 200);
+  let e = W / lam.largo, H = Math.round(lam.ancho * e);
+  if (H > Hmax) { H = Hmax; e = H / lam.ancho; }
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  Object.assign(AN, { W, H, e, ox: (W - lam.largo * e) / 2, dpr, k: 0 });
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); cv.style.height = H + 'px';
+  const lienzo = () => { const c = document.createElement('canvas'); c.width = cv.width; c.height = cv.height; c.getContext('2d').setTransform(dpr, 0, 0, dpr, 0, 0); return c; };
+  AN.base = lienzo(); AN.rastro = lienzo();
+  const ctx = AN.base.getContext('2d');
+  ctx.fillStyle = COL.fondo; ctx.fillRect(0, 0, W, H);
+  ctx.beginPath(); for (const rg of lam.rings) trazar(ctx, rg, anX, anY, true);
+  ctx.fillStyle = COL.placa; ctx.fill('evenodd'); ctx.strokeStyle = '#4a5263'; ctx.lineWidth = 1; ctx.stroke();
+  ctx.globalAlpha = 0.45;
+  for (const c of S.mejor.coloc) if (c.hoja === AN.s) dibujarPieza(ctx, colocada(S.piezas[c.id], c), anX, anY, e);
+  ctx.globalAlpha = 1;
+}
+// Un tramo del recorrido; hasta = punto donde va la fresa si el tramo está a medio hacer.
+function trazoAnim(ctx, t, hasta) {
+  const b = hasta || t.b;
+  if (t.a[0] === b[0] && t.a[1] === b[1]) {
+    if (!hasta && !t.rapido && t.op === 'Agujeros' && t.b[2] < t.a[2]) { ctx.fillStyle = '#4d8dff'; ctx.beginPath(); ctx.arc(anX(b[0]), anY(b[1]), Math.max(2, 3 * AN.e), 0, 2 * Math.PI); ctx.fill(); }
+    return;
   }
-  ctx.fillStyle = '#4d8dff';
-  for (let i = 0; i + 1 < tr.length; i++) {
-    const t = tr[i], u = tr[i + 1];
-    if (!t.rapido && t.a[0] === t.b[0] && t.a[1] === t.b[1] && t.b[2] < t.a[2] && u.rapido && u.b[2] > t.b[2] && u.a[0] === u.b[0] && u.a[1] === u.b[1]) { ctx.beginPath(); ctx.arc(X(t.b[0]), Y(t.b[1]), 2.5, 0, 2 * Math.PI); ctx.fill(); }
+  ctx.beginPath(); ctx.moveTo(anX(t.a[0]), anY(t.a[1])); ctx.lineTo(anX(b[0]), anY(b[1]));
+  if (t.rapido) { ctx.setLineDash([3, 3]); ctx.strokeStyle = 'rgba(154,164,184,.5)'; ctx.lineWidth = 1; }
+  else { ctx.setLineDash([]); ctx.strokeStyle = t.b[2] < AN.cal ? '#22d3ee' : '#facc15'; ctx.lineWidth = 1.5; }
+  ctx.stroke(); ctx.setLineDash([]);
+}
+function cuadroAnim(ahora) {
+  const dt = Math.min(0.1, (ahora - AN.ult) / 1000); AN.ult = ahora;
+  if (AN.play) { AN.t += dt * AN.vel; if (AN.t >= AN.sim.total) { AN.t = AN.sim.total; AN.play = false; } }
+  pintarAnim();
+  if (!$('anim').hidden) AN.raf = requestAnimationFrame(cuadroAnim);
+}
+function pintarAnim() {
+  const tr = AN.sim.tramos, rc = AN.rastro.getContext('2d');
+  if (AN.k > 0 && tr[AN.k - 1].t1 > AN.t) { rc.save(); rc.setTransform(1, 0, 0, 1, 0, 0); rc.clearRect(0, 0, AN.rastro.width, AN.rastro.height); rc.restore(); AN.k = 0; }
+  while (AN.k < tr.length && tr[AN.k].t1 <= AN.t) trazoAnim(rc, tr[AN.k++]);
+  const ctx = $('an-cv').getContext('2d');
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(AN.base, 0, 0); ctx.drawImage(AN.rastro, 0, 0);
+  ctx.setTransform(AN.dpr, 0, 0, AN.dpr, 0, 0);
+  let pos = tr.length ? tr[tr.length - 1].b : [0, 0, 0], op = '';
+  const fin = AN.t >= AN.sim.total;
+  if (AN.k < tr.length) {
+    const t = tr[AN.k], u = t.t1 > t.t0 ? Math.max(0, Math.min(1, (AN.t - t.t0) / (t.t1 - t.t0))) : 1;
+    pos = [t.a[0] + (t.b[0] - t.a[0]) * u, t.a[1] + (t.b[1] - t.a[1]) * u, t.a[2] + (t.b[2] - t.a[2]) * u];
+    trazoAnim(ctx, t, pos); op = t.op;
   }
-  ctx.restore();
+  const r = Math.max(3, perfilActual().fresa / 2 * AN.e);
+  ctx.beginPath(); ctx.arc(anX(pos[0]), anY(pos[1]), r, 0, 2 * Math.PI);
+  if (pos[2] < -0.001) { ctx.fillStyle = 'rgba(34,211,238,.55)'; ctx.fill(); }
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
+  $('an-t').textContent = fmtReloj(AN.t) + ' / ' + fmtReloj(AN.sim.total);
+  $('an-op').textContent = fin ? 'Terminado' : (op || 'Arrancando') + ' · Z ' + pos[2].toFixed(1) + ' mm';
+  if (!AN.arrastrando) $('an-pos').value = String(Math.round(1000 * AN.t / Math.max(1e-9, AN.sim.total)));
+  $('an-play').textContent = AN.play ? '⏸ Pausa' : (fin ? '↺ De nuevo' : '▶ Seguir');
 }
 function dibujarRings(cv, rings, largo, ancho, W, H) {
   const ctx = prepararCanvas(cv, W, H);
@@ -629,6 +751,7 @@ function avisosArchivos() {
     if (r.sueltos) out.push({ grave: true, t: `${n}: ${p(r.sueltos, 'calado o agujero quedó', 'calados o agujeros quedaron')} fuera de toda pieza (en naranja). No se van a cortar.` });
     if (r.abiertosSueltos) out.push({ grave: true, t: `${n}: ${p(r.abiertosSueltos, 'línea roja no cierra', 'líneas rojas no cierran')} y no está adentro de ninguna pieza (en naranja). No se acomoda.` });
     if (r.cerrados) out.push({ t: `${n}: ${p(r.cerrados, 'contorno rojo no cerraba', 'contornos rojos no cerraban')} por menos de 2 mm; se ${r.cerrados === 1 ? 'cerró' : 'cerraron'}.` });
+    if (r.anillos) out.push({ t: `${n}: ${p(r.anillos, 'línea venía', 'líneas venían')} como trazo grueso alineado por dentro o por fuera (en el PDF queda un relleno de dos bordes): el corte toma el borde de afuera y el calado, la línea del medio.` });
     if (r.repetidos) out.push({ t: `${n}: ${p(r.repetidos, 'contorno estaba repetido', 'contornos estaban repetidos')} uno encima del otro; se ${r.repetidos === 1 ? 'tomó' : 'tomaron'} una sola vez.` });
     if (a.textos) out.push({ grave: true, t: `${n}: tiene textos sin pasar a contornos; no se cortan. En Illustrator: Texto › Crear contornos.` });
     if (a.imagenes) out.push({ t: `${n}: tiene ${p(a.imagenes, 'imagen', 'imágenes')}; se ${a.imagenes === 1 ? 'ignora' : 'ignoran'}.` });
@@ -661,7 +784,7 @@ function pintarPiezas() {
 function pintarTodo() { armar(); pintarArchivos(); pintarColores(); pintarPiezas(); }
 function invalidarResultado(msg) {
   detenerWorkers();
-  S.mejor = null; S.firmaMejor = ''; S.gcodeCache = new Map(); S.verRec = new Set();
+  S.mejor = null; S.firmaMejor = ''; S.gcodeCache = new Map();
   $('sec-resultado').hidden = true; $('sec-gcode').hidden = true;
   $('cfg-nota').textContent = msg || '';
 }
@@ -765,7 +888,10 @@ function textoEstado() {
   if (recUs.length) partes.push(`${recUs.length} recorte${recUs.length === 1 ? '' : 's'}`);
   if (r.nuevas || !recUs.length) partes.push(`${r.nuevas} placa${r.nuevas === 1 ? '' : 's'}`);
   const base = `<b>${partes.join(' y ')}</b>${r.nuevas ? `, la última usa ${fmt(ult / 10, 0)} cm de los ${fmt(cfg.largo / 10, 0)}` : ''} · aprovechamiento ${fmt(apr, 1)} %`;
-  return S.corriendo ? `Buscando… ${S.corridas} vuelta${S.corridas === 1 ? '' : 's'} probada${S.corridas === 1 ? '' : 's'} · por ahora: ${base}` : `Listo: ${base}`;
+  if (S.corriendo) return `Buscando… ${S.corridas} vuelta${S.corridas === 1 ? '' : 's'} probada${S.corridas === 1 ? '' : 's'} · por ahora: ${base}`;
+  let tot = '';
+  try { tot = ` · <b>≈ ${fmtDur(r.usadas.reduce((acc, k) => acc + gcodeLamina(k).segundos, 0))} de máquina</b> en total`; } catch (e) { console.error(e); }
+  return `Listo: ${base}${tot}`;
 }
 function pintarEstado() {
   $('estado').innerHTML = textoEstado();
@@ -797,7 +923,7 @@ function pintarResultado() {
       // Tiempo de máquina estimado y lo que el código G no puede hacer con esta fresa.
       let g = null; try { g = gcodeLamina(s); } catch (e) { console.error(e); }
       if (g) {
-        extra = `<span class="tiempo">≈ ${fmt(Math.max(1, Math.round(g.segundos / 60)), 0)} min de máquina</span>`;
+        extra = `<span class="tiempo">≈ ${fmtDur(g.segundos)} de máquina</span>`;
         const a = g.avisos, fr = fmt(perfilActual().fresa, 1), t = [];
         if (a.huecosChicos) t.push(`${a.huecosChicos} corte${a.huecosChicos === 1 ? '' : 's'} de adentro más chico${a.huecosChicos === 1 ? '' : 's'} que la fresa: no se ${a.huecosChicos === 1 ? 'corta' : 'cortan'}`);
         if (a.agujerosChicos) t.push(`${a.agujerosChicos} agujero${a.agujerosChicos === 1 ? '' : 's'} de menos de ${fr} mm: ${a.agujerosChicos === 1 ? 'queda' : 'quedan'} de ${fr}`);
@@ -805,7 +931,7 @@ function pintarResultado() {
       }
     }
     const d = document.createElement('div'); d.className = 'vista placa';
-    d.innerHTML = `<div class="cap"><b>${esc(lam.titulo)}</b><span class="sutil">${cs.length} pieza${cs.length === 1 ? '' : 's'} · ${fmt(100 * area / lam.area, 0)} % ${lam.tipo === 'recorte' ? 'del recorte' : 'de la placa'} con piezas</span>${extra}<button class="chico" data-sobrante="${s}"${dis} title="Guarda lo que sobra de esta lámina como recorte del taller">Guardar sobrante</button><button class="chico" data-ver="${s}"${dis}>${S.verRec.has(s) ? 'Ocultar recorrido' : 'Ver recorrido'}</button><button class="chico" data-dxf="${s}"${dis}>DXF</button><button class="chico" data-gcode="${s}"${dis}>Código G</button></div><canvas></canvas>${S.verRec.has(s) && !S.corriendo ? '<div class="leyenda-g"><span><i style="background:#facc15"></i>calado</span><span><i style="background:#22d3ee"></i>corte y agujeros grandes</span><span><i style="background:#4d8dff"></i>taladros</span><span><i style="background:repeating-linear-gradient(90deg,#9aa4b8 0 3px,transparent 3px 6px)"></i>movimientos en el aire</span></div>' : ''}`;
+    d.innerHTML = `<div class="cap"><b>${esc(lam.titulo)}</b><span class="sutil">${cs.length} pieza${cs.length === 1 ? '' : 's'} · ${fmt(100 * area / lam.area, 0)} % ${lam.tipo === 'recorte' ? 'del recorte' : 'de la placa'} con piezas</span>${extra}<button class="chico" data-sobrante="${s}"${dis} title="Guarda lo que sobra de esta lámina como recorte del taller">Guardar sobrante</button><button class="chico" data-ver="${s}"${dis}>Ver recorrido</button><button class="chico" data-dxf="${s}"${dis}>DXF</button><button class="chico" data-gcode="${s}"${dis}>Código G</button></div><canvas></canvas>`;
     cont.appendChild(d);
     dibujarLamina(d.querySelector('canvas'), s);
   }
@@ -822,44 +948,54 @@ function circulo(pts) {
 }
 function dxfPlaca(h) {
   const cfg = S.cfgNest, lam = laminaInfo(h), L = [];
-  const g = (c, v) => { L.push(String(c).padStart(3, ' '), String(v)); };
+  const g = (dest, c, v) => { dest.push(String(c).padStart(3, ' '), String(v)); };
   const n = (v) => (Math.round(v * 1000) / 1000 || 0).toFixed(3);
-  g(0, 'SECTION'); g(2, 'HEADER');
-  g(9, '$ACADVER'); g(1, 'AC1009');
-  g(9, '$INSBASE'); g(10, '0.000'); g(20, '0.000'); g(30, '0.000');
-  g(9, '$EXTMIN'); g(10, '0.000'); g(20, '0.000'); g(30, '0.000');
-  g(9, '$EXTMAX'); g(10, n(lam.largo)); g(20, n(lam.ancho)); g(30, '0.000');
-  g(9, '$INSUNITS'); g(70, 4);
-  g(9, '$MEASUREMENT'); g(70, 1);
-  g(0, 'ENDSEC');
-  g(0, 'SECTION'); g(2, 'TABLES');
-  g(0, 'TABLE'); g(2, 'LTYPE'); g(70, 1);
-  g(0, 'LTYPE'); g(2, 'CONTINUOUS'); g(70, 0); g(3, 'Solid line'); g(72, 65); g(73, 0); g(40, '0.000');
-  g(0, 'ENDTAB');
-  const capas = [['PLACA', 8], ['CORTE', 1], ['CALADO', 7], ['AGUJEROS', 5]];
-  g(0, 'TABLE'); g(2, 'LAYER'); g(70, capas.length);
-  for (const [nom, col] of capas) { g(0, 'LAYER'); g(2, nom); g(70, 0); g(62, col); g(6, 'CONTINUOUS'); }
-  g(0, 'ENDTAB');
-  g(0, 'ENDSEC');
-  g(0, 'SECTION'); g(2, 'ENTITIES');
-  const poli = (capa, pts, cerrada) => {
+  const poli = (dest, capa, pts, cerrada) => {
     if (pts.length < 2) return;
-    g(0, 'POLYLINE'); g(8, capa); g(66, 1); g(10, '0.000'); g(20, '0.000'); g(30, '0.000'); g(70, cerrada ? 1 : 0);
-    for (const [x, y] of pts) { g(0, 'VERTEX'); g(8, capa); g(10, n(x)); g(20, n(y)); g(30, '0.000'); }
-    g(0, 'SEQEND'); g(8, capa);
+    g(dest, 0, 'POLYLINE'); g(dest, 8, capa); g(dest, 66, 1); g(dest, 10, '0.000'); g(dest, 20, '0.000'); g(dest, 30, '0.000'); g(dest, 70, cerrada ? 1 : 0);
+    for (const [x, y] of pts) { g(dest, 0, 'VERTEX'); g(dest, 8, capa); g(dest, 10, n(x)); g(dest, 20, n(y)); g(dest, 30, '0.000'); }
+    g(dest, 0, 'SEQEND'); g(dest, 8, capa);
   };
-  if (cfg.borde) for (const rg of lam.rings) poli('PLACA', rg, true); // en un recorte: su contorno (y sus huecos)
+  // Un bloque por grupo (cada uno en su capa), en orden de mecanizado: calados, agujeros y cortes (los de adentro primero).
   const geos = S.mejor.coloc.filter((c) => c.hoja === h).map((c) => colocada(S.piezas[c.id], c));
-  // Orden de mecanizado: calados, agujeros, cortes de adentro y al final los contornos (la pieza se suelta última).
-  for (const q of geos) for (const s of q.calados) poli('CALADO', s.pts, s.cerrado);
-  for (const q of geos) for (const s of q.agujeros) {
-    const ci = s.cerrado && circulo(s.pts);
-    if (ci) { g(0, 'CIRCLE'); g(8, 'AGUJEROS'); g(10, n(ci.cx)); g(20, n(ci.cy)); g(30, '0.000'); g(40, n(ci.r)); }
-    else poli('AGUJEROS', s.pts, s.cerrado);
+  const bl = { CALADO: [], AGUJEROS: [], CORTE: [] };
+  for (const q of geos) for (const t of q.calados) poli(bl.CALADO, 'CALADO', t.pts, t.cerrado);
+  for (const q of geos) for (const t of q.agujeros) {
+    const ci = t.cerrado && circulo(t.pts);
+    if (ci) { g(bl.AGUJEROS, 0, 'CIRCLE'); g(bl.AGUJEROS, 8, 'AGUJEROS'); g(bl.AGUJEROS, 10, n(ci.cx)); g(bl.AGUJEROS, 20, n(ci.cy)); g(bl.AGUJEROS, 30, '0.000'); g(bl.AGUJEROS, 40, n(ci.r)); }
+    else poli(bl.AGUJEROS, 'AGUJEROS', t.pts, t.cerrado);
   }
-  for (const q of geos) { for (const p of q.huecos) poli('CORTE', p, true); for (const p of q.abiertos) poli('CORTE', p, false); }
-  for (const q of geos) poli('CORTE', q.poly, true);
-  g(0, 'ENDSEC'); g(0, 'EOF');
+  for (const q of geos) { for (const p of q.huecos) poli(bl.CORTE, 'CORTE', p, true); for (const p of q.abiertos) poli(bl.CORTE, 'CORTE', p, false); }
+  for (const q of geos) poli(bl.CORTE, 'CORTE', q.poly, true);
+  g(L, 0, 'SECTION'); g(L, 2, 'HEADER');
+  g(L, 9, '$ACADVER'); g(L, 1, 'AC1009');
+  g(L, 9, '$INSBASE'); g(L, 10, '0.000'); g(L, 20, '0.000'); g(L, 30, '0.000');
+  g(L, 9, '$EXTMIN'); g(L, 10, '0.000'); g(L, 20, '0.000'); g(L, 30, '0.000');
+  g(L, 9, '$EXTMAX'); g(L, 10, n(lam.largo)); g(L, 20, n(lam.ancho)); g(L, 30, '0.000');
+  g(L, 9, '$INSUNITS'); g(L, 70, 4);
+  g(L, 9, '$MEASUREMENT'); g(L, 70, 1);
+  g(L, 0, 'ENDSEC');
+  g(L, 0, 'SECTION'); g(L, 2, 'TABLES');
+  g(L, 0, 'TABLE'); g(L, 2, 'LTYPE'); g(L, 70, 1);
+  g(L, 0, 'LTYPE'); g(L, 2, 'CONTINUOUS'); g(L, 70, 0); g(L, 3, 'Solid line'); g(L, 72, 65); g(L, 73, 0); g(L, 40, '0.000');
+  g(L, 0, 'ENDTAB');
+  const capas = [['0', 7], ['PLACA', 8], ['CORTE', 1], ['CALADO', 7], ['AGUJEROS', 5]];
+  g(L, 0, 'TABLE'); g(L, 2, 'LAYER'); g(L, 70, capas.length);
+  for (const [nom, col] of capas) { g(L, 0, 'LAYER'); g(L, 2, nom); g(L, 70, 0); g(L, 62, col); g(L, 6, 'CONTINUOUS'); }
+  g(L, 0, 'ENDTAB');
+  g(L, 0, 'ENDSEC');
+  const nombres = Object.keys(bl).filter((k) => bl[k].length);
+  g(L, 0, 'SECTION'); g(L, 2, 'BLOCKS');
+  for (const nom of nombres) {
+    g(L, 0, 'BLOCK'); g(L, 8, '0'); g(L, 2, nom); g(L, 70, 0); g(L, 10, '0.000'); g(L, 20, '0.000'); g(L, 30, '0.000'); g(L, 3, nom);
+    for (const x of bl[nom]) L.push(x);
+    g(L, 0, 'ENDBLK'); g(L, 8, '0');
+  }
+  g(L, 0, 'ENDSEC');
+  g(L, 0, 'SECTION'); g(L, 2, 'ENTITIES');
+  if (cfg.borde) for (const rg of lam.rings) poli(L, 'PLACA', rg, true); // en un recorte: su contorno (y sus huecos)
+  for (const nom of nombres) { g(L, 0, 'INSERT'); g(L, 8, nom); g(L, 2, nom); g(L, 10, '0.000'); g(L, 20, '0.000'); g(L, 30, '0.000'); }
+  g(L, 0, 'ENDSEC'); g(L, 0, 'EOF');
   return L.join('\r\n') + '\r\n';
 }
 const CRC = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
@@ -946,6 +1082,11 @@ function gcodeLamina(s) {
   if (!g) {
     const lam = laminaInfo(s), geos = S.mejor.coloc.filter((c) => c.hoja === s).map((c) => colocada(S.piezas[c.id], c));
     g = NestGcode.escribir(NestGcode.recorridos(geos, p), p, { titulo: lam.titulo + ' - ' + nombreBase(), largo: lam.largo, ancho: lam.ancho });
+    // Tiempo con aceleración (el mismo que usa la animación), por el ajuste que se calibra con un corte de verdad.
+    g.sim = NestGcode.simular(g.texto, p);
+    const f = (+p.ajuste > 0 ? +p.ajuste : 100) / 100;
+    if (f !== 1) { for (const t of g.sim.tramos) { t.t0 *= f; t.t1 *= f; } g.sim.total *= f; }
+    g.segundos = g.sim.total;
     S.gcodeCache.set(clave, g);
   }
   return g;
@@ -1182,7 +1323,7 @@ $('placas').addEventListener('click', (e) => {
   const so = e.target.closest('[data-sobrante]'); if (so) guardarSobrante(parseInt(so.getAttribute('data-sobrante'), 10), so);
   const gc = e.target.closest('[data-gcode]'); if (gc) bajarGcode(parseInt(gc.getAttribute('data-gcode'), 10));
   const ve = e.target.closest('[data-ver]');
-  if (ve) { const s = parseInt(ve.getAttribute('data-ver'), 10); if (S.verRec.has(s)) S.verRec.delete(s); else S.verRec.add(s); pintarResultado(); }
+  if (ve) abrirAnimacion(parseInt(ve.getAttribute('data-ver'), 10));
 });
 pintarPerfil();
 $('sec-gcode').addEventListener('change', (e) => {
@@ -1207,6 +1348,21 @@ $('g-borrar').addEventListener('click', () => {
   guardarPerfiles(); pintarPerfil(); S.gcodeCache = new Map();
   if (S.mejor && !S.corriendo) pintarResultado();
 });
+$('an-cerrar').addEventListener('click', cerrarAnimacion);
+$('anim').addEventListener('click', (e) => { if (e.target.id === 'anim') cerrarAnimacion(); });
+$('an-play').addEventListener('click', () => {
+  if (AN.t >= AN.sim.total) AN.t = 0;
+  AN.play = !AN.play; AN.ult = performance.now();
+});
+$('an-pos').addEventListener('input', () => { AN.arrastrando = true; AN.t = AN.sim.total * (+$('an-pos').value) / 1000; pintarAnim(); });
+$('an-pos').addEventListener('change', () => { AN.arrastrando = false; });
+$('an-vel').addEventListener('change', () => { AN.vel = +$('an-vel').value || 60; });
+document.addEventListener('keydown', (e) => {
+  if ($('anim').hidden) return;
+  if (e.key === 'Escape') cerrarAnimacion();
+  else if (e.key === ' ' && e.target.tagName !== 'SELECT') { e.preventDefault(); $('an-play').click(); }
+});
+window.addEventListener('resize', () => { if (!$('anim').hidden) { prepararAnimacion(); pintarAnim(); } });
 pintarRecortes();
 $('b-rec-medidas').addEventListener('click', abrirFormRecorte);
 $('form-rec').addEventListener('input', vistaFormRecorte);
