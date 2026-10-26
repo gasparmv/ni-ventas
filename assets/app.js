@@ -5329,7 +5329,10 @@ function renderCorte() {
   const pedidosAlum = pedidos.filter(p => p.producto !== 'NEON' && !(p.origen === 'landing' && !p.tanda_id));
   // Navegador de semanas (como un calendario): cada tanda es una semana. Slidear ‹ (más vieja) / › (más nueva).
   const tandaMap = {};
-  pedidosAlum.forEach(p => { const t = +p.tanda_id || 0; const f = p.created_at || ''; if (!tandaMap[t]) tandaMap[t] = { id: t, fecha: f }; else if (f && (!tandaMap[t].fecha || f < tandaMap[t].fecha)) tandaMap[t].fecha = f; });
+  // La semana se nombra por el lunes del corte (hoja_fecha de sus piezas, ej. 26/10), no por la primera pieza cargada: los pedidos
+  // web entran desde el martes anterior y la tanda del 26/10 figuraba como '21/10' (Gaspar 26-oct).
+  const lunesCorte = p => { const m = String(p.hoja_fecha || '').match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/); return m ? m[3] + '-' + m[2].padStart(2, '0') + '-' + m[1].padStart(2, '0') : ''; };
+  pedidosAlum.forEach(p => { const t = +p.tanda_id || 0; const f = p.created_at || '', lc = lunesCorte(p); if (!tandaMap[t]) tandaMap[t] = { id: t, fecha: f, corte: lc }; else { if (f && (!tandaMap[t].fecha || f < tandaMap[t].fecha)) tandaMap[t].fecha = f; if (lc && lc > (tandaMap[t].corte || '')) tandaMap[t].corte = lc; } });
   const tandas = Object.values(tandaMap).sort((a, b) => b.id - a.id); // más nueva primero
   let curIdx = tandas.findIndex(t => t.id === STATE.corteTandaSel);
   if (curIdx < 0) curIdx = 0; // por defecto la semana actual (la más nueva)
@@ -5341,7 +5344,7 @@ function renderCorte() {
       ${arrowBtn('prev', curIdx < tandas.length - 1 ? tandas[curIdx + 1].id : null)}
       <div style="text-align:center;min-width:110px">
         <div style="font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--fg-subtle)">Semana${curIdx === 0 ? ' actual' : ''}</div>
-        <div style="font-size:16px;font-weight:800;font-variant-numeric:tabular-nums">${fmtFecha(selTanda && selTanda.fecha) || ('#' + (selTanda ? selTanda.id : '?'))}</div>
+        <div style="font-size:16px;font-weight:800;font-variant-numeric:tabular-nums">${fmtFecha(selTanda && (selTanda.corte || selTanda.fecha)) || ('#' + (selTanda ? selTanda.id : '?'))}</div>
       </div>
       ${arrowBtn('next', curIdx > 0 ? tandas[curIdx - 1].id : null)}
     </div>` : '';
