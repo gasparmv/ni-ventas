@@ -9357,8 +9357,10 @@ async function corteExpressLiberar(env, ahora) {
   // Aviso a Neyen por WhatsApp (lun a sáb de 8 a 19 AR; fuera de horario sale en la próxima franja).
   const ar = new Date(ahora - 3 * 3600000);
   if (ar.getUTCDay() === 0 || ar.getUTCHours() < 8 || ar.getUTCHours() >= 19) return;
-  const avisos = (await env.DB.prepare("SELECT id, nombre_hoja, entrega, piezas_ids FROM corte_landing_envios WHERE express_liberado_at IS NOT NULL AND express_aviso_at IS NULL ORDER BY id LIMIT 10").all()).results || [];
+  const avisos = (await env.DB.prepare("SELECT id, telefono, nombre_hoja, entrega, piezas_ids FROM corte_landing_envios WHERE express_liberado_at IS NOT NULL AND express_aviso_at IS NULL ORDER BY id LIMIT 10").all()).results || [];
+  const frenosEx = avisos.length ? await corteFrenosAbiertosOFail(env) : new Map();
   for (const e of avisos) {
+    if (e.telefono && frenosEx.has(String(e.telefono))) continue; // frenado (frenos del corte): el "para despachar hoy" sale cuando Gaspar lo libere
     let res = null;
     const nowIso = new Date().toISOString();
     try { res = await env.DB.prepare("UPDATE corte_landing_envios SET express_aviso_at=? WHERE id=? AND express_aviso_at IS NULL RETURNING id").bind(nowIso, e.id).first(); } catch (_) {}
@@ -10544,6 +10546,10 @@ async function logisticaArmar(env, tanda, opts = {}) {
   // Sin la deuda no se arma la lista (500 y el front conserva la anterior): antes salían TODOS como "Pedido impago" y el
   // botón de WhatsApp le decía "nos figura pendiente de pago" a clientes que ya pagaron. Despachar tampoco se puede.
   if (deuda === null) throw new Error('deuda');
+  // Frenos del corte (kv corte_freno_on): un cliente con algo pendiente de Gaspar (pidió sumar algo, diferencia de plata) no se
+  // despacha. Igual que la deuda: si no se puede leer, no se arma la lista (nunca despachar a ciegas).
+  let frenosMap;
+  try { frenosMap = await corteFrenosAbiertos(env); } catch (_) { throw new Error('frenos'); }
   let ltvRows = null, ltvError = '';
   if (opts.conDirecciones) { const l = await corteLtvCached(env); if (l.ok) { ltvRows = l.rows; ltvError = l.stale ? l.error : ''; } else ltvError = l.error; }
   const grupos = {};
@@ -10589,7 +10595,9 @@ async function logisticaArmar(env, tanda, opts = {}) {
     const ests = new Set(pend.map(p => p.estado));
     const estado = despachado ? 'despachado' : ((pend.length && [...ests].every(e => e === 'embalado')) ? 'embalado' : (ests.has('embalado') ? 'parcial' : 'para embalar'));
     let bloqueo = null;
-    if (!despachado) { if (!pedidoPagado) bloqueo = 'Pedido impago'; else if (entrega === 'sin definir') bloqueo = 'Entrega sin definir'; else if (!envioPagado) bloqueo = 'Falta pagar el envío'; }
+    // Frenado tiene prioridad (sin montos ni lo que dijo el cliente: logística es un usuario externo).
+    const frenado = !despachado && !!c.telefono && frenosMap.has(String(c.telefono));
+    if (!despachado) { if (frenado) bloqueo = 'Frenado por Neon: esperá el OK de Gaspar'; else if (!pedidoPagado) bloqueo = 'Pedido impago'; else if (entrega === 'sin definir') bloqueo = 'Entrega sin definir'; else if (!envioPagado) bloqueo = 'Falta pagar el envío'; }
     const arrP = pend.filter(p => p._arrastre).sort((a, b) => a.tanda_id - b.tanda_id);
     // Pago de las piezas del paquete (sin montos): las de $0 no cuentan (nunca se cobran y trababan el paquete para siempre).
     const pagos = new Set(logi.filter(p => Number(p.precio) > 0).map(p => p.estado_pago || 'pendiente'));
@@ -10622,7 +10630,7 @@ async function logisticaArmar(env, tanda, opts = {}) {
       contacto_estado: contactoEstado, contacto_at: (her ? her.contacto_at : mkCur.contacto_at) || null, intentos: +mkCur.intentos || 0,
       envio_pagado: envioPagado, envio_pagado_at: (her ? her.envio_pagado_at : mkCur.envio_pagado_at) || null,
       pedido_pagado: pedidoPagado,
-      listo: pedidoPagado && envioPagado && entrega === 'envio' && pend.length > 0,
+      listo: pedidoPagado && envioPagado && entrega === 'envio' && pend.length > 0 && !frenado,
       bloqueo,
       arrastre: arrP.length ? arrP[0]._arrastre : null,
       express: !despachado && pend.some(p => +p.express === 1), // insumos exprés ya pagados: sale hoy
@@ -32698,6 +32706,7 @@ const handler = {
         if (!rows.length) return json({ error: 'nada', motivo: 'No hay piezas para entregar' }, 409);
         const deuda = await corteDeudaKeys(env);
         if (corteTieneDeuda(deuda, sel.key, [body.nombre, ...rows.map(r => r.cliente_nombre)])) return json({ error: 'impago', motivo: 'Falta el pago: avisale a Gaspar' }, 409);
+        if (sel.tel && (await corteFrenosAbiertosOFail(env)).has(sel.tel)) return json({ error: 'frenado', motivo: 'Frenado: esperá a Gaspar' }, 409); // frenos del corte
         const ids = rows.map(r => r.id);
         let n = 0;
         // Sin entrega_manual: 'entregado' ya queda fuera de la sync con la planilla, y así el "Deshacer" no deja la pieza
@@ -32835,6 +32844,9 @@ const handler = {
           if (!['admin', 'produccion'].includes(_role)) return json({ error: 'forbidden' }, 403);
           const tel = String(body.telefono || '').replace(/\D/g, '');
           if (!tel) return json({ error: 'falta telefono' }, 400);
+          // FRENO DEL CORTE (kv corte_freno_on): pidió sumar algo o hay una diferencia de plata sin resolver → no se embala hasta
+          // que Gaspar lo libere. Si no se puede leer, se embala igual (la pared de verdad es el despacho).
+          if ((await corteFrenosAbiertosOFail(env)).has(tel)) return json({ error: 'frenado', motivo: 'Frenado: esperá a Gaspar' }, 409);
           // Embalar NO toca la entrega: la única fuente es la planilla de cortes (sync). Antes mandaba 'retira' por default y
           // pisaba lo correcto (Martin Guaragna quedó "retira" yendo por envío, 5/10). Se ignora body.entrega a propósito
           // (también la de pestañas con el app.js viejo cacheado).
@@ -32850,6 +32862,22 @@ const handler = {
           if (!ids.length) return json({ error: 'sin ids' }, 400);
           if (!['pedido', 'matriz_lista', 'cortado', 'embalado', 'cobrado', 'despachado', 'entregado'].includes(est)) return json({ error: 'estado inválido' }, 400);
           if (_role !== 'admin' && !['cortado', 'embalado'].includes(est)) return json({ error: 'solo admin puede mover a ese estado' }, 403);
+          // Embalar varios: los clientes frenados (frenos del corte) quedan afuera; el resto se embala y se devuelve quiénes no.
+          let frenados = [];
+          if (est === 'embalado') {
+            const fm = await corteFrenosAbiertosOFail(env);
+            if (fm.size) {
+              let duenos = [];
+              try { duenos = (await env.DB.prepare(`SELECT id, telefono, cliente_nombre FROM corte_pedidos WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).all()).results || []; } catch (_) {}
+              const fuera = duenos.filter(p => p.telefono && fm.has(String(p.telefono)));
+              if (fuera.length) {
+                frenados = [...new Set(fuera.map(p => p.cliente_nombre || p.telefono))];
+                const sacar = new Set(fuera.map(p => p.id));
+                ids.splice(0, ids.length, ...ids.filter(x => !sacar.has(x)));
+                if (!ids.length) return json({ error: 'frenado', motivo: 'Frenado: esperá a Gaspar (' + frenados.join(', ') + ')', frenados }, 409);
+              }
+            }
+          }
           const ph = ids.map(() => '?').join(',');
           try {
             let rr;
@@ -32863,7 +32891,7 @@ const handler = {
             else { const d = _despSet(est); rr = await env.DB.prepare(`UPDATE corte_pedidos SET ${_dis}, estado=?, updated_at=?${d.sql} WHERE id IN (${ph})`).bind(est, nowIso, est, nowIso, ...d.binds, ...ids).run(); }
             if (est === 'cortado' || est === 'embalado') await neonCorteStamp(env, ids, est === 'cortado' ? 'cortado_at' : 'separado_at');
             if (est === 'embalado') await neonCorteStamp(env, ids, 'cortado_at');
-            return json({ ok: true, action, estado: est, n: (rr.meta && rr.meta.changes) || 0 });
+            return json({ ok: true, action, estado: est, n: (rr.meta && rr.meta.changes) || 0, ...(frenados.length ? { frenados, motivo: 'No embalé a ' + frenados.join(', ') + ': frenado, esperá a Gaspar' } : {}) });
           } catch (e) { return json({ error: String((e && e.message) || e) }, 500); }
         }
         // Paquete para el productor (Neyen, Gaspar 19-oct): {ids} de piezas de neón → 'entregado_prod' las deja separadas (si no
@@ -33056,6 +33084,7 @@ const handler = {
           }
           if (action === 'embalado') {
             if (!['admin', 'produccion'].includes(_role)) return json({ error: 'forbidden' }, 403);
+            if (ped.telefono && (await corteFrenosAbiertosOFail(env)).has(String(ped.telefono))) return json({ error: 'frenado', motivo: 'Frenado: esperá a Gaspar' }, 409); // frenos del corte
             // No toca la entrega (sale solo de la planilla de cortes; ver embalado_bulk).
             const d = _despSet('embalado');
             const u = await env.DB.prepare(`UPDATE corte_pedidos SET estado='embalado', updated_at=?${d.sql} WHERE id=?${_noSalidas}`).bind(nowIso, ...d.binds, id).run();
