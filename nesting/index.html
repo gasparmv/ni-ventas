@@ -281,7 +281,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" integrity="sha384-/1qUCSGwTur9vjf/z9lmu/eCUYbpOTgSjmpbMQZ1/CtX2v/WcAIKqRv+U1DUCG6e" crossorigin="anonymous"></script>
 <script src="nest-core.js?v=4"></script>
 <script src="clipper.js?v=1"></script>
-<script src="gcode.js?v=3"></script>
+<script src="gcode.js?v=4"></script>
 <script src="dxf.js?v=3"></script>
 <script>
 'use strict';
@@ -1076,7 +1076,7 @@ function pintarPiezas() {
   $('b-acomodar').disabled = S.corriendo || pend.length > 0;
   if (pend.length) { nota.textContent = `Primero elegí en el paso 1 qué hacer con los trazos sueltos de ${pend.map((a) => a.nombre).join(', ')}.`; nota.dataset.pend = '1'; }
   else if (nota.dataset.pend) { nota.textContent = ''; delete nota.dataset.pend; }
-  const total = S.piezas.reduce((s, p) => s + p.area, 0) / 1e6, placa = S.cfg.largo * S.cfg.ancho / 1e6;
+  const total = S.piezas.reduce((s, p) => s + areaNeta(p), 0) / 1e6, placa = S.cfg.largo * S.cfg.ancho / 1e6;
   const mayor = S.piezas.reduce((m, p) => Math.max(m, p.bb.x1 - p.bb.x0, p.bb.y1 - p.bb.y0), 0);
   $('resumen-piezas').innerHTML = `
     <div class="dato"><b>${fmt(S.piezas.length)}</b><span>piezas</span></div>
@@ -1127,24 +1127,34 @@ function prepararNest() {
   const recs = S.recortes.filter((r) => r.usar).sort((a, b) => b.area - a.area);
   const cajas = recs.map((r) => [r.largo, r.ancho]);
   if (cfg.enteras !== false || !recs.length) cajas.push([cfg.largo, cfg.ancho]);
-  const nest = [], grandes = [], conHuecos = [];
-  let angosta = Infinity, chica = Infinity; // lo mínimo que tendría que entrar en un hueco: el lado de la pieza más angosta (en su mejor giro) y el área más chica
+  const nest = [], grandes = [], conHuecos = [], medidas = [];
+  let chica = Infinity; // lo mínimo que tendría que entrar en un hueco: alguna pieza en algún giro (medidas) y el área más chica
   for (const pz of S.piezas) {
     if (!pz.simple) pz.simple = NestCore.simplificar(pz.poly, TOL_NEST);
-    let entra = false, lado = Infinity;
-    for (const t of angs) { const b = NestCore.bbox(NestCore.rotar(pz.simple, t)), w = b.x1 - b.x0, h = b.y1 - b.y0; lado = Math.min(lado, w, h); if (!entra) entra = cajas.some(([L, A]) => w <= L - 2 * cfg.margen - 3 && h <= A - 2 * cfg.margen - 3); }
+    let entra = false; const wh = [];
+    for (const t of angs) { const b = NestCore.bbox(NestCore.rotar(pz.simple, t)), w = b.x1 - b.x0, h = b.y1 - b.y0; wh.push([w, h]); if (!entra) entra = cajas.some(([L, A]) => w <= L - 2 * cfg.margen - 3 && h <= A - 2 * cfg.margen - 3); }
     if (!entra) { grandes.push(pz); continue; }
     const it = { id: pz.id, poly: pz.simple, simple: pz.simple, area: pz.area, neta: areaNeta(pz), huecos: [] };
-    nest.push(it); angosta = Math.min(angosta, lado); chica = Math.min(chica, pz.area);
+    nest.push(it); medidas.push(wh); chica = Math.min(chica, pz.area);
     if (pz.huecos.length) conHuecos.push([it, pz]);
   }
   // Pieza dentro de pieza (Gaspar 26-oct): los huecos (cortes de adentro) quedan libres para meter otras piezas. Solo los que
-  // podrían alojar a alguna (de lado, la más angosta con la separación alrededor; de área, la más chica): el resto sigue
-  // contando lleno y no hace más pesada la máscara.
+  // podrían alojar a alguna (su caja en algún giro, con la separación alrededor, entra en la del hueco; de área, la más chica):
+  // el resto sigue contando lleno y no hace más pesada la máscara. Tampoco los que tienen adentro (o sobre el borde) un calado,
+  // agujero o línea abierta de su pieza: la fresa los cortaría encima de lo que se meta ahí (revisión 26-oct).
+  let conDibujo = 0;
   if (cfg.adentro !== false && nest.length > 1) for (const [it, pz] of conHuecos) {
     if (!pz.simpleHuecos) pz.simpleHuecos = pz.huecos.map((h) => NestCore.simplificar(h, TOL_NEST));
-    pz.huecos.forEach((h, k) => { const b = caja(h); if (Math.min(b.x1 - b.x0, b.y1 - b.y0) >= angosta + 2 * cfg.sep && areaPts(h) >= chica) it.huecos.push(pz.simpleHuecos[k]); });
+    if (!pz.rasgoHueco) pz.rasgoHueco = [];
+    pz.huecos.forEach((h, k) => {
+      const b = caja(h), W = b.x1 - b.x0 - 2 * cfg.sep + 1, H = b.y1 - b.y0 - 2 * cfg.sep + 1;
+      if (areaPts(h) < chica || !medidas.some((wh) => wh.some(([w, a]) => w <= W && a <= H))) return;
+      if (pz.rasgoHueco[k] == null) pz.rasgoHueco[k] = NestGcode.rasgoEnHueco(h, pz);
+      if (pz.rasgoHueco[k]) { conDibujo++; return; }
+      it.huecos.push(pz.simpleHuecos[k]);
+    });
   }
+  S.huecosConDibujo = conDibujo;
   return { cfg: { ...cfg }, nest, grandes, recs };
 }
 // Material de la pieza: el contorno menos sus cortes de adentro (con piezas metidas en huecos, contar el contorno entero las
@@ -1187,7 +1197,8 @@ function iniciar(seguir) {
   S.workers.forEach((w, i) => w.postMessage({ tipo: 'correr', semilla: S.ronda * 100 + i + 1, segundos: cfg.seg, base, nuevo: !seguir }));
   if (S.timer) clearInterval(S.timer);
   S.timer = setInterval(pintarEstado, 250);
-  $('cfg-nota').textContent = '';
+  const nd = S.huecosConDibujo; // huecos que no se usan por tener dibujos adentro (prepararNest)
+  $('cfg-nota').textContent = nd ? `${nd === 1 ? 'Un hueco tiene' : nd + ' huecos tienen'} calados, agujeros o líneas dibujados adentro: no se ${nd === 1 ? 'usa' : 'usan'} para meter piezas (la fresa las cortaría).` : '';
   pintarResultado();
 }
 function alMensaje(m) {

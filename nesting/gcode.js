@@ -8,7 +8,8 @@
 //    suelte cuando ya está todo hecho.
 //  · pieza dentro de pieza (26-oct): los cortes de adentro y los contornos van del más adentro al más afuera. Una pieza metida
 //    en el hueco de otra se corta entera (sus huecos y su contorno) antes que ese hueco, y el hueco antes que el contorno de
-//    la de afuera: nunca se corta una pieza sobre un pedazo que ya quedó suelto.
+//    la de afuera: nunca se corta una pieza sobre un pedazo que ya quedó suelto. Lo mismo con un agujero grande que rodea
+//    piezas (va con su nivel y no al principio) y con la cavidad que cierra el contorno corrido de una C de boca angosta.
 // Los desplazamientos los hace Clipper (Angus Johnson). El cero: X0 Y0 en la esquina de abajo a la izquierda de la lámina,
 // Z0 arriba del material.
 (function (raiz) {
@@ -58,38 +59,89 @@
     }
     return c;
   }
-  // Nivel de cada pieza de la lámina: cuántos huecos de otras piezas la rodean (0: está en la lámina; 1: adentro del hueco de
-  // una pieza de nivel 0; …). Las piezas acomodadas no se cruzan, así que alcanza con que su caja entre en la del hueco y un
-  // punto de su contorno caiga adentro; si la rodean varios huecos, la contiene directamente el más chico.
-  function niveles(geos) {
-    const n = geos.length, cajas = geos.map((g) => caja(g.poly)), padre = new Array(n).fill(-1), areaPadre = new Array(n).fill(Infinity);
-    const hs = geos.map((g) => g.huecos.map((h) => ({ h, c: caja(h), a: Math.abs(areaSig(h)) })));
-    for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
-      if (i === j || !hs[j].length || !cajaDentro(cajas[i], cajas[j])) continue;
-      for (const o of hs[j]) if (o.a < areaPadre[i] && cajaDentro(cajas[i], o.c) && dentro(geos[i].poly[0], o.h)) { areaPadre[i] = o.a; padre[i] = j; }
+  const dPS = (p, a, b) => { const vx = b[0] - a[0], vy = b[1] - a[1], L = vx * vx + vy * vy; let t = L ? ((p[0] - a[0]) * vx + (p[1] - a[1]) * vy) / L : 0; t = Math.max(0, Math.min(1, t)); return Math.hypot(p[0] - a[0] - t * vx, p[1] - a[1] - t * vy); };
+  function dSS(a, b, c, d) {
+    const o = (p, q, s) => Math.sign((q[0] - p[0]) * (s[1] - p[1]) - (q[1] - p[1]) * (s[0] - p[0]));
+    if (o(a, b, c) * o(a, b, d) < 0 && o(c, d, a) * o(c, d, b) < 0) return 0;
+    return Math.min(dPS(a, c, d), dPS(b, c, d), dPS(c, a, b), dPS(d, a, b));
+  }
+  // ¿Algún rasgo de la pieza (calado, agujero o línea roja abierta) cae en su hueco h? Adentro, sobre el borde o cruzándolo (a
+  // menos de tol mm), o un agujero o una línea abierta que lo rodea (al cortarse soltaría el pedazo del hueco). Ese hueco no
+  // sirve para meter piezas (revisión 26-oct): la fresa tallaría o cortaría lo que se meta ahí; antes caía en el descarte.
+  function rasgoEnHueco(h, pz, tol) {
+    if (tol == null) tol = 0.5;
+    const ch = caja(h), lejos = (c) => c.x1 < ch.x0 - tol || c.x0 > ch.x1 + tol || c.y1 < ch.y0 - tol || c.y0 > ch.y1 + tol;
+    const rasgos = [];
+    for (const s of pz.calados || []) rasgos.push([s.pts, s.cerrado, false]);
+    for (const s of pz.agujeros || []) rasgos.push([s.pts, s.cerrado, true]);
+    for (const p of pz.abiertos || []) rasgos.push([p, false, true]);
+    for (const [pts, cerrado, pasante] of rasgos) {
+      if (!pts.length) continue;
+      const c = caja(pts);
+      if (pasante && pts.length >= 3 && cajaDentro(ch, c) && dentro(h[0], pts)) return true;
+      if (lejos(c)) continue;
+      for (const p of pts) if (dentro(p, h)) return true;
+      const n = pts.length, m = cerrado ? n : n - 1;
+      for (let i = 0; i < Math.max(1, m); i++) {
+        const a = pts[i], b = pts[(i + 1) % n], cs = { x0: Math.min(a[0], b[0]), x1: Math.max(a[0], b[0]), y0: Math.min(a[1], b[1]), y1: Math.max(a[1], b[1]) };
+        if (lejos(cs)) continue;
+        for (let u = 0, v = h.length - 1; u < h.length; v = u++) if (dSS(a, b, h[v], h[u]) < tol) return true;
+      }
     }
-    return padre.map((p) => { let k = 0; for (; p >= 0 && k < n; p = padre[p]) k++; return k; });
+    return false;
+  }
+  // Contenedores: lo que al cortarse suelta un pedazo de la lámina con lo que tenga adentro. De cada pieza: sus huecos, sus
+  // agujeros cerrados (se cortan por dentro, como un hueco) y, si vienen sus lazos (el contorno corrido el radio de la fresa),
+  // los de adentro de esos lazos: una C con la boca más angosta que la fresa se cierra al cortarla y suelta la cavidad.
+  // padre[i] = el contenedor más chico que rodea a la pieza i ({ j, tipo: 'h' | 'a' | 'l', k }) o null; nivel[i] = cuántos la
+  // rodean (0: está en la lámina; 1: adentro de un contenedor de una pieza de nivel 0; …); agujeros = los agujeros ('j|k') que
+  // rodean alguna pieza, aunque no sean el más chico (un agujero dibujado igual que el hueco, o alrededor). Las piezas
+  // acomodadas no se cruzan, así que alcanza con que su caja entre en la del contenedor y un punto de su contorno caiga adentro.
+  function contencion(geos, lazos) {
+    const n = geos.length, cajas = geos.map((g) => caja(g.poly)), padre = new Array(n).fill(null), areaPadre = new Array(n).fill(Infinity), agujeros = new Set();
+    const cs = geos.map((g, j) => {
+      const l = g.huecos.map((pts, k) => ({ j, tipo: 'h', k, pts }));
+      (g.agujeros || []).forEach((s, k) => { if (s.cerrado && s.pts.length >= 3) l.push({ j, tipo: 'a', k, pts: s.pts }); });
+      if (lazos) lazos[j].forEach((pts, k) => { if (areaSig(pts) < 0) l.push({ j, tipo: 'l', k, pts }); });
+      for (const o of l) { o.c = caja(o.pts); o.a = Math.abs(areaSig(o.pts)); }
+      return l;
+    });
+    for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+      if (i === j || !cs[j].length || !cajaDentro(cajas[i], cajas[j])) continue;
+      for (const o of cs[j]) {
+        if (!cajaDentro(cajas[i], o.c) || !dentro(geos[i].poly[0], o.pts)) continue;
+        if (o.tipo === 'a') agujeros.add(j + '|' + o.k);
+        if (o.a < areaPadre[i]) { areaPadre[i] = o.a; padre[i] = o; }
+      }
+    }
+    const nivel = padre.map((p) => { let k = 0; for (; p && k < n; p = padre[p.j]) k++; return k; });
+    return { nivel, padre, agujeros };
+  }
+  // Nivel de cada pieza (ver contencion). Con r (radio de la fresa) cuenta también las cavidades que cierra el contorno corrido.
+  function niveles(geos, r) {
+    return contencion(geos, r > 0 ? geos.map((g) => desplazar(g.poly, r)) : null).nivel;
   }
   // Recorridos de una lámina: geos = piezas colocadas ({ poly, huecos, abiertos, calados, agujeros }). Los cortes de adentro y
   // los contornos quedan por nivel de la pieza (ops.huecos[k], ops.contornos[k]); las líneas rojas abiertas de una pieza van con
-  // sus cortes de adentro.
+  // sus cortes de adentro. Un agujero grande con piezas adentro va con su nivel (ops.agujerosNivel[k]), no al principio.
   function recorridos(geos, perfil) {
     const r = perfil.fresa / 2, trepado = perfil.sentido !== 'convencional';
-    const ops = { calado: [], taladros: [], agujeros: [], huecos: [[]], contornos: [[]] };
+    const ops = { calado: [], taladros: [], agujeros: [], agujerosNivel: [[]], huecos: [[]], contornos: [[]] };
     const av = { huecosChicos: 0, agujerosChicos: 0, agujerosGrandes: 0 };
-    const nivel = niveles(geos);
+    const lazosC = geos.map((g) => desplazar(g.poly, r)), { nivel, agujeros: conPiezas } = contencion(geos, lazosC);
     for (let i = 0; i < geos.length; i++) {
       const g = geos[i], k = nivel[i];
-      while (ops.huecos.length <= k) { ops.huecos.push([]); ops.contornos.push([]); }
+      while (ops.huecos.length <= k) { ops.huecos.push([]); ops.contornos.push([]); ops.agujerosNivel.push([]); }
       for (const s of g.calados) ops.calado.push({ pts: s.pts, cerrado: s.cerrado });
-      for (const s of g.agujeros) {
-        const ci = s.cerrado ? circulo(s.pts) : null;
+      for (let q = 0; q < g.agujeros.length; q++) {
+        const s = g.agujeros[q], ci = s.cerrado ? circulo(s.pts) : null;
         if (ci && 2 * ci.r <= perfil.fresa + 0.5) { ops.taladros.push([ci.cx, ci.cy]); if (2 * ci.r < perfil.fresa - 0.5) av.agujerosChicos++; continue; }
         if (!s.cerrado) { ops.agujeros.push({ pts: s.pts, cerrado: false }); continue; }
         const lazos = desplazar(s.pts, -r);
         if (!lazos.length) { ops.taladros.push(centro(s.pts)); av.agujerosChicos++; continue; }
         av.agujerosGrandes++;
-        for (const l of lazos) ops.agujeros.push({ pts: orientar(l, false, trepado), cerrado: true });
+        const dest = conPiezas.has(i + '|' + q) ? ops.agujerosNivel[k] : ops.agujeros;
+        for (const l of lazos) dest.push({ pts: orientar(l, false, trepado), cerrado: true });
       }
       for (const h of g.huecos) {
         const lazos = desplazar(h, -r);
@@ -97,7 +149,7 @@
         for (const l of lazos) ops.huecos[k].push({ pts: orientar(l, false, trepado), cerrado: true });
       }
       for (const p of g.abiertos) ops.huecos[k].push({ pts: p, cerrado: false });
-      for (const l of desplazar(g.poly, r)) ops.contornos[k].push({ pts: orientar(l, areaSig(l) > 0, trepado), cerrado: true });
+      for (const l of lazosC[i]) ops.contornos[k].push({ pts: orientar(l, areaSig(l) > 0, trepado), cerrado: true });
     }
     return { ops, avisos: av };
   }
@@ -196,9 +248,10 @@
     op('Agujeros grandes', rec.ops.agujeros, { ...perfil.agujero });
     // Del nivel más adentro al de afuera: cada pieza metida en un hueco queda suelta (sus cortes de adentro y su contorno)
     // antes de cortar ese hueco. Sin piezas adentro de otras hay un solo nivel: cortes de adentro y después contornos.
-    const nv = rec.ops.contornos.length;
+    const nv = rec.ops.contornos.length, agN = rec.ops.agujerosNivel || [];
     for (let k = nv - 1; k >= 0; k--) {
       const suf = k ? ' - piezas adentro de huecos' + (nv > 2 ? ' nivel ' + k : '') : '';
+      op('Agujeros grandes con piezas adentro' + suf, agN[k] || [], { ...perfil.agujero });
       op('Cortes de adentro' + suf, rec.ops.huecos[k], perfil.corte);
       op('Contornos' + suf, rec.ops.contornos[k], perfil.corte);
     }
@@ -272,7 +325,7 @@
     }
     return { tramos: tr, total: T };
   }
-  const api = { PERFIL_DEF, desplazar, niveles, recorridos, escribir, leer, simular, profundidades };
+  const api = { PERFIL_DEF, desplazar, niveles, rasgoEnHueco, recorridos, escribir, leer, simular, profundidades };
   raiz.NestGcode = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof self !== 'undefined' ? self : this);
