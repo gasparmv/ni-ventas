@@ -134,6 +134,16 @@
   .anim-ctrl input[type=range] { flex: 1; min-width: 160px; accent-color: var(--acento); }
   .reloj { font-variant-numeric: tabular-nums; font-size: 13px; min-width: 104px; }
   #an-play { min-width: 112px; }
+  .lote { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin: 0 0 14px; padding: 10px 14px; border: 1px solid color-mix(in srgb, var(--acento) 55%, var(--borde)); border-radius: 12px; background: color-mix(in srgb, var(--acento) 9%, var(--panel)); font-size: 13.5px; }
+  .lote .tit { font-weight: 700; }
+  .lote .sw { display: inline-block; width: 13px; height: 13px; border-radius: 50%; border: 1px solid #ffffff59; margin-right: 6px; vertical-align: -1px; }
+  .lote .peds { color: var(--mute); overflow-wrap: anywhere; }
+  .lote .est { flex-basis: 100%; font-size: 12.5px; color: var(--mute); }
+  .lote .est:empty { display: none; }
+  .lote .est.err { color: var(--error); }
+  .aviso-perfil { margin: 0 0 10px; padding: 7px 10px; border-left: 3px solid var(--aviso); border-radius: 0 8px 8px 0; background: color-mix(in srgb, var(--aviso) 10%, transparent); font-size: 13px; }
+  #r-aviso-perfil { margin: 12px 0 0; }
+  label.check[hidden] { display: none !important; }
   @media (max-width: 560px) { .anim-fondo { padding: 0; } .anim-caja { border-radius: 0; height: 100%; } }
   @media (max-width: 560px) { main { padding: 16px 12px 60px; } h1 { font-size: 19px; } .archivo button { margin-left: 0; } }
 </style>
@@ -142,6 +152,7 @@
 <main>
   <h1>Nesting de placas</h1>
   <p class="sub">Acomoda las piezas de los archivos de Emma en placas y baja un DXF por placa con tres capas: <span class="chip c-corte">CORTE</span> <span class="chip c-calado">CALADO</span> <span class="chip c-agujero">AGUJEROS</span>. Los archivos no se suben a ningún lado: todo se procesa en esta compu.</p>
+  <div class="lote" id="lote" role="status" aria-live="polite" hidden></div>
 
   <section class="card" id="sec-archivos">
     <div class="titulo"><span class="paso">Paso 1</span><h2>Archivos</h2><span class="sutil">.ai, .pdf o .dxf, todos del mismo material</span></div>
@@ -228,7 +239,9 @@
       <button class="primario" id="b-zip" disabled>Descargar todo (ZIP)</button>
       <button id="b-seguir" disabled>Seguir optimizando</button>
       <button id="b-detener" disabled>Detener</button>
+      <label class="check" id="ver-ped-caja" hidden><input type="checkbox" id="c-ver-ped"> Ver de qué pedido es cada pieza</label>
     </div>
+    <p class="aviso-perfil" id="r-aviso-perfil" hidden></p>
     <p class="nota">Cada DXF tiene la placa en milímetros, con el origen abajo a la izquierda (largo en X, ancho en Y), y tres grupos (bloques) en sus capas: CORTE, CALADO y AGUJEROS. Los agujeros redondos salen como círculos; lo demás, como polilíneas. El ZIP lleva también el código G de cada placa (se configura en el paso 6).</p>
     <div class="placas" id="placas"></div>
   </section>
@@ -241,6 +254,7 @@
       <button class="chico" id="g-guardar-como">Guardar como perfil nuevo</button>
       <button class="chico" id="g-borrar">Borrar este perfil</button>
     </div>
+    <p class="aviso-perfil" id="g-aviso-perfil" hidden></p>
     <div class="gtabla-caja"><table class="gtabla">
       <thead><tr><th></th><th>Avance <span>mm/s</span></th><th>Bajada <span>mm/s</span></th><th>Husillo <span>rpm</span></th><th>Prof. inicial <span>mm</span></th><th>Prof. final <span>mm</span></th><th>Por pasada <span>mm</span></th></tr></thead>
       <tbody id="g-filas"></tbody>
@@ -670,7 +684,7 @@ function armar() {
       }
       const pzs = [];
       for (const c of unicos) {
-        if (c.prof % 2 === 0) { c.pieza = { id: piezas.length + pzs.length, archivo: a.nombre, pagina: pg.n, poly: c.pts, area: c.area, bb: c.bb, huecos: [], abiertos: [], calados: [], agujeros: [] }; pzs.push(c.pieza); }
+        if (c.prof % 2 === 0) { c.pieza = { id: piezas.length + pzs.length, archivo: a.nombre, pedido: a.pedido, pagina: pg.n, poly: c.pts, area: c.area, bb: c.bb, huecos: [], abiertos: [], calados: [], agujeros: [] }; pzs.push(c.pieza); }
         else unicos[c.padre].pieza.huecos.push(c.pts);
       }
       const duenio = (pts) => {
@@ -889,7 +903,42 @@ function dibujarLamina(cv, s) {
   ctx.beginPath(); for (const rg of lam.rings) trazar(ctx, rg, X, Y, true);
   ctx.fillStyle = COL.placa; ctx.fill('evenodd'); ctx.strokeStyle = '#4a5263'; ctx.lineWidth = 1; ctx.stroke();
   if (lam.tipo === 'placa') { ctx.strokeStyle = '#3b4252'; ctx.setLineDash([4, 4]); const m = S.cfgNest.margen * e; ctx.strokeRect(X(0) + m, m, lam.largo * e - 2 * m, H - 2 * m); ctx.setLineDash([]); }
-  for (const c of S.mejor.coloc) if (c.hoja === s) dibujarPieza(ctx, colocada(S.piezas[c.id], c), X, Y, e);
+  const marcas = [], verPed = $('c-ver-ped').checked;
+  for (const c of S.mejor.coloc) if (c.hoja === s) {
+    const pz = S.piezas[c.id], g = colocada(pz, c);
+    dibujarPieza(ctx, g, X, Y, e);
+    if (verPed && pz.pedido) marcas.push(['#' + pz.pedido, g]);
+  }
+  // De qué pedido es cada pieza (lote del CRM): el número arriba de la pieza, solo en pantalla (no va al DXF ni al código G).
+  if (marcas.length) {
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    for (const [txt, g] of marcas) {
+      const p = puntoAdentro(g), px = Math.max(10, Math.min(14, p.w * e / 2.6));
+      ctx.font = `700 ${px}px system-ui, -apple-system, "Segoe UI", sans-serif`;
+      const w = ctx.measureText(txt).width + 8, h = px + 5;
+      const x = Math.min(W - w / 2 - 1, Math.max(w / 2 + 1, X(p.x))), y = Math.min(H - h / 2 - 1, Math.max(h / 2 + 1, Y(p.y))); // adentro del lienzo
+      ctx.fillStyle = 'rgba(11,13,17,.82)'; ctx.strokeStyle = 'rgba(139,92,246,.9)'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.rect(x - w / 2, y - h / 2, w, h); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = '#fff'; ctx.fillText(txt, x, y + 0.5);
+    }
+  }
+}
+// Un punto adentro de la pieza (fuera de sus huecos) donde poner su etiqueta: el medio del tramo más ancho de algunas líneas
+// horizontales (en una C o una O, el centro de la caja cae en el hueco). w = el ancho de ese tramo, en mm.
+function puntoAdentro(g) {
+  const b = caja(g.poly), anillos = [g.poly, ...g.huecos];
+  let mejor = null;
+  for (const f of [0.5, 0.38, 0.62, 0.26, 0.74, 0.14, 0.86]) {
+    const y = b.y0 + (b.y1 - b.y0) * f, xs = [];
+    for (const r of anillos) for (let i = 0, j = r.length - 1; i < r.length; j = i++) {
+      const [xi, yi] = r[i], [xj, yj] = r[j];
+      if ((yi > y) !== (yj > y)) xs.push(xi + (y - yi) * (xj - xi) / (yj - yi));
+    }
+    xs.sort((p, q) => p - q);
+    for (let k = 0; k + 1 < xs.length; k += 2) { const w = xs[k + 1] - xs[k]; if (!mejor || w > mejor.w) mejor = { x: (xs[k] + xs[k + 1]) / 2, y, w }; }
+    if (mejor && mejor.w >= (b.x1 - b.x0) * 0.5) break;
+  }
+  return mejor || { x: (b.x0 + b.x1) / 2, y: (b.y0 + b.y1) / 2, w: 0 };
 }
 
 // ───────────── animación del recorrido ─────────────
@@ -1148,11 +1197,12 @@ function invalidarResultado(msg) {
   $('sec-resultado').hidden = true; $('sec-gcode').hidden = true;
   $('cfg-nota').textContent = msg || '';
 }
-async function agregarArchivos(lista) {
+// pedidoDe (solo con un lote del CRM): el número de pedido de cada archivo, para mostrarlo sobre sus piezas en el resultado.
+async function agregarArchivos(lista, pedidoDe) {
   const nuevos = [];
   for (const f of lista) {
     if (S.archivos.some((a) => a.nombre === f.name && a.tam === f.size)) continue;
-    const a = { id: ++S.sec, nombre: f.name, tam: f.size, estado: 'leyendo', paginas: [], error: null, textos: 0, imagenes: 0, union: { tol: TOL_UNION, estado: 'pendiente' } };
+    const a = { id: ++S.sec, nombre: f.name, tam: f.size, estado: 'leyendo', paginas: [], error: null, textos: 0, imagenes: 0, union: { tol: TOL_UNION, estado: 'pendiente' }, pedido: (pedidoDe && pedidoDe(f)) || null };
     S.archivos.push(a); nuevos.push([f, a]);
   }
   if (!nuevos.length) return;
@@ -1302,6 +1352,8 @@ function pintarResultado() {
   if (avisos.length) { const ul = document.createElement('ul'); ul.className = 'avisos'; ul.innerHTML = avisos.map((t) => `<li class="grave">${t}</li>`).join(''); cont.appendChild(ul); }
   const r = S.mejor;
   $('sec-gcode').hidden = !r;
+  $('ver-ped-caja').hidden = !r || !S.piezas.some((p) => p.pedido);
+  pintarAvisoPerfil();
   if (!r) return;
   const dis = S.corriendo ? ' disabled' : '';
   for (const s of r.usadas) {
@@ -1418,18 +1470,22 @@ function bajar(blob, nombre) {
   a.href = url; a.download = nombre; document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
+// Con un lote del CRM los nombres llevan el lote, sin acentos ni espacios (acrilico-blanco-opalino-4mm_placa-1.dxf): si no, el
+// del primer archivo ("#8 acrilicos iglesia y 2 más - placa 1.dxf").
 function nombreBase() {
+  if (S.lote) return S.lote.slug;
   const ok = S.archivos.filter((a) => a.estado === 'ok').map((a) => a.nombre.replace(/\.(ai|pdf|dxf)$/i, ''));
   const base = ok.length === 1 ? ok[0] : ok.length ? ok[0] + ' y ' + (ok.length - 1) + ' más' : 'nesting';
   return base.replace(/[\\/:*?"<>|]+/g, ' ').trim().slice(0, 60) || 'nesting';
 }
-const nombreDxf = (s) => `${nombreBase()} - ${laminaInfo(s).archivo.replace(/[\\/:*?"<>|]+/g, ' ').trim()}.dxf`;
+const nombreDxf = (s) => S.lote ? `${S.lote.slug}_${slugTxt(laminaInfo(s).archivo) || 'lamina'}.dxf` : `${nombreBase()} - ${laminaInfo(s).archivo.replace(/[\\/:*?"<>|]+/g, ' ').trim()}.dxf`;
 function bajarDxf(s) { bajar(new Blob([dxfPlaca(s)], { type: 'application/dxf' }), nombreDxf(s)); }
 function bajarZip() {
   const r = S.mejor; if (!r) return;
   const arch = r.usadas.map((s) => ({ nombre: nombreDxf(s), datos: dxfPlaca(s) }));
   if ($('g-zip').checked) for (const s of r.usadas) arch.push({ nombre: nombreGcode(s), datos: gcodeLamina(s).texto });
-  bajar(zip(arch), `${nombreBase()} - ${r.usadas.length} lámina${r.usadas.length === 1 ? '' : 's'}.zip`);
+  const n = r.usadas.length;
+  bajar(zip(arch), S.lote ? `${S.lote.slug}_${n}-lamina${n === 1 ? '' : 's'}.zip` : `${nombreBase()} - ${n} lámina${n === 1 ? '' : 's'}.zip`);
 }
 
 // ───────────── código G ─────────────
@@ -1457,6 +1513,7 @@ function pintarPerfil() {
   $('g-filas').innerHTML = OPS_G.map(([k, t, d]) => `<tr><th>${t}<br><span>${d}</span></th>${Object.keys(paso).map((c) => `<td><input type="number" data-g="${k}.${c}" min="0" step="${paso[c]}" value="${esc(p[k][c])}"></td>`).join('')}</tr>`).join('');
   document.querySelectorAll('#sec-gcode .config [data-g]').forEach((el) => { el.value = p[el.getAttribute('data-g')]; });
   $('g-borrar').disabled = Object.keys(S.perfiles.lista).length < 2;
+  pintarAvisoPerfil();
 }
 function leerPerfilForm() {
   const p = perfilActual();
@@ -1722,6 +1779,78 @@ function guardarSobrante(s, btn) {
   }, 30);
 }
 
+// ───────────── lote del CRM ─────────────
+// "Armar placas" del CRM (Cortes de Sin Frontera, 27-oct) abre esta página con ?lote=<id> y le pasa los archivos de los pedidos
+// de un mismo material, color y espesor, de pestaña a pestaña (postMessage, mismo origen): esta página no toca tokens ni la API.
+// Apretón de manos: acá se avisa {tipo:'nesting-listo', lote} a la pestaña que la abrió; el CRM manda {tipo:'nesting-progreso'}
+// mientras baja y después {tipo:'nesting-lote', lote, titulo, material, color, color_hex, espesor, pedidos, archivos: [File],
+// fallaron}. Solo se acepta del mismo origen, de esa pestaña y con ese lote, y una sola vez. Cada archivo viene con su pedido
+// adelante ("#8 acrilicos iglesia.dxf"): sus piezas muestran ese número en el resultado (solo en pantalla).
+function sinAcentos(s) { return String(s == null ? '' : s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim(); }
+function slugTxt(s) { return sinAcentos(s).replace(/(\d),(\d)/g, '$1.$2').replace(/[^a-z0-9.]+/g, '-').replace(/^[-.]+|[-.]+$/g, '').slice(0, 80); }
+function espesorNum(s) { const m = String(s == null ? '' : s).replace(',', '.').match(/\d+(?:\.\d+)?/); return m ? parseFloat(m[0]) : null; }
+// El espesor que dice el nombre de un perfil ("Acrílico 3 mm", "PVC 2,5mm"); null si no dice.
+function espesorPerfil(nombre) { const m = sinAcentos(nombre).replace(/(\d),(\d)/g, '$1.$2').match(/(\d+(?:\.\d+)?)\s*mm\b/); return m ? parseFloat(m[1]) : null; }
+const MATERIALES_PERFIL = [['acrilico', 'acrílico'], ['pvc', 'PVC'], ['mdf', 'MDF'], ['policarbonato', 'policarbonato'], ['alto impacto', 'alto impacto']];
+const materialPerfil = (nombre) => MATERIALES_PERFIL.find(([k]) => sinAcentos(nombre).includes(k)) || null;
+const fmtEsp = (n) => String(n).replace('.', ',');
+function pintarLote() {
+  const el = $('lote'), L = S.lote, E = S.loteEspera;
+  el.hidden = !L && !E;
+  if (el.hidden) return;
+  if (!L) { el.innerHTML = `<span class="tit">Lote del CRM</span><span class="est${E.err ? ' err' : ''}">${esc(E.txt)}</span>`; return; }
+  const peds = L.pedidos.map((p) => '#' + p.id + (p.nombre ? ' ' + p.nombre : '')).join(', ');
+  const est = [L.archivos ? `${plural(L.archivos, 'archivo llegó', 'archivos llegaron')} del CRM.` : 'No llegó ningún archivo del CRM.', L.fallaron.length ? `No se pudo bajar: ${L.fallaron.join(', ')}. Bajalo desde el CRM y arrastralo acá.` : ''].filter(Boolean).join(' ');
+  el.innerHTML = `<span class="tit">Lote del CRM: ${L.hex ? `<i class="sw" style="background:${L.hex}"></i>` : ''}${esc(L.titulo)}</span>${peds ? `<span class="peds">— ${esc(peds)}</span>` : ''}<span class="est${!L.archivos || L.fallaron.length ? ' err' : ''}">${esc(est)}</span>`;
+}
+// Con un lote, si hay un perfil de código G cuyo nombre dice el material y el espesor del lote, se elige solo (no se crea nada).
+// Si hay varios, el que más palabras del color dice ("Acrílico opalino 4 mm" antes que "Acrílico 4 mm" para blanco opalino).
+function elegirPerfilLote() {
+  const L = S.lote, mm = L && espesorNum(L.espesor), mat = L && sinAcentos(L.material);
+  if (!L || mm == null || !mat) return;
+  const cand = Object.keys(S.perfiles.lista).filter((n) => sinAcentos(n).includes(mat) && espesorPerfil(n) === mm);
+  if (!cand.length) return;
+  const palabras = sinAcentos(L.color).split(/[^a-z0-9]+/).filter((w) => w.length >= 3);
+  const puntos = (n) => { const t = ' ' + sinAcentos(n).replace(/[^a-z0-9]+/g, ' ') + ' '; return palabras.filter((w) => t.includes(' ' + w + ' ')).length; };
+  S.perfiles.actual = cand.reduce((m, n) => (puntos(n) > puntos(m) ? n : m), cand[0]);
+  S.gcodeCache = new Map();
+}
+// El perfil activo dice otro espesor (u otro material) que el lote: aviso en el paso 5 y en el 6.
+function textoAvisoPerfil() {
+  const L = S.lote; if (!L) return '';
+  const nom = S.perfiles.actual, pm = espesorPerfil(nom), lm = espesorNum(L.espesor), pmat = materialPerfil(nom), lmat = sinAcentos(L.material), t = [];
+  if (pm != null && lm != null && pm !== lm) t.push(`El perfil es de ${fmtEsp(pm)} mm y este lote es de ${fmtEsp(lm)} mm: revisá la profundidad.`);
+  else if (pm == null && lm != null) t.push(`El perfil "${nom}" no dice el espesor: fijate que la profundidad sea para ${fmtEsp(lm)} mm.`);
+  if (pmat && lmat && !lmat.includes(pmat[0])) t.push(`El perfil es para ${pmat[1]} y este lote es de ${L.material}: revisá los parámetros.`);
+  return t.join(' ');
+}
+function pintarAvisoPerfil() {
+  const t = textoAvisoPerfil();
+  for (const id of ['g-aviso-perfil', 'r-aviso-perfil']) { const el = $(id); el.textContent = t; el.hidden = !t || (id === 'r-aviso-perfil' && !S.mejor); }
+}
+function recibirLote(d) {
+  if (S.lote) return; // uno solo por pestaña
+  const txt = (v, n) => String(v == null ? '' : v).replace(/\s+/g, ' ').trim().slice(0, n);
+  const files = (Array.isArray(d.archivos) ? d.archivos : []).filter((f) => f instanceof File).slice(0, 100);
+  const pedidos = (Array.isArray(d.pedidos) ? d.pedidos : []).map((p) => ({ id: parseInt(p && p.id, 10) || 0, nombre: txt(p && p.nombre, 80) })).filter((p) => p.id > 0).slice(0, 200);
+  const L = { titulo: txt(d.titulo, 120) || 'sin nombre', material: txt(d.material, 40), color: txt(d.color, 60), espesor: txt(d.espesor, 12), hex: /^#[0-9a-f]{6}$/i.test(String(d.color_hex || '')) ? d.color_hex : '', pedidos, archivos: files.length, fallaron: (Array.isArray(d.fallaron) ? d.fallaron : []).map((x) => txt(x, 160)).filter(Boolean).slice(0, 50) };
+  const mm = espesorNum(L.espesor);
+  L.slug = slugTxt([L.material, L.color].join(' ')) + (mm != null ? '-' + slugTxt(fmtEsp(mm)) + 'mm' : L.espesor ? '-' + slugTxt(L.espesor) : '');
+  L.slug = L.slug.replace(/^-+/, '') || 'lote';
+  S.lote = L; S.loteEspera = null; clearTimeout(S.tLote);
+  try { history.replaceState(null, '', location.pathname); } catch (_) {} // recargar = el nesting de siempre (los archivos no vuelven)
+  $('c-ver-ped').checked = true;
+  elegirPerfilLote(); pintarPerfil(); pintarLote();
+  const ids = new Set(pedidos.map((p) => p.id));
+  if (files.length) agregarArchivos(files, (f) => { const m = /^#(\d+) /.exec(f.name); return m && ids.has(+m[1]) ? +m[1] : null; });
+}
+// Mientras el CRM baja los archivos: si en 45 s no llega nada (ni el avance), se avisa.
+function esperarLote(txt) {
+  S.loteEspera = { txt }; pintarLote();
+  clearTimeout(S.tLote);
+  S.tLote = setTimeout(() => { if (!S.lote) { S.loteEspera = { txt: 'No llegaron los archivos del CRM. Volvé al CRM y tocá de nuevo "Abrir en el nesting", o arrastrá los archivos acá.', err: true }; pintarLote(); } }, 45000);
+}
+
 // ───────────── eventos ─────────────
 cfgAlForm();
 const drop = $('drop'), inp = $('inp');
@@ -1880,6 +2009,25 @@ window.addEventListener('resize', () => {
   clearTimeout(S.tResize); S.tResize = setTimeout(() => { pintarRevision(); if (S.piezas.length) pintarPiezas(); if (S.mejor) pintarResultado(); }, 250);
 });
 if (!window.pdfjsLib) { $('lista-archivos').innerHTML = '<div class="archivo"><div class="err">No se pudo cargar el lector de PDF. Revisá la conexión y recargá la página.</div></div>'; }
+$('c-ver-ped').addEventListener('change', () => { if (S.mejor) pintarResultado(); });
+// Lote del CRM: el apretón de manos (ver "lote del CRM" más arriba). Sin ?lote= (o abierta aparte, sin el CRM) es el nesting de siempre.
+(() => {
+  let lote = '';
+  try { lote = new URLSearchParams(location.search).get('lote') || ''; } catch (_) {}
+  if (!/^[A-Za-z0-9_-]{8,64}$/.test(lote)) return;
+  let crm = null;
+  try { crm = window.opener; } catch (_) {}
+  if (!crm) { try { history.replaceState(null, '', location.pathname); } catch (_) {} return; }
+  window.addEventListener('message', (e) => {
+    if (e.origin !== location.origin || e.source !== crm) return;
+    const d = e.data;
+    if (!d || typeof d !== 'object' || d.lote !== lote || S.lote) return;
+    if (d.tipo === 'nesting-progreso') { const h = +d.hechos || 0, t = +d.total || 0; esperarLote(t ? `Bajando los archivos del CRM: ${fmt(Math.min(h, t))} de ${fmt(t)}…` : 'Bajando los archivos del CRM…'); }
+    else if (d.tipo === 'nesting-lote') recibirLote(d);
+  });
+  esperarLote('Esperando los archivos del CRM…');
+  try { crm.postMessage({ tipo: 'nesting-listo', lote }, location.origin); } catch (_) {}
+})();
 </script>
 </body>
 </html>

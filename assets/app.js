@@ -9534,10 +9534,13 @@ function sfcListaHtml() {
   if (!D) return '<div class="lb-tit sfc-tit">Pedidos de corte</div><div class="lb-list"><div class="lb-vacio">Cargando…</div></div>';
   if (D.error) return `<div class="lb-tit sfc-tit">Pedidos de corte</div><div class="lb-list"><div class="lb-vacio"><div style="color:#ef4444;margin-bottom:8px">${escapeHtml(D.error)}</div><button type="button" class="btn" data-sfc-refresh>Reintentar</button></div></div>`;
   // Tablero por estado (Gaspar 26-oct: "hacé esto en un kanban con estados de producción"): ver sfcb* más abajo.
-  const cs = D.cortes || [], cel = sfcbEtapaCel(cs), drag = adm && sfkFino();
+  // Filtro por material + color + espesor (27-oct, sfcbFiltrosHtml): todo lo de abajo (columnas, pestañas, Entregado y
+  // Cancelados) muestra solo esa combinación.
+  const todos = D.cortes || [], combos = sfcCombos(todos), f = sfcbFiltro(combos);
+  const cs = f ? todos.filter(c => sfcComboKey(c) === f) : todos, cel = sfcbEtapaCel(cs), drag = adm && sfkFino();
   return `<div class="lb-tit sfc-tit">${adm ? 'Pedidos de corte' : 'Tus pedidos de corte'}</div>`
-    + sfcbTabsHtml(cs, cel) + sfcbBoardHtml(cs, cel, drag) + sfcbCanceladosHtml(cs, drag)
-    + (adm ? `<div class="logi-ayuda sfcb-ayuda">Cambiá el estado con el selector de cada tarjeta${drag ? ' o arrastrala a otra columna' : ''} · Arriba de cada columna, los vencidos y los que son para hoy</div>` : '');
+    + sfcbFiltrosHtml(combos, f) + sfcbTabsHtml(cs, cel) + sfcbBoardHtml(cs, cel, drag) + sfcbCanceladosHtml(cs, drag)
+    + (adm ? `<div class="logi-ayuda sfcb-ayuda">Cambiá el estado con el selector de cada tarjeta${drag ? ' o arrastrala a otra columna' : ''} · Arriba de cada columna, los vencidos y los que son para hoy · El número de cada material es lo que falta cortar (Pedido y En corte)</div>` : '');
 }
 function sfcFilaHtml(c) {
   const adm = isAdmin() || isFranOnly(), E = sfcEstado(c.estado), cerrado = c.estado === 'entregado' || c.estado === 'cancelado', dias = sfDias(c.fecha);
@@ -9564,7 +9567,7 @@ function sfcFilaHtml(c) {
       <span class="sfc-acc">${acc}</span>
     </div>
     <div class="sfc-det">
-      <div class="sfc-mat">${escapeHtml(sfcLbl(SFC_MATERIALES, c.material))} ${sfcMuestra(c.color, c.color_hex)}${escapeHtml(sfcLbl(SFC_COLORES, c.color).toLowerCase() + ' · ' + c.espesor + ' mm')}</div>
+      <div class="sfc-mat">${escapeHtml(sfcLbl(SFC_MATERIALES, c.material))} ${sfcMuestra(c.color, c.color_hex)}${escapeHtml(sfcLbl(SFC_COLORES, c.color).toLowerCase() + ' · ' + sfcEspTxt(c.espesor) + ' mm')}</div>
       <div class="sfc-archs">${arch || '<span class="muted">Sin archivos</span>'}</div>
       ${c.aclaraciones ? `<div class="sfc-acl-txt">${escapeHtml(c.aclaraciones)}</div>` : ''}
       <div class="sfc-meta">Pedido el ${escapeHtml(sfFechaHora(c.created_at))}${c.creado_por ? ' por ' + escapeHtml(c.creado_por) : ''}${escapeHtml(cambio)}</div>
@@ -9790,11 +9793,241 @@ function sfcbCanceladosHtml(cs, drag) {
     + `<summary><i class="sfk-dot"></i><span class="t">Cancelados</span><b>${lista.length}</b><span class="sfcb-canc-ver">${STATE.sfcbCancAbierto ? 'ocultar' : 'ver'}</span></summary>`
     + `<div class="sfcb-canc-list">${lista.map(c => sfcbCardHtml(c, drag)).join('')}</div></details>`;
 }
+// ---------- Filtro por material, color y espesor + "Armar placas" (Gaspar 27-oct: "hace que acá se pueda filtrar por
+// especificaciones de material, por ejemplo ver solo acrílico opalino de 4 mm, y armar las placas de corte de eso mismo") ----------
+// Una combinación es material + color + espesor. El color va por su clave (blanco_opalino…) o, si es propio, por su nombre sin
+// acentos ni mayúsculas (el mismo nombre con otro tono es la misma combinación); el espesor, por su número ("4", "4 mm" y "4,0"
+// son 4). Arriba del tablero, un chip por combinación de lo no cancelado, con lo que falta cortar (Pedido + En corte); el
+// elegido queda en STATE y en esta compu (solo como comodidad: si esa combinación ya no está, vuelve a Todos). Lo ven los tres.
+const SFCB_FILTRO_KEY = 'niventas.sfcbFiltro';
+function sfcEspNum(e) { const m = String(e == null ? '' : e).replace(',', '.').match(/\d+(?:\.\d+)?/); return m ? parseFloat(m[0]) : null; }
+function sfcEspTxt(e) { const n = sfcEspNum(e); return n != null ? String(n).replace('.', ',') : String(e || '').trim(); }
+function sfcColorDe(c) {
+  const v = String((c && c.color) || ''), def = SFC_COLORES.find(x => x[0] === v || sfcNorm(x[1]) === sfcNorm(v));
+  return def ? { key: def[0], nombre: def[1] } : { key: sfcNorm(v), nombre: v.replace(/\s+/g, ' ').trim() };
+}
+function sfcComboKey(c) { const n = sfcEspNum(c.espesor); return [sfcNorm(c.material), sfcColorDe(c).key, n != null ? String(n) : sfcNorm(c.espesor)].join('|'); }
+function sfcComboTxt(x) { return sfcLbl(SFC_MATERIALES, x.material) + ' ' + String(x.color || '').toLowerCase() + ' · ' + sfcEspTxt(x.espesor) + ' mm'; }
+// Las combinaciones de lo no cancelado: las que tienen más por cortar primero.
+function sfcCombos(cs) {
+  const M = new Map();
+  cs.forEach(c => {
+    const e = sfcEstado(c.estado)[0]; if (e === 'cancelado') return;
+    const k = sfcComboKey(c); let x = M.get(k);
+    if (!x) { const col = sfcColorDe(c); M.set(k, x = { key: k, material: c.material, colorKey: col.key, color: col.nombre, hex: '', espesor: c.espesor, porCortar: 0, total: 0 }); }
+    if (!x.hex && /^#[0-9a-f]{6}$/i.test(String(c.color_hex || ''))) x.hex = c.color_hex;
+    x.total++;
+    if (e === 'pedido' || e === 'en_corte') x.porCortar++;
+  });
+  return [...M.values()].sort((a, b) => b.porCortar - a.porCortar || b.total - a.total || sfcComboTxt(a).localeCompare(sfcComboTxt(b), 'es'));
+}
+function sfcbFiltro(combos) {
+  let f = STATE.sfcbFiltro;
+  if (f == null) { try { f = localStorage.getItem(SFCB_FILTRO_KEY) || ''; } catch (_) { f = ''; } STATE.sfcbFiltro = f; }
+  if (f && !combos.some(x => x.key === f)) { f = STATE.sfcbFiltro = ''; try { localStorage.removeItem(SFCB_FILTRO_KEY); } catch (_) {} }
+  return f;
+}
+function sfcbElegirFiltro(k) {
+  k = String(k || '');
+  if (k === (STATE.sfcbFiltro || '')) return;
+  STATE.sfcbFiltro = k;
+  try { if (k) localStorage.setItem(SFCB_FILTRO_KEY, k); else localStorage.removeItem(SFCB_FILTRO_KEY); } catch (_) {}
+  const l = document.querySelector('.sfc-wrap [data-sfc-lista]'); if (!l) return;
+  l.querySelectorAll('[data-sfcb-list]').forEach(x => { x.scrollTop = 0; });   // otra combinación: cada columna desde arriba
+  sfcbPintar(l, true);
+}
+function sfcbFiltrosHtml(combos, f) {
+  if (!combos.length) return '';
+  const por = combos.reduce((s, x) => s + x.porCortar, 0), sel = f ? combos.find(x => x.key === f) : null;
+  const chip = (k, cont, n, tit) => `<button type="button" class="sfcb-fchip${k === f ? ' on' : ''}${n ? '' : ' cero'}" data-sfcb-filtro="${escapeHtml(k)}" aria-pressed="${k === f ? 'true' : 'false'}" title="${escapeHtml(tit)}">${cont}<b>${n}</b></button>`;
+  const chips = chip('', '<span class="t">Todos</span>', por, 'Todos los materiales: ' + por + ' por cortar')
+    + combos.map(x => { const t = sfcComboTxt(x); return chip(x.key, sfcMuestra(x.colorKey, x.hex) + `<span class="t">${escapeHtml(t)}</span>`, x.porCortar, t + ': ' + x.porCortar + ' por cortar'); }).join('');
+  const armar = (isAdmin() || isFranOnly()) && sel && sel.porCortar
+    ? `<button type="button" class="btn btn-cyan sfcb-armar" data-sfcb-armar title="Abre el nesting con los archivos de lo que falta cortar en ${escapeHtml(sfcComboTxt(sel))}">🧩 Armar placas</button>` : '';
+  return `<div class="sfcb-filtros"><div class="sfcb-fchips" data-sfcb-filtros role="group" aria-label="Filtrar por material, color y espesor">${chips}</div>${armar}</div>`;
+}
+// "🧩 Armar placas" (Gaspar y Fran; Sin Frontera no): los pedidos de la combinación elegida que faltan cortar, tildados, con sus
+// archivos. "Abrir en el nesting" abre la pestaña en el mismo toque (si no, el navegador la bloquea), baja los archivos con el
+// link de siempre (sfUrl, que ya lleva el token: el nesting no toca tokens) y se los pasa por postMessage, de pestaña a pestaña
+// del mismo origen (ver "lote del CRM" en nesting/index.html): el nesting avisa {tipo:'nesting-listo', lote} y recibe
+// {tipo:'nesting-lote', lote, titulo, material, color, color_hex, espesor, pedidos, archivos: [File]}. Cada archivo lleva el
+// pedido adelante ("#8 acrilicos iglesia.dxf"): así el nesting muestra de qué pedido es cada pieza.
+const SFC_NEST_EXT = /\.(dxf|pdf|ai)$/i;   // lo que lee el nesting
+function sfcbLoteId() {
+  const b = new Uint8Array(12);
+  try { crypto.getRandomValues(b); } catch (_) { for (let i = 0; i < b.length; i++) b[i] = Math.floor(Math.random() * 256); }
+  return Array.from(b, v => v.toString(16).padStart(2, '0')).join('');
+}
+// Un archivo de un pedido de corte (el mismo link que el botón del archivo), como File con el pedido adelante del nombre.
+async function sfcbBajarArchivo(c, y, onBytes) {
+  const r = await fetch(sfUrl('c=' + c.id + '&i=' + y.i + (y.a.v ? '&v=' + encodeURIComponent(y.a.v) : '') + '&dl=1'));
+  if (!r.ok) throw new Error('error ' + r.status);
+  let blob;
+  if (r.body && r.body.getReader) {
+    const rd = r.body.getReader(), partes = []; let n = 0;
+    for (;;) { const { done, value } = await rd.read(); if (done) break; partes.push(value); n += value.length; onBytes(n); }
+    blob = new Blob(partes);
+  } else blob = await r.blob();
+  if (!blob.size) throw new Error('vacío');
+  return new File([blob], '#' + c.id + ' ' + String(y.a.nombre || 'archivo'), { type: String(r.headers.get('Content-Type') || '').split(';')[0] || y.a.tipo || 'application/octet-stream' });
+}
+// Baja los archivos (de a tres) y se los pasa a la pestaña w cuando ella avisa que está lista. Devuelve { estado: 'ok' | 'cerrada'
+// | 'sin_respuesta' | 'error', fallaron }. Si la cierran antes, deja de esperar; si 45 s después de tener todo bajado todavía no
+// avisó que está lista, también (mientras baja no hay tope: un archivo de 95 MB puede tardar).
+function sfcbPasarAlNesting(w, lote, meta, lista, onProg) {
+  return new Promise(resolve => {
+    const total = lista.length, files = new Array(total), fallaron = [];
+    let listo = false, fin = false, hechos = 0, sig = 0, bajados = false, tTope = null;
+    const mandar = m => { try { if (w.closed) return false; w.postMessage(m, location.origin); return true; } catch (_) { return false; } };
+    const salir = res => {
+      if (fin) return; fin = true;
+      window.removeEventListener('message', onMsg); clearInterval(vigia); clearTimeout(tTope);
+      resolve(Object.assign({ fallaron }, res));
+    };
+    const enviar = () => {
+      if (fin || !listo || !bajados) return;
+      const archivos = files.filter(Boolean);
+      const ok = mandar({ tipo: 'nesting-lote', lote, titulo: meta.titulo, material: meta.material, color: meta.color, color_hex: meta.hex, espesor: meta.espesor, pedidos: meta.pedidos, archivos, fallaron: fallaron.slice() });
+      salir({ estado: ok ? 'ok' : (w.closed ? 'cerrada' : 'error'), n: archivos.length });
+    };
+    const onMsg = e => {
+      if (e.origin !== location.origin || e.source !== w) return;
+      const d = e.data; if (!d || typeof d !== 'object' || d.lote !== lote || d.tipo !== 'nesting-listo') return;
+      listo = true;
+      if (bajados) enviar(); else mandar({ tipo: 'nesting-progreso', lote, hechos, total });
+    };
+    window.addEventListener('message', onMsg);
+    const vigia = setInterval(() => { if (w.closed) salir({ estado: 'cerrada' }); }, 700);
+    const uno = async () => {
+      while (sig < total && !fin) {
+        const k = sig++, { it, y } = lista[k];
+        y.st = 'bajando'; y.pct = 0; onProg();
+        try { files[k] = await sfcbBajarArchivo(it.c, y, n => { y.pct = Math.min(99, Math.round(100 * n / Math.max(1, +y.a.bytes || n))); onProg(); }); y.st = 'hecho'; }
+        catch (_) { y.st = 'fallo'; fallaron.push('#' + it.c.id + ' ' + y.a.nombre); }
+        hechos++; onProg();
+        if (listo) mandar({ tipo: 'nesting-progreso', lote, hechos, total });
+      }
+    };
+    Promise.all([uno(), uno(), uno()]).then(() => {
+      bajados = true; onProg(); enviar();
+      // Ya está todo bajado y la pestaña no avisó (por ejemplo, se abrió sin el CRM detrás): 45 s más y se deja de esperar.
+      if (!fin) tTope = setTimeout(() => salir({ estado: 'sin_respuesta' }), 45000);
+    });
+  });
+}
+function sfcbArmar() {
+  if (!(isAdmin() || isFranOnly()) || document.querySelector('.sfcb-armar-bg')) return;
+  const D = STATE.sfCortes; if (!D || D.error) return;
+  const combos = sfcCombos(D.cortes || []), f = sfcbFiltro(combos), x = combos.find(y => y.key === f); if (!x) return;
+  const orden = { pedido: 0, en_corte: 1 }, et = c => orden[sfcEstado(c.estado)[0]];
+  const peds = (D.cortes || []).filter(c => sfcComboKey(c) === f && et(c) != null)
+    .sort((a, b) => et(a) - et(b) || String(a.fecha || '9999').localeCompare(String(b.fecha || '9999')) || a.id - b.id);
+  // Un pedido sin ningún archivo que el nesting lea (un .f3d, fotos) queda a la vista pero sin tildar: no suma nada a las placas
+  // y no tiene que aparecer en "Pasar a En corte".
+  const P = { busy: false, moviendo: false, cerrado: false, enviados: null, msg: '', err: '',
+    items: peds.map(c => { const arch = (c.archivos || []).map((a, i) => ({ i, a, ok: SFC_NEST_EXT.test(String(a.nombre || '')), st: '', pct: 0 })); return { c, arch, on: arch.some(y => y.ok) }; }) };
+  const bg = document.createElement('div'); bg.className = 'modal-bg sfcb-armar-bg';
+  bg.innerHTML = `<div class="modal sfcb-armar-modal" role="dialog" aria-modal="true" aria-labelledby="sfcb-armar-t">
+    <div class="modal-h sfcb-armar-h"><h3 id="sfcb-armar-t">🧩 Armar placas</h3><button type="button" class="logi-link" data-x>cerrar</button></div>
+    <div class="modal-body" data-cuerpo></div>
+    <div class="sfcb-armar-pie" data-pie></div></div>`;
+  document.body.appendChild(bg); void bg.offsetWidth; bg.classList.add('open');
+  const cuerpo = bg.querySelector('[data-cuerpo]'), pie = bg.querySelector('[data-pie]');
+  const archivoTxt = y => !y.ok ? 'no se puede acomodar: exportalo a DXF o PDF' : y.st === 'bajando' ? 'bajando ' + (y.pct || 0) + ' %' : y.st === 'hecho' ? 'bajado ✓' : y.st === 'fallo' ? 'no se pudo bajar' : sfcPeso(y.a.bytes);
+  const itemHtml = it => {
+    const c = sfcCorte(it.c.id) || it.c, E = sfcEstado(c.estado), t = sfcTitulo(c), sirven = it.arch.some(y => y.ok);
+    const archs = it.arch.map(y => `<li class="${y.ok ? 'ok' : 'no'}${y.st ? ' ' + y.st : ''}"><span class="an">${/^image\//.test(y.a.tipo || '') ? '🖼' : '📄'} ${escapeHtml(y.a.nombre)}</span><span class="as">${archivoTxt(y)}</span></li>`).join('');
+    return `<div class="sfcb-ap${it.on ? ' on' : ''}${sirven ? '' : ' nada'}" data-ap-item="${c.id}">
+      <label class="sfcb-ap-h"><input type="checkbox" data-ap="${c.id}"${it.on ? ' checked' : ''}${sirven && !P.busy ? '' : ' disabled'}><span class="ln-num">#${c.id}</span><span class="n${t.sinNombre ? ' sin-nombre' : ''}">${escapeHtml(t.txt)}</span><span class="sfc-est-pill" style="--c:${E[2]}">${E[1]}</span></label>
+      <ul class="sfcb-ap-archs">${archs || '<li class="no"><span class="as">Sin archivos</span></li>'}</ul></div>`;
+  };
+  const bajando = () => !!P.lista && P.lista.some(z => !z.y.st || z.y.st === 'bajando');
+  const archivosN = () => P.items.filter(it => it.on).reduce((s, it) => s + it.arch.filter(y => y.ok).length, 0);
+  const paraEnCorte = () => [...(P.enviados || [])].filter(id => { const c = sfcCorte(id); return c && sfcEstado(c.estado)[0] === 'pedido'; });
+  const pintaPie = () => {
+    const n = archivosN(), ec = paraEnCorte();
+    pie.innerHTML = `<button type="button" class="btn btn-cyan" data-abrir${n && !P.busy ? '' : ' disabled'}>${P.busy ? (bajando() ? 'Bajando los archivos…' : 'Esperando el nesting…') : 'Abrir en el nesting (' + n + ' archivo' + (n === 1 ? '' : 's') + ')'}</button>`
+      + (ec.length ? `<button type="button" class="btn" data-en-corte${P.moviendo ? ' disabled' : ''} title="Los que estaban en Pedido pasan a En corte, como con el selector de cada tarjeta">${P.moviendo ? 'Pasando a En corte…' : 'Pasar a En corte: ' + ec.map(i => '#' + i).join(', ')}</button>` : '');
+  };
+  const pinta = () => {
+    // Mientras se pasa: bajando, o ya bajado y esperando que la pestaña del nesting avise.
+    const msg = P.busy ? (bajando() ? 'Bajando los archivos para el nesting…' : 'Esperando la pestaña del nesting…') : P.msg;
+    cuerpo.innerHTML = `<div class="sfcb-ap-combo">${sfcMuestra(x.colorKey, x.hex)}<b>${escapeHtml(sfcComboTxt(x))}</b></div>
+      <div class="sfcb-ap-ayuda">Tildá los pedidos que van en estas placas: el nesting se abre en otra pestaña con sus archivos.</div>
+      <div class="sfcb-ap-lista">${P.items.length ? P.items.map(itemHtml).join('') : '<div class="sfk-vacio">No queda nada por cortar en este material.</div>'}</div>
+      <div class="sfcb-ap-estado" role="status" aria-live="polite">${msg ? `<span>${escapeHtml(msg)}</span>` : ''}${P.err ? `<span class="err">${escapeHtml(P.err)}</span>` : ''}</div>`;
+    pintaPie();
+  };
+  // El avance repinta como mucho cada 150 ms; el último siempre se pinta (si no, quedaba "Bajando…" con todo ya bajado).
+  let tPinta = 0, tPend = null;
+  const pintaYa = () => {
+    if (P.cerrado || tPend) return;
+    const falta = 150 - (Date.now() - tPinta);
+    if (falta > 0) { tPend = setTimeout(() => { tPend = null; if (!P.cerrado) { tPinta = Date.now(); pinta(); } }, falta); return; }
+    tPinta = Date.now(); pinta();
+  };
+  const fin = () => { P.cerrado = true; bg.classList.remove('open'); setTimeout(() => bg.remove(), 150); };
+  const abrir = () => {
+    if (P.busy) return;
+    const items = P.items.filter(it => it.on), lista = [];
+    items.forEach(it => it.arch.forEach(y => { y.st = ''; y.pct = 0; if (y.ok) lista.push({ it, y }); }));
+    if (!lista.length) return;
+    const lote = sfcbLoteId();
+    // La pestaña se abre YA, en el mismo toque: si se abre después de bajar los archivos, el navegador la bloquea.
+    let w = null; try { w = window.open('nesting/?lote=' + lote, '_blank'); } catch (_) {}
+    if (!w) { P.err = 'El navegador no dejó abrir la pestaña del nesting. Permití las ventanas emergentes de este sitio y probá de nuevo.'; pinta(); return; }
+    P.busy = true; P.err = ''; P.enviados = null; P.msg = ''; P.lista = lista; pinta();
+    const meta = { titulo: sfcComboTxt(x), material: sfcLbl(SFC_MATERIALES, x.material), color: x.color, hex: SFC_COLOR_MUESTRA[x.colorKey] || x.hex || '',
+      espesor: sfcEspNum(x.espesor) != null ? String(sfcEspNum(x.espesor)) : String(x.espesor || ''), pedidos: items.filter(it => it.arch.some(y => y.ok)).map(it => ({ id: it.c.id, nombre: sfcTitulo(sfcCorte(it.c.id) || it.c).txt })) };
+    sfcbPasarAlNesting(w, lote, meta, lista, pintaYa).then(res => {
+      P.busy = false;
+      const malos = res.fallaron.length ? 'No se pudo bajar: ' + res.fallaron.join(', ') + '.' : '';
+      if (res.estado === 'ok') {
+        P.enviados = new Set(lista.filter(z => z.y.st === 'hecho').map(z => z.it.c.id));
+        P.msg = res.n ? 'Listo: ' + res.n + ' archivo' + (res.n === 1 ? '' : 's') + ' en la pestaña del nesting.' : '';
+        P.err = res.n ? (malos ? malos + ' Los demás se mandaron.' : '') : 'No se pudo bajar ningún archivo. Probá de nuevo en un rato.';
+      } else {
+        P.msg = '';
+        P.err = res.estado === 'cerrada' ? 'Se cerró la pestaña del nesting antes de que lleguen los archivos. Tocá de nuevo "Abrir en el nesting".'
+          : res.estado === 'sin_respuesta' ? 'La pestaña del nesting no contestó. Cerrala y tocá de nuevo "Abrir en el nesting".'
+          : 'No se pudieron pasar los archivos al nesting. Probá de nuevo.';
+      }
+      if (P.cerrado) { if (P.err || P.msg) niToast(P.err || P.msg, { error: !!P.err && !(res.estado === 'ok' && res.n) }); return; }
+      pinta();
+    });
+  };
+  const pasar = async () => {
+    const ids = paraEnCorte(); if (P.moviendo || !ids.length) return;
+    P.moviendo = true; pintaPie();
+    for (const id of ids) { const c = sfcCorte(id); if (c && sfcEstado(c.estado)[0] === 'pedido') await sfcCambiarEstado(id, 'en_corte', null); }
+    // La lista que quedó (una recarga que llegó en el medio puede tener todavía el estado de antes).
+    try { await sfcCargar({ silent: true }); } catch (_) {}
+    P.moviendo = false;
+    const ok = ids.filter(id => { const c = sfcCorte(id); return c && c.estado === 'en_corte'; });
+    if (ok.length) { P.msg = 'Pasaron a En corte: ' + ok.map(i => '#' + i).join(', ') + '.'; P.err = ''; }
+    if (!P.cerrado) pinta();
+  };
+  bg.addEventListener('click', e => {
+    if (e.target === bg || e.target.closest('[data-x]')) { fin(); return; }
+    if (e.target.closest('[data-abrir]')) { abrir(); return; }
+    if (e.target.closest('[data-en-corte]')) pasar();
+  });
+  bg.addEventListener('change', e => {
+    const cb = e.target.closest && e.target.closest('[data-ap]'); if (!cb) return;
+    const it = P.items.find(y => y.c.id === +cb.getAttribute('data-ap')); if (!it) return;
+    it.on = cb.checked;
+    const d = bg.querySelector('[data-ap-item="' + it.c.id + '"]'); if (d) d.classList.toggle('on', it.on);
+    pintaPie();
+  });
+  bg.addEventListener('keydown', e => { if (e.key === 'Escape') fin(); });
+  pinta();
+  setTimeout(() => { const b = pie.querySelector('[data-abrir]:not([disabled])') || bg.querySelector('[data-x]'); if (b) b.focus(); }, 50);
+}
 // Firma de lo que se ve: el refresco de fondo solo repinta si algo cambió (incluye el día, por "faltan N días").
 function sfcbSig() {
   const D = STATE.sfCortes;
   return JSON.stringify([D ? (D.error || '') : null, D && D.cortes ? D.cortes : null, sfcbEtapaCel((D && D.cortes) || []), !!STATE.sfcbEntTodos,
-    new Date().toDateString(), isAdmin(), isFranOnly(), sfkFino()]);
+    new Date().toDateString(), isAdmin(), isFranOnly(), sfkFino(), STATE.sfcbFiltro || '']);
 }
 // Scroll del tablero (cada columna, el tablero de costado y las pestañas del celular): se anota cuando se mueve (sfcbBind lo
 // escucha en captura) y se devuelve después de cada redibujo: el del tablero solo (sfcbPintar) y el de la pantalla entera
@@ -9806,13 +10039,19 @@ function sfcbScrollAnotar(x) {
   if (k) S.cols[k] = x.scrollTop;
   else if (x.hasAttribute('data-sfcb-board')) S.board = x.scrollLeft;
   else if (x.hasAttribute('data-sfcb-tabs')) S.tabs = x.scrollLeft;
+  else if (x.hasAttribute('data-sfcb-filtros')) S.filtros = x.scrollLeft;
 }
 function sfcbScrollPoner(l) {
-  const S = STATE._sfcbScroll; if (!S || !l) return;
+  if (!l) return;
+  const S = STATE._sfcbScroll, fi = l.querySelector('[data-sfcb-filtros]');
+  // Chips del filtro (en el celular se deslizan de costado): la primera vez, el elegido a la vista; después, donde los dejaron.
+  if (fi && (!S || S.filtros == null)) { const on = fi.querySelector('.sfcb-fchip.on'); if (on && on.offsetLeft + on.offsetWidth > fi.clientWidth) fi.scrollLeft = on.offsetLeft - 8; }
+  if (!S) return;
   l.querySelectorAll('[data-sfcb-list]').forEach(x => { const s = S.cols[x.getAttribute('data-sfcb-list')]; if (s) x.scrollTop = s; });
   const tb = l.querySelector('[data-sfcb-tabs]'), bd = l.querySelector('[data-sfcb-board]');
   if (tb && S.tabs) tb.scrollLeft = S.tabs;
   if (bd && S.board) bd.scrollLeft = S.board;
+  if (fi && S.filtros) fi.scrollLeft = S.filtros;
 }
 // Quién y cuándo va en un renglón (cortado con "…" si no entra): el texto entero, al pasar el mouse.
 function sfcbTitulos(l) { if (l) l.querySelectorAll('.sfcb-card .sfc-meta').forEach(m => { m.title = m.textContent; }); }
@@ -9830,7 +10069,7 @@ function sfcbPintar(l, forzar) {
   const sig = sfcbSig();
   if (forzar || l.getAttribute('data-sig') !== sig) {
     if (!forzar && sfcbEligiendo(l)) { STATE._sfcbPend = true; return; }
-    l.querySelectorAll('[data-sfcb-list], [data-sfcb-board], [data-sfcb-tabs]').forEach(x => sfcbScrollAnotar(x));
+    l.querySelectorAll('[data-sfcb-list], [data-sfcb-board], [data-sfcb-tabs], [data-sfcb-filtros]').forEach(x => sfcbScrollAnotar(x));
     l.setAttribute('data-sig', sig);
     l.innerHTML = sfcListaHtml();
     sfcbScrollPoner(l);
@@ -9860,6 +10099,8 @@ function sfcbElegirTab(id) {
 function sfcbBind(root) {
   root.addEventListener('click', e => {
     const tab = e.target.closest('[data-sfcb-tab]'); if (tab) { sfcbElegirTab(tab.getAttribute('data-sfcb-tab')); return; }
+    const fch = e.target.closest('[data-sfcb-filtro]'); if (fch) { sfcbElegirFiltro(fch.getAttribute('data-sfcb-filtro')); return; }
+    if (e.target.closest('[data-sfcb-armar]')) { sfcbArmar(); return; }
     if (e.target.closest('[data-sfcb-ent-todos]')) {
       STATE.sfcbEntTodos = !STATE.sfcbEntTodos;
       const l = document.querySelector('.sfc-wrap [data-sfc-lista]'); if (l) sfcbPintar(l, true);
@@ -9881,7 +10122,7 @@ function sfcbBind(root) {
     const v = d.querySelector('.sfcb-canc-ver'); if (v) v.textContent = d.open ? 'ocultar' : 'ver';
   }, true);
   // Scroll de las columnas: 'scroll' tampoco burbujea. Se anota para devolverlo después de un redibujo (sfcbScrollPoner).
-  root.addEventListener('scroll', e => { const t = e.target; if (t && t.nodeType === 1 && t.matches('[data-sfcb-list], [data-sfcb-board], [data-sfcb-tabs]')) sfcbScrollAnotar(t); }, true);
+  root.addEventListener('scroll', e => { const t = e.target; if (t && t.nodeType === 1 && t.matches('[data-sfcb-list], [data-sfcb-board], [data-sfcb-tabs], [data-sfcb-filtros]')) sfcbScrollAnotar(t); }, true);
   // Lo que llegó mientras se elegía un estado en otra tarjeta (sfcbPintar esperó): se pinta cuando ese selector suelta el foco o
   // cambia (si cambió, sfcCambiarEstado ya lo deshabilitó y la tarjeta se repinta atenuada en su lugar hasta que guarde).
   const pendiente = e => {

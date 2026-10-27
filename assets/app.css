@@ -4931,6 +4931,59 @@ table.t.t-pedidos .prod-celda-linea { white-space: normal; line-height: 1.35; }
   .sfcb-tabs .sfk-tab { padding: 6px 5px; font-size: 11.5px; }
   .sfcb-tabs .sfk-tab b { margin-left: 3px; }
 }
+/* Filtro por material + color + espesor (27-oct-2026): un chip por combinación con lo que falta cortar; en la compu bajan de
+   renglón, en el celular se deslizan de costado (sin mover la página). "🧩 Armar placas" a la derecha (abajo en el celular). */
+.sfcb-filtros { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin: 8px 0 10px; }
+.sfcb-fchips { flex: 1 1 0; min-width: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.sfcb-fchip { display: inline-flex; align-items: center; max-width: 100%; min-width: 0; border: 1px solid var(--border); background: var(--ink-100); color: var(--fg); border-radius: 999px; padding: 4px 5px 4px 11px; font: inherit; font-size: 12.5px; font-weight: 600; line-height: 18px; cursor: pointer; white-space: nowrap; }
+.sfcb-fchip:hover { border-color: var(--neon-cyan); }
+.sfcb-fchip:focus-visible { outline: 2px solid var(--neon-cyan); outline-offset: 2px; }
+.sfcb-fchip .t { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.sfcb-fchip .sfc-sw { width: 12px; height: 12px; margin-right: 6px; }
+.sfcb-fchip b { flex: 0 0 auto; margin-left: 7px; min-width: 20px; padding: 0 6px; border-radius: 999px; background: var(--ink-200); color: var(--fg); font: 700 11.5px/18px var(--font-mono, monospace); text-align: center; }
+.sfcb-fchip.cero { color: var(--fg-muted); }
+.sfcb-fchip.cero b { color: var(--fg-subtle); background: transparent; }
+.sfcb-fchip.on { background: var(--neon-cyan); border-color: var(--neon-cyan); color: var(--ink-050); }
+.sfcb-fchip.on b { background: rgba(0,0,0,.2); color: var(--ink-050); }
+.sfcb-fchip.on .sfc-sw { border-color: rgba(0,0,0,.45); }
+.sfcb-armar { flex: 0 0 auto; margin-left: auto; font-size: 13px; padding: 7px 14px; }
+/* Panel de "Armar placas" */
+.modal.sfcb-armar-modal { max-width: 620px; max-height: 88vh; }
+.sfcb-armar-h { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.sfcb-ap-combo { display: flex; align-items: center; font-size: 15px; color: var(--fg); margin-bottom: 2px; }
+.sfcb-ap-ayuda { font-size: 12.5px; color: var(--fg-subtle); margin-bottom: 10px; }
+.sfcb-ap-lista { display: flex; flex-direction: column; gap: 8px; }
+.sfcb-ap { border: 1px solid var(--border); border-radius: 10px; background: var(--ink-100); padding: 8px 10px; transition: opacity .12s; }
+.sfcb-ap:not(.on) { opacity: .6; }
+.sfcb-ap-h { display: flex; align-items: center; gap: 8px; cursor: pointer; color: var(--fg); font-size: 14px; font-weight: 700; }
+.sfcb-ap.nada .sfcb-ap-h { cursor: default; }
+.sfcb-ap-h input { flex: 0 0 auto; width: 18px; height: 18px; margin: 0; accent-color: var(--neon-cyan); }
+.sfcb-ap-h .ln-num { flex: 0 0 auto; }
+.sfcb-ap-h .n { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.sfcb-ap-h .n.sin-nombre { font-style: italic; color: var(--fg-muted); }
+.sfcb-ap-archs { list-style: none; margin: 6px 0 0 26px; padding: 0; display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; }
+.sfcb-ap-archs li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
+.sfcb-ap-archs .an { min-width: 0; overflow-wrap: anywhere; color: var(--fg); }
+.sfcb-ap-archs .as { font-size: 12px; color: var(--fg-subtle); }
+.sfcb-ap-archs li.no .an, .sfcb-ap-archs li.no .as { color: var(--fg-faint); }
+.sfcb-ap-archs li.bajando .as { color: var(--neon-cyan); }
+.sfcb-ap-archs li.hecho .as { color: #22c55e; }
+.sfcb-ap-archs li.fallo .as { color: #f87171; }
+.sfcb-ap-estado { display: flex; flex-direction: column; gap: 4px; margin-top: 12px; font-size: 13px; color: var(--fg); }
+.sfcb-ap-estado:empty { display: none; }
+.sfcb-ap-estado .err { color: #f87171; }
+.sfcb-armar-pie { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 20px calc(12px + env(safe-area-inset-bottom, 0px)); border-top: 1px solid var(--border); }
+.sfcb-armar-pie .btn { min-height: 40px; }
+.sfcb-armar-pie .btn[disabled] { opacity: .5; cursor: default; }
+@media (max-width: 760px) {
+  .sfcb-filtros { margin: 6px 0 2px; }
+  .sfcb-fchips { flex: 1 1 100%; flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; padding: 2px 0; }
+  .sfcb-fchips::-webkit-scrollbar { display: none; }
+  .sfcb-fchip { flex: 0 0 auto; max-width: none; min-height: 36px; font-size: 13px; }
+  .sfcb-armar { flex: 1 1 100%; justify-content: center; min-height: 42px; margin-left: 0; }
+  .sfcb-armar-pie .btn { flex: 1 1 100%; justify-content: center; }
+  .sfcb-ap-archs { margin-left: 0; }
+}
 
 /* Chat: en la compu los filtros (Todos, No leídos, Para cotizar, Por cobrar, Etiquetas, Servicio de corte) bajan a otra fila
    en vez de quedar cortados: la barra no tiene scroll visible y "Etiquetas" quedaba afuera (Gaspar 16-oct). En el celular
