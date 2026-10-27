@@ -9974,7 +9974,7 @@ function sfcbArmar() {
     if (!lista.length) return;
     const lote = sfcbLoteId();
     // La pestaña se abre YA, en el mismo toque: si se abre después de bajar los archivos, el navegador la bloquea.
-    let w = null; try { w = window.open('nesting/?lote=' + lote, '_blank'); } catch (_) {}
+    let w = null; try { w = window.open('nesting/#lote=' + lote, '_blank'); } catch (_) {}
     if (!w) { P.err = 'El navegador no dejó abrir la pestaña del nesting. Permití las ventanas emergentes de este sitio y probá de nuevo.'; pinta(); return; }
     P.busy = true; P.err = ''; P.enviados = null; P.msg = ''; P.lista = lista; pinta();
     const meta = { titulo: sfcComboTxt(x), material: sfcLbl(SFC_MATERIALES, x.material), color: x.color, hex: SFC_COLOR_MUESTRA[x.colorKey] || x.hex || '',

@@ -2013,7 +2013,8 @@ $('c-ver-ped').addEventListener('change', () => { if (S.mejor) pintarResultado()
 // Lote del CRM: el apretón de manos (ver "lote del CRM" más arriba). Sin ?lote= (o abierta aparte, sin el CRM) es el nesting de siempre.
 (() => {
   let lote = '';
-  try { lote = new URLSearchParams(location.search).get('lote') || ''; } catch (_) {}
+  // En el # (no en ?lote=): el service worker guarda las páginas por URL completa y con ?lote= juntaba una copia por lote.
+  try { lote = new URLSearchParams(location.hash.slice(1)).get('lote') || new URLSearchParams(location.search).get('lote') || ''; } catch (_) {}
   if (!/^[A-Za-z0-9_-]{8,64}$/.test(lote)) return;
   let crm = null;
   try { crm = window.opener; } catch (_) {}
