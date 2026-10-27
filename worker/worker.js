@@ -15002,7 +15002,9 @@ function kpiFilaVenta(r, ctx) {
   if (desde && precio > 0) {
     const ref = r.created_at || (r.fecha + 'T23:59:59Z');
     const lista = ctx.pres.porTel.get(tel) || [];
-    let q = null; for (const m of lista) { if (m.ts <= ref) q = m; else break; }
+    // piso (solo en un rango): la misma ventana que usa el mes de esa venta, así da lo mismo en el mes y en el rango.
+    const piso = ctx.presDesde ? ctx.presDesde(r.fecha) : '';
+    let q = null; for (const m of lista) { if (m.ts < piso) continue; if (m.ts <= ref) q = m; else break; }
     // Presupuesto sin firma (send-media no la guardaba): se asume el vendedor de la venta.
     const quien = q ? (adhocSenderSlug(q.snd) || (q.snd ? '' : v)) : v, cuando = q ? q.ts : ref;
     if (quien === v && cuando >= desde) montoNorm = precio / 1.05 + dimmer;
@@ -15012,12 +15014,16 @@ function kpiFilaVenta(r, ctx) {
   return { v, tel, corp, n, monto, montoNorm, bucket, clave };
 }
 
-// Días AR ('YYYY-MM-DD'). kpiDiaAR: el día AR de un instante (los ts sin zona son UTC, como los compara el SQL).
+// Días AR ('YYYY-MM-DD'). kpiDiaAR: el día AR de un instante (los ts sin zona son UTC), con el MISMO borde que el SQL,
+// que compara texto: '…T03:00:00.000Z' < '…T03:00:00Z', así que el primer segundo de un día AR (los ts se guardan con
+// milisegundos) cuenta en el día anterior, igual que en los meses. Así un día dentro de un rango = ese día solo.
 function kpiDiaMas(dia, n) { return new Date(Date.parse(dia + 'T00:00:00Z') + n * 864e5).toISOString().slice(0, 10); }
 function kpiHoyAR() { return new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 10); }
 function kpiDiaAR(ts) {
   const s = String(ts || ''), ms = Date.parse(/(Z|[+-]\d\d:?\d\d)$/i.test(s) ? s : s.replace(' ', 'T') + 'Z');
-  return isFinite(ms) ? new Date(ms - 3 * 3600e3).toISOString().slice(0, 10) : '';
+  if (!isFinite(ms)) return '';
+  const d = new Date(ms - 3 * 3600e3).toISOString().slice(0, 10);
+  return s < d + 'T03:00:00Z' ? kpiDiaMas(d, -1) : d;
 }
 // Rangos de días a gusto (además de los meses): desde el 1-jul-2026 (el primer mes del panel), hasta hoy, ≤92 días.
 const KPI_RANGO_MIN = '2026-07-01', KPI_RANGO_MAX_DIAS = 92;
@@ -15045,6 +15051,12 @@ async function kpiPeriodoVendedores(env, desde, hasta, conDias) {
   const since = desde, untilEx = kpiDiaMas(hasta, 1);
   const sinceUTC = since + 'T03:00:00Z', untilExUTC = untilEx + 'T03:00:00Z';
   const desdeMsgs = new Date(Date.parse(sinceUTC) - 75 * DAY).toISOString();
+  // Ventas (+5%): el último presupuesto antes de una venta se busca desde 75 días antes del día 1 de SU mes, como en el
+  // mes. En un mes completo es la ventana de siempre (desdeMsgs) y no se toca nada; en un rango, la consulta de
+  // presupuestos (la misma, una sola) arranca en el día 1 del mes de "desde" − 75 días y cada venta usa su piso.
+  const esMes = since.slice(8) === '01' && untilEx === kpiMesMas(since.slice(0, 7), 1) + '-01';
+  const presDesde = (dia) => { const ms = Date.parse(String(dia || '').slice(0, 7) + '-01T03:00:00Z'); return isFinite(ms) ? new Date(ms - 75 * DAY).toISOString() : ''; };
+  const desdeMsgsVta = esMes ? desdeMsgs : (presDesde(since) || desdeMsgs);
   const q = async (sql, ...b) => (await env.DB.prepare(sql).bind(...b).all()).results || [];
   const fer = await kpiFeriados(env);
   const NO_MSG = "('status','reaction','system','errors')";
@@ -15117,7 +15129,7 @@ async function kpiPeriodoVendedores(env, desde, hasta, conDias) {
     q(`SELECT b.id, IFNULL(b.cliente_wa_id, '') ph, IFNULL(b.comercial_id, '') com, IFNULL(b.enviado_por, '') por, IFNULL(b.tipo, '') tipo, IFNULL(b.origen_lead, '') ol, IFNULL(b.created_at, '') created_at, IFNULL(b.enviado_at, '') enviado_at, IFNULL(b.cliente_nombre, '') nombre
          FROM briefs b WHERE IFNULL(b.enviado_at, '') >= ? OR IFNULL(b.created_at, '') >= ? OR b.id IN (SELECT CAST(substr(ref, 7) AS INTEGER) FROM wa_log WHERE ref >= 'brief:' AND ref < 'brief;' AND ok = 1 AND ts >= ?) ORDER BY b.id`, sinceUTC, new Date(Date.parse(sinceUTC) - 7 * DAY).toISOString(), sinceUTC),
     q("SELECT ref, IFNULL(message_id, '') message_id, MIN(ts) ts FROM wa_log WHERE ref >= 'brief:' AND ref < 'brief;' AND ok = 1 AND ts >= ? GROUP BY ref, message_id", desdeMsgs),
-    q(`SELECT phone, ts, IFNULL(sender_name, '') snd, IFNULL(wamid, '') wamid, substr(body, 1, 160) body FROM wa_messages WHERE direction = 'outbound' AND ts >= ? AND IFNULL(status, '') != 'failed' AND ${KPI_PRESUP_SQL} ORDER BY ts`, desdeMsgs),
+    q(`SELECT phone, ts, IFNULL(sender_name, '') snd, IFNULL(wamid, '') wamid, substr(body, 1, 160) body FROM wa_messages WHERE direction = 'outbound' AND ts >= ? AND IFNULL(status, '') != 'failed' AND ${KPI_PRESUP_SQL} ORDER BY ts`, desdeMsgsVta),
     // OC del mes. reenvio = la misma OC (mismo cartel) ya se le había mandado a ese cliente en los 60 días previos
     // al mes: cuenta en el mes de la primera. msnd = quién mandó el mensaje (desde el 12-oct); por = oc.enviado_por.
     q(`SELECT o.wamid, o.phone, IFNULL(o.vendedor, '') vendedor, o.ts_out, IFNULL(o.enviado_por, '') por, (SELECT m.sender_name FROM wa_messages m WHERE m.wamid = o.wamid) msnd,
@@ -15146,7 +15158,9 @@ async function kpiPeriodoVendedores(env, desde, hasta, conDias) {
   ]);
 
   const internos = new Set(internosR.map(r => kpiTel(r.phone)));
-  const pres = kpiIndicePresup(presMsgR);
+  // pres = lo de siempre (desde desdeMsgs: evidencia de envío, cohortes); presVta = toda la ventana, para el +5%.
+  const pres = kpiIndicePresup(desdeMsgsVta === desdeMsgs ? presMsgR : presMsgR.filter(m => m.ts >= desdeMsgs));
+  const presVta = desdeMsgsVta === desdeMsgs ? pres : kpiIndicePresup(presMsgR);
   const ocTels = new Set(ocTelR.map(r => kpiTel(r.phone)));
   const asistTels = new Set(asistTelR.map(r => kpiTel(r.tel)).filter(Boolean));
   const importes = new Map(); for (const r of importR) { const t = kpiTel(r.phone); if (t && !importes.has(t)) importes.set(t, r); }
@@ -15274,7 +15288,7 @@ async function kpiPeriodoVendedores(env, desde, hasta, conDias) {
   const ocPrim = new Map(); for (const r of ocPrimR) { const t = kpiTel(r.phone); if (t && (!ocPrim.has(t) || r.t < ocPrim.get(t))) ocPrim.set(t, r.t); }
 
   // --- Ventas ---
-  const ctxV = { internos, ocTels, pres };
+  const ctxV = { internos, ocTels, pres: presVta, presDesde: esMes ? null : presDesde };
   const filas = venR.map(r => { const x = kpiFilaVenta(r, ctxV); x.r = r; return x; });
   for (const x of filas) {
     const o = out[x.v];
@@ -15441,17 +15455,18 @@ async function kpiSemanas(env, mes) {
   return kpiSemanasHasta(env, finMes < hoyAR ? finMes : hoyAR);
 }
 // Las 9 semanas que terminan en la que tiene el día refDia (AR). En un rango: refDia = hasta.
-function kpiLunesDe(refDia) { const ref = new Date(refDia + 'T00:00:00Z'); return kpiDiaMas(refDia, -((ref.getUTCDay() + 6) % 7)); }
-async function kpiSemanasHasta(env, refDia) {
+// tope (solo en un rango que ya terminó): las ventas después de ese día no entran (la última barra corta ahí).
+async function kpiSemanasHasta(env, refDia, tope) {
   const DAY = 864e5;
   const ref = new Date(refDia + 'T00:00:00Z');
   const dow = (ref.getUTCDay() + 6) % 7; // 0 = lunes
   const lunes = new Date(ref.getTime() - (dow + 7 * 8) * DAY);
   const desde = lunes.toISOString().slice(0, 10), hastaEx = new Date(lunes.getTime() + 9 * 7 * DAY).toISOString().slice(0, 10);
+  const finEx = tope && kpiDiaMas(tope, 1) < hastaEx ? kpiDiaMas(tope, 1) : hastaEx;
   const q = async (sql, ...b) => (await env.DB.prepare(sql).bind(...b).all()).results || [];
   const desdeMsgs = new Date(lunes.getTime() - 75 * DAY).toISOString();
   const [rows, presMsgR, ocTelR, internosR] = await Promise.all([
-    q("SELECT id, numero, fecha, IFNULL(comercial_id, 'joaco') com, IFNULL(origen, '') origen, IFNULL(telefono, '') tel, COALESCE(es_corporeo, 0) ec, IFNULL(cartel, '') cartel, COALESCE(cantidad, 1) cant, COALESCE(precio, 0) precio, COALESCE(precio_dimmer, 0) dimmer, IFNULL(cargado_por, '') cargado_por, IFNULL(asistido_por, '') asistido, IFNULL(created_at, '') created_at FROM pedidos WHERE fecha >= ? AND fecha < ?", desde, hastaEx),
+    q("SELECT id, numero, fecha, IFNULL(comercial_id, 'joaco') com, IFNULL(origen, '') origen, IFNULL(telefono, '') tel, COALESCE(es_corporeo, 0) ec, IFNULL(cartel, '') cartel, COALESCE(cantidad, 1) cant, COALESCE(precio, 0) precio, COALESCE(precio_dimmer, 0) dimmer, IFNULL(cargado_por, '') cargado_por, IFNULL(asistido_por, '') asistido, IFNULL(created_at, '') created_at FROM pedidos WHERE fecha >= ? AND fecha < ?", desde, finEx),
     q(`SELECT phone, ts, IFNULL(sender_name, '') snd, IFNULL(wamid, '') wamid, substr(body, 1, 160) body FROM wa_messages WHERE direction = 'outbound' AND ts >= ? AND IFNULL(status, '') != 'failed' AND ${KPI_PRESUP_SQL} ORDER BY ts`, desdeMsgs),
     q("SELECT DISTINCT phone FROM oc_enviadas"),
     q("SELECT phone FROM wa_internal_phones"),
@@ -15475,12 +15490,17 @@ async function kpiSemanasCacheado(env, mes) {
   await kvSet(env, k, JSON.stringify(d));
   return d;
 }
-// Semanas de un rango: dependen solo del lunes de la semana de "hasta" (una fila de caché por semana, no por rango).
+// Semanas de un rango (las 9 que terminan en "hasta"). Si termina hoy, son exactamente las del mes en curso: se usa esa
+// misma fila de caché (pasar de "Oct" a "Hoy" o "7 días" no recalcula). Si ya terminó, la última barra corta en "hasta"
+// (una fila por día de fin, con el TTL de los rangos; las que nadie pidió en 2 días se borran).
 async function kpiSemanasRangoCacheado(env, hasta) {
-  const lunes = kpiLunesDe(hasta), k = `kpi_sem:${KPI_CACHE_V}:w:${lunes}`;
-  try { const r = await env.DB.prepare('SELECT v, updated_at FROM kv_cache WHERE k = ?').bind(k).first(); if (r && Date.now() - Date.parse(r.updated_at) < 10 * 60e3) return JSON.parse(r.v); } catch (_) {}
-  const d = await kpiSemanasHasta(env, hasta);
+  const hoy = kpiHoyAR();
+  if (hasta >= hoy) return kpiSemanasCacheado(env, hoy.slice(0, 7));
+  const k = `kpi_sem:${KPI_CACHE_V}:h:${hasta}`;
+  try { const r = await env.DB.prepare('SELECT v, updated_at FROM kv_cache WHERE k = ?').bind(k).first(); if (r && Date.now() - Date.parse(r.updated_at) < kpiRangoTtl(hasta)) return JSON.parse(r.v); } catch (_) {}
+  const d = await kpiSemanasHasta(env, hasta, hasta);
   await kvSet(env, k, JSON.stringify(d));
+  try { await env.DB.prepare('DELETE FROM kv_cache WHERE k >= ? AND k < ? AND updated_at < ?').bind(`kpi_sem:${KPI_CACHE_V}:h:`, `kpi_sem:${KPI_CACHE_V}:h;`, new Date(Date.now() - 2 * 864e5).toISOString()).run(); } catch (_) {}
   return d;
 }
 // Meta de plata vigente en ese mes: la última que Gaspar fijó para ese mes o uno anterior (nunca una posterior).
@@ -15504,10 +15524,12 @@ async function kpiMesCacheado(env, mes) {
 }
 // Caché de un rango de días: 10 min si incluye hoy o ayer; 1 h si terminó hace menos de 31 días (las cohortes
 // maduran); 12 h después. Los errores no se guardan. Cada rango es una fila: las que nadie pidió en 2 días se borran.
-async function kpiRangoCacheado(env, desde, hasta) {
-  const k = `kpi_rng:${KPI_CACHE_V}:${desde}:${hasta}`;
+function kpiRangoTtl(hasta) {
   const finMs = Date.parse(kpiDiaMas(hasta, 1) + 'T03:00:00Z');
-  const ttl = hasta >= kpiDiaMas(kpiHoyAR(), -1) ? 10 * 60e3 : (Date.now() - finMs > 31 * 864e5 ? 12 * 3600e3 : 3600e3);
+  return hasta >= kpiDiaMas(kpiHoyAR(), -1) ? 10 * 60e3 : (Date.now() - finMs > 31 * 864e5 ? 12 * 3600e3 : 3600e3);
+}
+async function kpiRangoCacheado(env, desde, hasta) {
+  const k = `kpi_rng:${KPI_CACHE_V}:${desde}:${hasta}`, ttl = kpiRangoTtl(hasta);
   try {
     const r = await env.DB.prepare('SELECT v, updated_at FROM kv_cache WHERE k = ?').bind(k).first();
     if (r && Date.now() - Date.parse(r.updated_at) < ttl) return JSON.parse(r.v);
@@ -31294,7 +31316,7 @@ const handler = {
           const _as = String(body.asistido_por || '').trim().toLowerCase();
           if (!['', 'bruno', 'equipo'].includes(_as)) return json({ error: 'asistido_por inválido' }, 400);
           await env.DB.prepare(`UPDATE pedidos SET asistido_por = ? WHERE ${_grp}`).bind(_as, ..._grpArgs).run();
-          try { await env.DB.prepare("DELETE FROM kv_cache WHERE k LIKE 'kpi_mes:%' OR k LIKE 'kpi_sem:%'").run(); } catch (_) {} // que se vea ya en el panel
+          try { await env.DB.prepare("DELETE FROM kv_cache WHERE k LIKE 'kpi_mes:%' OR k LIKE 'kpi_sem:%' OR (k >= 'kpi_rng:' AND k < 'kpi_rng;')").run(); } catch (_) {} // que se vea ya en el panel (meses y rangos)
           touched = true;
         }
 

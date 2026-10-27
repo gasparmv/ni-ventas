@@ -22497,9 +22497,11 @@ function renderRendimiento() {
   .rd-dtbl{min-width:0}
   .rd-dtbl th,.rd-dtbl td{padding:6px 8px}
   .rd-dtbl .dia{position:sticky;left:0;background:var(--rd-surf);z-index:1}
+  .rd-dcmp .dia{width:86px;min-width:86px;max-width:86px;box-sizing:border-box}
+  .rd-dcmp .vnm{position:sticky;left:94px;display:inline-block}
   .rd-dcmp thead tr+tr th:first-child{text-align:right}
   .rd-dtbl .g0{border-left:1px solid var(--rd-bd)}
-  .rd-dcmp thead tr:first-child th:not(:first-child){text-align:center;color:var(--rd-tx);font-size:12px;text-transform:none;letter-spacing:0;font-weight:700}
+  .rd-dcmp thead tr:first-child th:not(:first-child){text-align:left;color:var(--rd-tx);font-size:12px;text-transform:none;letter-spacing:0;font-weight:700}
   .rd-dtbl .rd-cero{color:var(--rd-fnt);font-weight:400}
   .rd-dtbl tfoot td{font-weight:800;border-top:2px solid var(--rd-bd);border-bottom:0}
   .rd-dtbl td.dom{color:var(--rd-fnt)}
@@ -22520,7 +22522,8 @@ async function loadRendimiento(force) {
   const rg = st.rango, qs = rg ? 'desde=' + rg.desde + '&hasta=' + rg.hasta : 'mes=' + st.mes;
   const key = (rg ? rg.desde + ':' + rg.hasta : st.mes) + '|' + vend;
   const c = st.cache[key];
-  if (!force && c && Date.now() - c.at < 120000) { rdPintar(c.data, vend); return; }
+  // ++seq también acá: si quedó un pedido en vuelo (otro período u otra pestaña), su respuesta tardía no pisa esta vista.
+  if (!force && c && Date.now() - c.at < 120000) { ++st.seq; rdPintar(c.data, vend); return; }
   const my = ++st.seq;
   const body = document.getElementById('rd-body');
   if (body && !c) body.innerHTML = '<div class="rd-card"><div class="loading"><div class="spinner"></div></div></div>';
@@ -22558,8 +22561,8 @@ function rdDiasHtml(dias, vs, comparar) {
   const dom = (f) => ' class="dia' + (new Date(f + 'T12:00:00Z').getUTCDay() === 0 ? ' dom' : '') + '"';
   let head, rows, foot, cap;
   if (comparar) {
-    head = `<tr><th rowspan="2" class="dia">Día</th>${vs.map(v => `<th colspan="4" class="g0"><span class="rd-sw" style="background:${rdColor(v.slug)};display:inline-block;margin-right:5px;vertical-align:-1px"></span>${escapeHtml(v.nombre)}</th>`).join('')}</tr>
-      <tr>${vs.map(() => '<th class="g0">Consultas</th><th>Presup.</th><th>OC</th><th>Ventas $</th>').join('')}</tr>`;
+    head = `<tr><th rowspan="2" class="dia">Día</th>${vs.map(v => `<th colspan="4" class="g0"><span class="vnm"><span class="rd-sw" style="background:${rdColor(v.slug)};display:inline-block;margin-right:5px;vertical-align:-1px"></span>${escapeHtml(v.nombre)}</span></th>`).join('')}</tr>
+      <tr>${vs.map(v => { const c = ` style="box-shadow:inset 0 3px 0 ${rdColor(v.slug)}"`; return `<th class="g0"${c}>Consultas</th><th${c}>Presup.</th><th${c}>OC</th><th${c}>Ventas $</th>`; }).join('')}</tr>`;
     const celdas = (p) => `<td class="mono g0">${n(p.consultas)}</td><td class="mono">${n(p.presupuestos)}</td><td class="mono">${n(p.oc)}</td><td class="mono">${plata(p)}</td>`;
     rows = dias.map(d => `<tr><td${dom(d.fecha)}>${rdDiaLabel(d.fecha)}</td>${vs.map(v => celdas(d.por[v.slug] || {})).join('')}</tr>`).join('');
     foot = dias.length > 1 ? `<tr><td class="dia">Total</td>${vs.map(v => celdas(tot[v.slug])).join('')}</tr>` : '';
@@ -22675,7 +22678,7 @@ function rdVendedorHtml(v, mes, rg) {
         ${tile('Hasta el presupuesto', rdHoras(a.presup_mediana_h), `<span class="rd-ref">${a.presup_4h_pct != null ? rdPct(a.presup_4h_pct) + ' en menos de 4 h' : 'lo normal hasta mandarlo'}</span>`)}
       </div>
     </div>
-    <div class="rd-card"><h2>Facturado por semana</h2><div class="cap">9 semanas (lunes a domingo).</div>
+    <div class="rd-card"><h2>Facturado por semana</h2><div class="cap">9 semanas (lunes a domingo).${rg && rg.hasta < faToday() ? ' La última llega hasta el ' + rdRangoLabel(rg.hasta, rg.hasta) + '.' : ''}</div>
       <div class="rd-chart">${rdSvgSemanas(sem)}</div>
       <div class="rd-leg"><span><span class="rd-sw" style="background:${RD_NEON}"></span>Neón</span><span><span class="rd-sw" style="background:${RD_CORP}"></span>Corpóreo</span></div>
     </div>
@@ -22747,16 +22750,20 @@ function rdCompararHtml(d) {
   const fila = (lab, f) => `<tr><td>${lab}</td>${vs.map(v => `<td class="mono">${f(v)}</td>`).join('')}</tr>`;
   const tp = vs.map(v => tasa(v, 'coh_presup14', 'coh_m14')), to = vs.map(v => tasa(v, 'coh_oc30', 'coh_m30p')), tv = vs.map(v => tasa(v, 'coh_venta30', 'coh_m30p'));
   const deDe = (arr) => { const s = [...new Set(arr.filter(x => x.v != null && !x.propio).map(x => x.de))]; return s.length ? ' (' + s.join('/') + ')' : ''; };
+  // En un rango, la barra pide al menos RD_MIN_MADURAS consultas maduras (como el mes); con menos va "—" y el número,
+  // con cuántas son, queda en la tarjeta de cada uno.
+  const barra = (t) => (rg && (t.n || 0) < RD_MIN_MADURAS) ? null : t.v;
+  const semCorte = rg && rg.hasta < faToday() ? ' La última llega hasta el ' + rdRangoLabel(rg.hasta, rg.hasta) + '.' : '';
   const ap = (v) => v.actual.aparte || {};
   const montoN = (n, m) => n ? `${n} · ${rdCorto(m)}` : '0';
   return `
-    <div class="rd-note">Cómo se cuenta: las consultas son las de WhatsApp (Instagram va aparte) y se le cuentan al que las recibió; los presupuestos y las OC al que los mandó; la venta al que la cerró. Las tasas siguen a cada consulta desde que entra (cohorte) y cuentan solo las que ya tuvieron el plazo. Los montos de Facu, Agus y Debi van sin el 5% que les suma el cotizador; la meta se mide contra lo que facturó cada uno de verdad. Lo que no se puede medir limpio no suma: está abajo en "Qué no se cuenta".</div>
+    <div class="rd-note">Cómo se cuenta: las consultas son las de WhatsApp (Instagram va aparte) y se le cuentan al que las recibió; los presupuestos y las OC al que los mandó; la venta al que la cerró. Las tasas siguen a cada consulta desde que entra (cohorte) y cuentan solo las que ya tuvieron el plazo. Los montos de Facu, Agus y Debi van sin el 5% que les suma el cotizador${rg ? '' : '; la meta se mide contra lo que facturó cada uno de verdad'}. Lo que no se puede medir limpio no suma: está abajo en "Qué no se cuenta".</div>
     <div class="rd-vcards">${cards}</div>
     ${rg ? rdDiasHtml(rg.dias, vs, true) : ''}
     <div class="rd-grid2">
-      <div class="rd-card"><h2>Conversión por etapa</h2><div class="cap">De cada 100 consultas o presupuestos, cuántos pasan al paso siguiente. ${rg ? 'Cuenta solo las consultas del período que ya tuvieron el plazo (2 semanas o 30 días); el número que no aparece es porque todavía no maduró.' : 'Si el mes todavía no maduró, se usa el anterior (entre paréntesis).'}</div>
-        <div class="rd-chart">${rdSvgAgrupadas(['Consulta → presupuesto' + deDe(tp), 'Presupuesto → OC' + deDe(to), 'Presupuesto → venta' + deDe(tv)], vs.map((v, i) => ({ color: rdColor(v.slug), vals: [tp[i].v, to[i].v, tv[i].v] })))}</div>${leg}</div>
-      <div class="rd-card"><h2>Facturado por semana</h2><div class="cap">9 semanas, neón + corpóreo, sin lo que cerró el equipo.</div>
+      <div class="rd-card"><h2>Conversión por etapa</h2><div class="cap">De cada 100 consultas o presupuestos, cuántos pasan al paso siguiente. ${rg ? 'Cuenta solo las consultas del período que ya tuvieron el plazo (2 semanas o 30 días). Con menos de ' + RD_MIN_MADURAS + ' va "—": todavía no maduró o son pocas (el número está en cada tarjeta).' : 'Si el mes todavía no maduró, se usa el anterior (entre paréntesis).'}</div>
+        <div class="rd-chart">${rdSvgAgrupadas(['Consulta → presupuesto' + deDe(tp), 'Presupuesto → OC' + deDe(to), 'Presupuesto → venta' + deDe(tv)], vs.map((v, i) => ({ color: rdColor(v.slug), vals: [barra(tp[i]), barra(to[i]), barra(tv[i])] })))}</div>${leg}</div>
+      <div class="rd-card"><h2>Facturado por semana</h2><div class="cap">9 semanas, neón + corpóreo, sin lo que cerró el equipo.${semCorte}</div>
         <div class="rd-chart">${rdSvgLineas(vs.map(v => ({ color: rdColor(v.slug), vals: (v.semanas || []).map(s => s.neon + s.corp) })), ((vs[0] && vs[0].semanas) || []).map(s => s.desde.slice(8, 10) + '/' + s.desde.slice(5, 7)))}</div>${leg}</div>
       <div class="rd-card"><h2>Respuesta después del bot</h2><div class="cap">Lo normal (mediana) en horas hábiles desde "Para cotizar" hasta el primer mensaje, contando a los que nunca se respondieron. La línea marca la meta de 2 h.</div>
         <div class="rd-chart">${rdSvgHorizontales(vs.map(v => ({ label: v.nombre, color: rdColor(v.slug), v: v.actual.resp_mediana_h, txt: (v.actual.resp_censurada ? 'más de ' : '') + rdHoras(v.actual.resp_mediana_h) + ' · presup. ' + rdHoras(v.actual.presup_mediana_h) })), 2)}</div></div>
