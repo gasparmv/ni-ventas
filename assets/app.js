@@ -22353,7 +22353,26 @@ window.rejectImprovement = rejectImprovement;
 // ticket promedio, embudo, tiempo de respuesta y "para hacer hoy". Gaspar ve la comparación de los 3 (montos de
 // Facu/Agus sin el 5% del cotizador) y puede abrir el panel de cada uno. El servidor filtra: un vendedor nunca
 // recibe datos de otro. Consume GET /admin/kpis-vendedor y POST /admin/kpis-vendedor/meta. Sin comisiones.
-let rendState = { mes: '', tab: 'comparar', cache: {}, seq: 0 };
+// rango = { desde, hasta, tipo: 'hoy'|'ayer'|'7d'|'elegir' } → días a gusto en vez de un mes (sin metas ni "mes pasado",
+// con el día por día). null = el mes de siempre.
+let rendState = { mes: '', tab: 'comparar', cache: {}, seq: 0, rango: null, fechasAbiertas: false };
+const RD_RANGO_MIN = '2026-07-01', RD_RANGO_MAX = 92; // igual que el worker (KPI_RANGO_MIN / KPI_RANGO_MAX_DIAS)
+const RD_DOW = ['dom', 'lun', 'mar', 'mié', 'jue', 'vie', 'sáb'];
+function rdDiaMas(d, n) { return new Date(Date.parse(d + 'T00:00:00Z') + n * 864e5).toISOString().slice(0, 10); }
+// "27 oct", "del 20 al 27 oct", "del 28 sep al 4 oct" (con el año si no es el actual).
+function rdRangoLabel(desde, hasta) {
+  const f = (d, conMes) => String(+d.slice(8, 10)) + (conMes ? ' ' + rdMesNombre(d.slice(0, 7)) + (d.slice(0, 4) !== faToday().slice(0, 4) ? " '" + d.slice(2, 4) : '') : '');
+  if (desde === hasta) return f(desde, true);
+  return 'del ' + f(desde, desde.slice(0, 7) !== hasta.slice(0, 7)) + ' al ' + f(hasta, true);
+}
+function rdValidarRango(d, h) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d) || !/^\d{4}-\d{2}-\d{2}$/.test(h)) return 'Elegí las dos fechas.';
+  if (d > h) return '"Desde" tiene que ser antes que "hasta".';
+  if (h > faToday()) return 'Ese día todavía no pasó.';
+  if (d < RD_RANGO_MIN) return 'Hay datos desde el 1 de julio de 2026.';
+  if (Math.round((Date.parse(h) - Date.parse(d)) / 864e5) + 1 > RD_RANGO_MAX) return 'Elegí hasta ' + RD_RANGO_MAX + ' días.';
+  return '';
+}
 const RD_VEND = [{ slug: 'joaco', nombre: 'Joaco', color: '#2E9BD6' }, { slug: 'facundo', nombre: 'Facu', color: '#8B2FD6' }, { slug: 'agustina', nombre: 'Agus', color: '#D6409F' }, { slug: 'debi', nombre: 'Debi', color: '#22A55E' }];
 const RD_NEON = '#B84DFF', RD_CORP = '#E4A33A';
 function rdSlugUsuario() { if (isJoaquinUser(STATE.user)) return 'joaco'; return isSecundario(STATE.user) ? _userKey(STATE.user) : ''; }
@@ -22392,7 +22411,16 @@ function renderRendimiento() {
   if (!/^\d{4}-\d{2}$/.test(st.mes)) { const ms = faMonths(); st.mes = ms[ms.length - 1].key; }
   if (!isAdmin()) st.tab = rdSlugUsuario();
   else if (st.tab !== 'comparar' && !RD_VEND.some(v => v.slug === st.tab)) st.tab = 'comparar';
-  const mesBtns = faMonths().map(m => `<button data-rd-mes="${m.key}" aria-pressed="${st.mes === m.key}">${m.label}</button>`).join('');
+  const rg = st.rango, hoy = faToday();
+  const mesBtns = faMonths().map(m => `<button data-rd-mes="${m.key}" aria-pressed="${!rg && st.mes === m.key}">${m.label}</button>`).join('');
+  const rgBtns = [['hoy', 'Hoy'], ['ayer', 'Ayer'], ['7d', '7 días'], ['elegir', 'Elegir fechas']].map(([k, l]) => `<button data-rd-rango="${k}" aria-pressed="${k === 'elegir' ? !!(st.fechasAbiertas || (rg && rg.tipo === 'elegir')) : !!(rg && rg.tipo === k)}">${l}</button>`).join('');
+  const [fd, fh] = rg ? [rg.desde, rg.hasta] : faRange(st.mes);
+  const fechas = `<div class="rd-fechas" id="rd-fechas"${st.fechasAbiertas ? '' : ' hidden'}>
+      <label>Desde <input type="date" id="rd-desde" min="${RD_RANGO_MIN}" max="${hoy}" value="${escapeHtml(fd)}"></label>
+      <label>Hasta <input type="date" id="rd-hasta" min="${RD_RANGO_MIN}" max="${hoy}" value="${escapeHtml(fh)}"></label>
+      <button class="rd-btn pri" data-rd-ver>Ver</button><span class="rd-ferr" id="rd-ferr" role="alert"></span></div>`;
+  const periodo = rg ? escapeHtml(rdRangoLabel(rg.desde, rg.hasta)) + (rg.desde === rg.hasta ? (rg.hasta === hoy ? ' (hoy)' : (rg.hasta === rdDiaMas(hoy, -1) ? ' (ayer)' : '')) : (rg.hasta === hoy ? ' (hasta hoy)' : ''))
+    : escapeHtml(rdMesLabel(st.mes)) + (faIsCurrentMonth(st.mes) ? ' (en curso)' : '');
   const tabs = isAdmin() ? `<div class="rd-seg">${[['comparar', 'Comparar']].concat(RD_VEND.map(v => [v.slug, v.nombre])).map(([k, l]) => `<button data-rd-tab="${k}" aria-pressed="${st.tab === k}">${l}</button>`).join('')}</div>` : '';
   return `
   <style>
@@ -22459,11 +22487,28 @@ function renderRendimiento() {
   .rd-tbl th{color:var(--rd-mut);font-size:11.5px;text-transform:uppercase;letter-spacing:.04em;font-weight:600}
   .rd-tbl th:first-child,.rd-tbl td:first-child{text-align:left}
   .rd-note{font-size:12px;color:var(--rd-fnt);margin:-4px 0 12px}
+  .rd-fechas{flex-basis:100%;display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:8px 10px;font-size:12.5px;color:var(--rd-mut);font-weight:600}
+  .rd-fechas[hidden]{display:none}
+  .rd-fechas label{display:inline-flex;align-items:center;gap:6px}
+  .rd-fechas input{padding:5px 8px;border:1px solid var(--rd-bd);border-radius:8px;background:var(--rd-surf);color:var(--rd-tx);font:inherit;font-size:13px;min-width:0;color-scheme:light dark}
+  .rd-fechas .rd-btn{font-size:13px;padding:6px 14px}
+  .rd-ferr{flex-basis:100%;text-align:right;color:var(--rd-bad);font-size:12.5px}
+  .rd-ferr:empty{display:none}
+  .rd-dtbl{min-width:0}
+  .rd-dtbl th,.rd-dtbl td{padding:6px 8px}
+  .rd-dtbl .dia{position:sticky;left:0;background:var(--rd-surf);z-index:1}
+  .rd-dcmp thead tr+tr th:first-child{text-align:right}
+  .rd-dtbl .g0{border-left:1px solid var(--rd-bd)}
+  .rd-dcmp thead tr:first-child th:not(:first-child){text-align:center;color:var(--rd-tx);font-size:12px;text-transform:none;letter-spacing:0;font-weight:700}
+  .rd-dtbl .rd-cero{color:var(--rd-fnt);font-weight:400}
+  .rd-dtbl tfoot td{font-weight:800;border-top:2px solid var(--rd-bd);border-bottom:0}
+  .rd-dtbl td.dom{color:var(--rd-fnt)}
   </style>
   <div class="rd-wrap">
     <div class="rd-head">
-      <div><h1>${isAdmin() ? 'Rendimiento del equipo' : 'Mi rendimiento'}</h1><div class="sub" id="rd-sub">${escapeHtml(rdMesLabel(st.mes))}${faIsCurrentMonth(st.mes) ? ' (en curso)' : ''}</div></div>
-      <div class="rd-ctrls">${tabs}<div class="rd-seg">${mesBtns}</div></div>
+      <div><h1>${isAdmin() ? 'Rendimiento del equipo' : 'Mi rendimiento'}</h1><div class="sub" id="rd-sub">${periodo}</div></div>
+      <div class="rd-ctrls">${tabs}<div class="rd-seg">${mesBtns}</div><div class="rd-seg">${rgBtns}</div></div>
+      ${fechas}
     </div>
     <div id="rd-body"><div class="rd-card"><div class="loading"><div class="spinner"></div></div></div></div>
   </div>`;
@@ -22472,7 +22517,8 @@ function renderRendimiento() {
 async function loadRendimiento(force) {
   const st = rendState;
   const vend = isAdmin() ? (st.tab === 'comparar' ? '' : st.tab) : rdSlugUsuario();
-  const key = st.mes + '|' + vend;
+  const rg = st.rango, qs = rg ? 'desde=' + rg.desde + '&hasta=' + rg.hasta : 'mes=' + st.mes;
+  const key = (rg ? rg.desde + ':' + rg.hasta : st.mes) + '|' + vend;
   const c = st.cache[key];
   if (!force && c && Date.now() - c.at < 120000) { rdPintar(c.data, vend); return; }
   const my = ++st.seq;
@@ -22481,12 +22527,12 @@ async function loadRendimiento(force) {
   let err = '';
   for (let intento = 0; intento < 2; intento++) {
     try {
-      const r = await fetch(CONFIG.trackerUrl + '/admin/kpis-vendedor?mes=' + st.mes + (vend ? '&vendedor=' + vend : ''), { headers: { ...authHeaders() } });
+      const r = await fetch(CONFIG.trackerUrl + '/admin/kpis-vendedor?' + qs + (vend ? '&vendedor=' + vend : ''), { headers: { ...authHeaders() } });
       const j = await r.json().catch(() => null);
       if (my !== st.seq) return;
       if (r.ok && j && j.ok) { st.cache[key] = { at: Date.now(), data: j }; rdPintar(j, vend); return; }
-      err = (j && j.error) ? String(j.error) : ('HTTP ' + r.status);
-      if (r.status === 401 || r.status === 403) break;
+      err = (j && (j.motivo || j.error)) ? String(j.motivo || j.error).replace(/\.$/, '') : ('HTTP ' + r.status);
+      if (r.status === 400 || r.status === 401 || r.status === 403) break;
     } catch (_) { if (my !== st.seq) return; err = 'sin conexión'; }
     if (intento === 0) await new Promise(res => setTimeout(res, 1500));
     if (my !== st.seq) return;
@@ -22496,8 +22542,44 @@ async function loadRendimiento(force) {
 }
 function rdPintar(d, vend) {
   const body = document.getElementById('rd-body'); if (!body) return;
-  body.innerHTML = (!vend && d.vendedores) ? rdCompararHtml(d) : (d.vendedor ? rdVendedorHtml(d.vendedor, d.mes) : '<div class="rd-card rd-empty">Sin datos.</div>');
+  body.innerHTML = (!vend && d.vendedores) ? rdCompararHtml(d) : (d.vendedor ? rdVendedorHtml(d.vendedor, d.mes, d.rango ? d : null) : '<div class="rd-card rd-empty">Sin datos.</div>');
   bindRendimientoBody();
+}
+
+// --- Día por día (solo en un rango): una fila por día; en Comparar, las columnas de cada vendedor. Los montos ya vienen
+// en pesos enteros que suman el facturado del período (Comparar sin el 5%, el panel de un vendedor crudo).
+function rdDiaLabel(f) { const d = new Date(f + 'T12:00:00Z'); return RD_DOW[d.getUTCDay()] + ' ' + f.slice(8, 10) + '/' + f.slice(5, 7); }
+function rdDiasHtml(dias, vs, comparar) {
+  if (!dias || !dias.length) return '';
+  const K = ['consultas', 'presupuestos', 'oc', 'ventas', 'neones', 'corporeos', 'monto'];
+  const tot = {}; for (const v of vs) { tot[v.slug] = Object.fromEntries(K.map(k => [k, 0])); for (const d of dias) for (const k of K) tot[v.slug][k] += (d.por[v.slug] || {})[k] || 0; }
+  const n = (x) => x ? String(x) : '<span class="rd-cero">0</span>';
+  const plata = (p) => p.monto ? rdCorto(p.monto) + (p.ventas ? ` <span class="rd-ref">(${p.ventas})</span>` : '') : (p.ventas ? `<span class="rd-ref">(${p.ventas})</span>` : '<span class="rd-cero">—</span>');
+  const dom = (f) => ' class="dia' + (new Date(f + 'T12:00:00Z').getUTCDay() === 0 ? ' dom' : '') + '"';
+  let head, rows, foot, cap;
+  if (comparar) {
+    head = `<tr><th rowspan="2" class="dia">Día</th>${vs.map(v => `<th colspan="4" class="g0"><span class="rd-sw" style="background:${rdColor(v.slug)};display:inline-block;margin-right:5px;vertical-align:-1px"></span>${escapeHtml(v.nombre)}</th>`).join('')}</tr>
+      <tr>${vs.map(() => '<th class="g0">Consultas</th><th>Presup.</th><th>OC</th><th>Ventas $</th>').join('')}</tr>`;
+    const celdas = (p) => `<td class="mono g0">${n(p.consultas)}</td><td class="mono">${n(p.presupuestos)}</td><td class="mono">${n(p.oc)}</td><td class="mono">${plata(p)}</td>`;
+    rows = dias.map(d => `<tr><td${dom(d.fecha)}>${rdDiaLabel(d.fecha)}</td>${vs.map(v => celdas(d.por[v.slug] || {})).join('')}</tr>`).join('');
+    foot = dias.length > 1 ? `<tr><td class="dia">Total</td>${vs.map(v => celdas(tot[v.slug])).join('')}</tr>` : '';
+    cap = 'Consultas de WhatsApp, presupuestos mandados, órdenes de compra y lo vendido (entre paréntesis, clientes). Montos sin el 5%.';
+  } else {
+    const p0 = vs[0];
+    head = '<tr><th class="dia">Día</th><th>Consultas</th><th>Presupuestos</th><th>OC</th><th>Ventas</th><th>Neones</th><th>Corpóreos</th><th>Facturado</th></tr>';
+    const celdas = (p) => `<td class="mono">${n(p.consultas)}</td><td class="mono">${n(p.presupuestos)}</td><td class="mono">${n(p.oc)}</td><td class="mono">${n(p.ventas)}</td><td class="mono">${n(p.neones)}</td><td class="mono">${n(p.corporeos)}</td><td class="mono">${p.monto ? rdCorto(p.monto) : '<span class="rd-cero">—</span>'}</td>`;
+    rows = dias.map(d => `<tr><td${dom(d.fecha)}>${rdDiaLabel(d.fecha)}</td>${celdas(d.por[p0.slug] || {})}</tr>`).join('');
+    foot = dias.length > 1 ? `<tr><td class="dia">Total</td>${celdas(tot[p0.slug])}</tr>` : '';
+    cap = 'Consultas de WhatsApp que te llegaron, presupuestos que mandaste, órdenes de compra, ventas (clientes) y lo facturado.';
+  }
+  return `<div class="rd-card"><h2>Día por día</h2><div class="cap">${cap} Las OC y las ventas cuentan clientes: si un cliente vuelve otro día, suma el primero.</div>
+    <div class="rd-tblw"><table class="rd-tbl rd-dtbl${comparar ? ' rd-dcmp' : ''}"><thead>${head}</thead><tbody>${rows}</tbody>${foot ? `<tfoot>${foot}</tfoot>` : ''}</table></div></div>`;
+}
+// Tasa de cohorte de un rango (viene armada del servidor): sin "mes anterior"; si no hay consultas con el plazo
+// cumplido, el motivo ("todavía no pasaron 14 días").
+function rdTasaRangoTxt(t, unidad) {
+  if (!t || t.v == null) return `<span class="rd-ref">${escapeHtml((t && t.motivo) || 'sin datos')}</span>`;
+  return `<b class="mono">${rdPct(t.v)}</b> <span class="rd-ref">(${t.n} ${unidad}${t.n < RD_MIN_MADURAS ? ', pocas para sacar conclusiones' : ''})</span>`;
 }
 
 // --- Tasas por COHORTE (auditoría 13-oct): de las consultas que entraron en el mes, cuántas llegaron a cada paso,
@@ -22518,8 +22600,9 @@ function rdTasaTxt(t, unidad, mes) {
 }
 
 // --- Panel de UN vendedor (lo que ve él; Gaspar lo ve igual desde la pestaña del vendedor) ---
-function rdVendedorHtml(v, mes) {
-  const a = v.actual, p = v.anterior, h = v.ahora, ap = a.aparte || {};
+// rg = la respuesta de un rango (desde/hasta/dias): sin meta ni "mes pasado", con las tasas del período y el día por día.
+function rdVendedorHtml(v, mes, rg) {
+  const a = v.actual, p = v.anterior || {}, h = v.ahora, ap = a.aparte || {};
   const fact = a.facturado, meta = v.meta || 0;
   const proy = rdProyeccion(fact, mes);
   const pct = meta ? Math.min(100, fact / meta * 100) : 0;
@@ -22543,39 +22626,44 @@ function rdVendedorHtml(v, mes) {
   const re = reL.slice(0, RD_MAX).map(x => `<div class="rd-it"><div class="q"><b>#${escapeHtml(String(x.numero || ''))} ${escapeHtml(x.cartel || '')}</b><small>Vendido hace ${x.dias} días (${escapeHtml(String(x.fecha || '').slice(8, 10) + '/' + String(x.fecha || '').slice(5, 7))}) y sigue en "${escapeHtml(x.est || '')}"</small></div><button class="rd-btn" data-rd-ped="${escapeHtml(String(x.id))}">Abrir pedido →</button></div>`).join('');
   const tP = rdTasa(a, p, 'coh_presup14', 'coh_m14', mes), tC = rdTasa(a, p, 'coh_compra30', 'coh_m30', mes);
   const tV = rdTasa(a, p, 'coh_venta30', 'coh_m30p', mes), tO = rdTasa(a, p, 'coh_oc30', 'coh_m30p', mes);
-  const ticketVs = (c, q) => (c != null && q != null) ? rdVsAnt(Math.round(c), Math.round(q), mes, rdCorto) : `<span class="rd-ref">mes pasado: ${q != null ? rdCorto(q) : '—'}</span>`;
+  const tz = a.tasas || {}, tasaTxt = (t, k, unidad) => rg ? rdTasaRangoTxt(tz[k], unidad) : rdTasaTxt(t, unidad, mes);
+  const vsAnt = (c, q, f) => rg ? '' : rdVsAnt(c, q, mes, f);
+  const ticketVs = (c, q) => rg ? '' : ((c != null && q != null) ? rdVsAnt(Math.round(c), Math.round(q), mes, rdCorto) : `<span class="rd-ref">mes pasado: ${q != null ? rdCorto(q) : '—'}</span>`);
   const apRows = [
     (a.consultas_ig || ap.presup_ig) ? `<div class="rd-it"><div class="q"><b>Instagram</b><small>${a.consultas_ig || 0} consultas y ${ap.presup_ig || 0} presupuestos por Instagram. Van aparte porque todavía no se pueden medir limpio por vendedor.</small></div></div>` : '',
     ap.ventas_asistidas_n ? `<div class="rd-it"><div class="q"><b>Ventas que cerró el equipo</b><small>${ap.ventas_asistidas_n} cartel${ap.ventas_asistidas_n === 1 ? '' : 'es'} · ${rdCorto(ap.ventas_asistidas_monto)}. Las cerró Bruno o el equipo: no suman en tus números.</small></div></div>` : '',
     ap.ventas_admin_n ? `<div class="rd-it"><div class="q"><b>Ventas cargadas por Gaspar a tu nombre</b><small>${ap.ventas_admin_n} cartel${ap.ventas_admin_n === 1 ? '' : 'es'} · ${rdCorto(ap.ventas_admin_monto)}. Son ventas propias de Gaspar: no suman en tus números.</small></div></div>` : '',
     ap.sin_precio_n ? `<div class="rd-it"><div class="q"><b>Ventas sin precio</b><small>${ap.sin_precio_n} fila${ap.sin_precio_n === 1 ? '' : 's'} de pedido sin precio: cargales el precio y suman.</small></div></div>` : '',
-    (ap.oc_reenvios || ap.oc_admin || ap.oc_asistidas) ? `<div class="rd-it"><div class="q"><b>Órdenes de compra que no suman</b><small>${[ap.oc_reenvios ? ap.oc_reenvios + ' cliente' + (ap.oc_reenvios === 1 ? '' : 's') + ' con la OC reenviada (cuenta en el mes de la primera)' : '', ap.oc_admin ? ap.oc_admin + ' mandada' + (ap.oc_admin === 1 ? '' : 's') + ' por Bruno/Gaspar' : '', ap.oc_asistidas ? ap.oc_asistidas + ' de ventas que cerró el equipo' : ''].filter(Boolean).join(' · ')}.</small></div></div>` : '',
+    (ap.oc_reenvios || ap.oc_admin || ap.oc_asistidas) ? `<div class="rd-it"><div class="q"><b>Órdenes de compra que no suman</b><small>${[ap.oc_reenvios ? ap.oc_reenvios + ' cliente' + (ap.oc_reenvios === 1 ? '' : 's') + ' con la OC reenviada (cuenta en ' + (rg ? 'el período' : 'el mes') + ' de la primera)' : '', ap.oc_admin ? ap.oc_admin + ' mandada' + (ap.oc_admin === 1 ? '' : 's') + ' por Bruno/Gaspar' : '', ap.oc_asistidas ? ap.oc_asistidas + ' de ventas que cerró el equipo' : ''].filter(Boolean).join(' · ')}.</small></div></div>` : '',
     a.resp_descartados ? `<div class="rd-it"><div class="q"><b>Leads descartados sin responder</b><small>${a.resp_descartados} con la etiqueta de descartado: no cuentan como demora.</small></div></div>` : '',
     ap.presup_sin_evidencia ? `<div class="rd-it"><div class="q"><b>Presupuestos sin envío registrado</b><small>${ap.presup_sin_evidencia} marcados como enviados sin ningún mensaje de presupuesto en el chat: no cuentan.</small></div></div>` : '',
   ].join('');
   const sem = v.semanas || [];
-  const hoyTxt = faIsCurrentMonth(mes) ? '' : '<b>De hoy</b> (no del mes elegido): ';
+  const esHoy = rg ? rg.hasta === faToday() : faIsCurrentMonth(mes);
+  const hoyTxt = esHoy ? '' : `<b>De hoy</b> (no del ${rg ? 'período' : 'mes'} elegido): `;
+  const per = rg ? 'el período' : 'el mes';
   return `
-    <div class="rd-card rd-meta"><h2>Meta del mes</h2>${metaHtml}</div>
+    ${rg ? '' : `<div class="rd-card rd-meta"><h2>Meta del mes</h2>${metaHtml}</div>`}
     <div class="rd-kpis">
-      ${tile('Neones vendidos', a.neones, rdVsAnt(a.neones, p.neones, mes), RD_NEON)}
-      ${tile('Corpóreos vendidos', a.corporeos, rdVsAnt(a.corporeos, p.corporeos, mes), RD_CORP)}
+      ${tile('Neones vendidos', a.neones, vsAnt(a.neones, p.neones), RD_NEON)}
+      ${tile('Corpóreos vendidos', a.corporeos, vsAnt(a.corporeos, p.corporeos), RD_CORP)}
       ${tile('Ticket promedio neón', a.ticket_neon != null ? rdCorto(a.ticket_neon) : '—', ticketVs(a.ticket_neon, p.ticket_neon), RD_NEON)}
       ${tile('Ticket promedio corpóreo', a.ticket_corp != null ? rdCorto(a.ticket_corp) : '—', ticketVs(a.ticket_corp, p.ticket_corp), RD_CORP)}
-      ${tile('Ventas', a.pedidos, rdVsAnt(a.pedidos, p.pedidos, mes), '', 'Clientes que te compraron en el mes')}
-      ${tile('Facturado', rdCorto(fact), rdVsAnt(fact, p.facturado, mes, rdCorto))}
+      ${tile('Ventas', a.pedidos, rg ? '<span class="rd-ref">clientes</span>' : vsAnt(a.pedidos, p.pedidos), '', 'Clientes que te compraron en ' + per)}
+      ${tile('Facturado', rdCorto(fact), vsAnt(fact, p.facturado, rdCorto))}
     </div>
+    ${rg ? rdDiasHtml(rg.dias, [v], false) : ''}
     <div class="rd-grid2">
-      <div class="rd-card"><h2>Tu mes</h2><div class="cap">Lo que hiciste en el mes: consultas de WhatsApp que te llegaron, clientes a los que les mandaste presupuesto, órdenes de compra y ventas.</div>
+      <div class="rd-card"><h2>${rg ? 'Tu período' : 'Tu mes'}</h2><div class="cap">Lo que hiciste en ${per}: consultas de WhatsApp que te llegaron, clientes a los que les mandaste presupuesto, órdenes de compra y ventas.</div>
         <div class="rd-funnel">${step('Consultas', a.consultas)}${flecha}${step('Presupuestos', a.presup_clientes)}${flecha}${step('Órdenes de compra', a.oc)}${flecha}${step('Ventas', a.pedidos)}</div>
-        <div class="rd-leg"><span>Presupuestos mandados: <b>${a.presupuestos}</b> (${a.presup_neon} neón · ${a.presup_corp} corpóreo)</span><span>Mes pasado: ${p.consultas} consultas · ${p.presup_clientes} con presupuesto · ${p.pedidos} ventas</span></div>
+        <div class="rd-leg"><span>Presupuestos mandados: <b>${a.presupuestos}</b> (${a.presup_neon} neón · ${a.presup_corp} corpóreo)</span>${rg ? '' : `<span>Mes pasado: ${p.consultas} consultas · ${p.presup_clientes} con presupuesto · ${p.pedidos} ventas</span>`}</div>
       </div>
-      <div class="rd-card"><h2>Cómo convierten tus consultas</h2><div class="cap">Seguimos a cada consulta desde que entra, aunque se cierre al mes siguiente. Cuenta solo las que ya tuvieron el plazo.</div>
+      <div class="rd-card"><h2>Cómo convierten tus consultas</h2><div class="cap">${rg ? 'De las consultas que entraron en el período, cuenta solo las que ya tuvieron el plazo (2 semanas para el presupuesto, 30 días para la compra).' : 'Seguimos a cada consulta desde que entra, aunque se cierre al mes siguiente. Cuenta solo las que ya tuvieron el plazo.'}</div>
         <div class="rd-list">
-          <div class="rd-it"><div class="q">Reciben presupuesto en 2 semanas</div>${rdTasaTxt(tP, 'consultas', mes)}</div>
-          <div class="rd-it"><div class="q">Compran en 30 días</div>${rdTasaTxt(tC, 'consultas', mes)}</div>
-          <div class="rd-it"><div class="q">De las que recibieron presupuesto, piden OC</div>${rdTasaTxt(tO, 'presupuestadas', mes)}</div>
-          <div class="rd-it"><div class="q">De las que recibieron presupuesto, compran</div>${rdTasaTxt(tV, 'presupuestadas', mes)}</div>
+          <div class="rd-it"><div class="q">Reciben presupuesto en 2 semanas</div>${tasaTxt(tP, 'presup', 'consultas')}</div>
+          <div class="rd-it"><div class="q">Compran en 30 días</div>${tasaTxt(tC, 'compra', 'consultas')}</div>
+          <div class="rd-it"><div class="q">De las que recibieron presupuesto, piden OC</div>${tasaTxt(tO, 'oc', 'presupuestadas')}</div>
+          <div class="rd-it"><div class="q">De las que recibieron presupuesto, compran</div>${tasaTxt(tV, 'venta', 'presupuestadas')}</div>
         </div>
       </div>
     </div>
@@ -22623,18 +22711,25 @@ function rdSvgSemanas(sem) {
 // --- Comparación de los 3 (solo Gaspar) ---
 function rdCompararHtml(d) {
   const vs = d.vendedores || [];
-  const mes = d.mes, g = d.global || {};
-  const tasa = (v, num, den) => rdTasa(v.actual, v.anterior, num, den, mes);
-  const pctT = (t) => t.v == null ? '—' : rdPct(t.v) + (t.propio ? '' : ' (' + t.de + ')');
+  const mes = d.mes, g = d.global || {}, rg = d.rango ? d : null;
+  // En un rango, las tasas vienen del servidor (las del período, sin "mes anterior"); entre paréntesis, cuántas maduraron.
+  const RK = { coh_presup14: 'presup', coh_compra30: 'compra', coh_oc30: 'oc', coh_venta30: 'venta' };
+  const tasa = (v, num, den) => {
+    if (!rg) return rdTasa(v.actual, v.anterior, num, den, mes);
+    const t = (v.actual.tasas || {})[RK[num]] || {};
+    return { v: t.v == null ? null : t.v, n: t.n || 0, de: '', propio: true, motivo: t.motivo || '' };
+  };
+  const pctT = (t) => t.v == null ? (rg && t.motivo ? '<span class="rd-ref">' + escapeHtml(t.motivo) + '</span>' : '—') : rdPct(t.v) + (rg ? ' <span class="rd-ref">(' + t.n + ')</span>' : (t.propio ? '' : ' (' + t.de + ')'));
+  const esHoy = rg ? rg.hasta === faToday() : faIsCurrentMonth(mes);
   const cards = vs.map(v => {
     const a = v.actual, meta = v.meta || 0, crudo = a.facturado_crudo || 0;
     const pct = meta ? Math.min(100, crudo / meta * 100) : 0;
     const sin5 = v.slug === 'facundo' ? ' (sin el 5%)' : ((COMERCIALES_SECUNDARIOS[v.slug] || {}).mas5 ? ' (sin el 5% del neón)' : '');
     return `<div class="rd-card rd-vcard" style="--c:${rdColor(v.slug)}">
       <h3><span class="rd-sw" style="background:${rdColor(v.slug)}"></span>${escapeHtml(v.nombre)}</h3>
-      <div class="fact mono">${fmtMoney(a.facturado)}</div><div class="rd-ref" style="font-size:12px">facturado${sin5} · ${rdVsAnt(a.facturado, v.anterior.facturado, mes, rdCorto)}</div>
-      ${meta ? `<div class="rd-bar"><span style="width:${pct.toFixed(1)}%"></span></div><div class="rd-ref" style="font-size:12px">Meta: ${fmtMoney(crudo)} de ${fmtMoney(meta)} (${Math.round(crudo / meta * 100)}%)</div>` : '<div class="rd-ref" style="font-size:12px;margin-top:6px">Sin meta cargada</div>'}
-      ${STATE.privacy ? '<div class="rd-metaedit">Meta del mes <input disabled placeholder="$•••"></div>' : `<div class="rd-metaedit">Meta del mes <input id="rd-meta-${v.slug}" inputmode="numeric" value="${meta ? meta.toLocaleString('es-AR') : ''}" placeholder="$ monto"><button class="rd-btn" data-rd-meta="${v.slug}">Guardar</button></div>`}
+      <div class="fact mono">${fmtMoney(a.facturado)}</div><div class="rd-ref" style="font-size:12px">facturado${sin5}${rg ? '' : ' · ' + rdVsAnt(a.facturado, v.anterior.facturado, mes, rdCorto)}</div>
+      ${rg ? '' : meta ? `<div class="rd-bar"><span style="width:${pct.toFixed(1)}%"></span></div><div class="rd-ref" style="font-size:12px">Meta: ${fmtMoney(crudo)} de ${fmtMoney(meta)} (${Math.round(crudo / meta * 100)}%)</div>` : '<div class="rd-ref" style="font-size:12px;margin-top:6px">Sin meta cargada</div>'}
+      ${rg ? '' : STATE.privacy ? '<div class="rd-metaedit">Meta del mes <input disabled placeholder="$•••"></div>' : `<div class="rd-metaedit">Meta del mes <input id="rd-meta-${v.slug}" inputmode="numeric" value="${meta ? meta.toLocaleString('es-AR') : ''}" placeholder="$ monto"><button class="rd-btn" data-rd-meta="${v.slug}">Guardar</button></div>`}
       <div class="rd-mini">
         <span>Neones</span><span class="mono">${a.neones} · ${a.ticket_neon != null ? rdCorto(a.ticket_neon) : '—'} c/u</span>
         <span>Corpóreos</span><span class="mono">${a.corporeos} · ${a.ticket_corp != null ? rdCorto(a.ticket_corp) : '—'} c/u</span>
@@ -22644,8 +22739,8 @@ function rdCompararHtml(d) {
         <span>Consulta → venta</span><span class="mono">${pctT(tasa(v, 'coh_compra30', 'coh_m30'))}</span>
         <span>1ª respuesta (lo normal)</span><span class="mono">${(a.resp_censurada ? 'más de ' : '') + rdHoras(a.resp_mediana_h)}</span>
         <span>Hasta el presupuesto</span><span class="mono">${rdHoras(a.presup_mediana_h)}</span>
-        <span>Para cotizar sin responder${faIsCurrentMonth(mes) ? '' : ' (hoy)'}</span><span class="mono">${(v.ahora.para_cotizar || []).length}</span>
-        <span>OC sin pagar${faIsCurrentMonth(mes) ? '' : ' (hoy)'}</span><span class="mono">${v.ahora.oc_abiertas == null ? '—' : v.ahora.oc_abiertas.length}</span>
+        <span>Para cotizar sin responder${esHoy ? '' : ' (hoy)'}</span><span class="mono">${(v.ahora.para_cotizar || []).length}</span>
+        <span>OC sin pagar${esHoy ? '' : ' (hoy)'}</span><span class="mono">${v.ahora.oc_abiertas == null ? '—' : v.ahora.oc_abiertas.length}</span>
       </div></div>`;
   }).join('');
   const leg = `<div class="rd-leg">${vs.map(v => `<span><span class="rd-sw" style="background:${rdColor(v.slug)}"></span>${escapeHtml(v.nombre)}</span>`).join('')}</div>`;
@@ -22657,14 +22752,15 @@ function rdCompararHtml(d) {
   return `
     <div class="rd-note">Cómo se cuenta: las consultas son las de WhatsApp (Instagram va aparte) y se le cuentan al que las recibió; los presupuestos y las OC al que los mandó; la venta al que la cerró. Las tasas siguen a cada consulta desde que entra (cohorte) y cuentan solo las que ya tuvieron el plazo. Los montos de Facu, Agus y Debi van sin el 5% que les suma el cotizador; la meta se mide contra lo que facturó cada uno de verdad. Lo que no se puede medir limpio no suma: está abajo en "Qué no se cuenta".</div>
     <div class="rd-vcards">${cards}</div>
+    ${rg ? rdDiasHtml(rg.dias, vs, true) : ''}
     <div class="rd-grid2">
-      <div class="rd-card"><h2>Conversión por etapa</h2><div class="cap">De cada 100 consultas o presupuestos, cuántos pasan al paso siguiente. Si el mes todavía no maduró, se usa el anterior (entre paréntesis).</div>
+      <div class="rd-card"><h2>Conversión por etapa</h2><div class="cap">De cada 100 consultas o presupuestos, cuántos pasan al paso siguiente. ${rg ? 'Cuenta solo las consultas del período que ya tuvieron el plazo (2 semanas o 30 días); el número que no aparece es porque todavía no maduró.' : 'Si el mes todavía no maduró, se usa el anterior (entre paréntesis).'}</div>
         <div class="rd-chart">${rdSvgAgrupadas(['Consulta → presupuesto' + deDe(tp), 'Presupuesto → OC' + deDe(to), 'Presupuesto → venta' + deDe(tv)], vs.map((v, i) => ({ color: rdColor(v.slug), vals: [tp[i].v, to[i].v, tv[i].v] })))}</div>${leg}</div>
       <div class="rd-card"><h2>Facturado por semana</h2><div class="cap">9 semanas, neón + corpóreo, sin lo que cerró el equipo.</div>
         <div class="rd-chart">${rdSvgLineas(vs.map(v => ({ color: rdColor(v.slug), vals: (v.semanas || []).map(s => s.neon + s.corp) })), ((vs[0] && vs[0].semanas) || []).map(s => s.desde.slice(8, 10) + '/' + s.desde.slice(5, 7)))}</div>${leg}</div>
       <div class="rd-card"><h2>Respuesta después del bot</h2><div class="cap">Lo normal (mediana) en horas hábiles desde "Para cotizar" hasta el primer mensaje, contando a los que nunca se respondieron. La línea marca la meta de 2 h.</div>
         <div class="rd-chart">${rdSvgHorizontales(vs.map(v => ({ label: v.nombre, color: rdColor(v.slug), v: v.actual.resp_mediana_h, txt: (v.actual.resp_censurada ? 'más de ' : '') + rdHoras(v.actual.resp_mediana_h) + ' · presup. ' + rdHoras(v.actual.presup_mediana_h) })), 2)}</div></div>
-      <div class="rd-card"><h2>Mix neón / corpóreo</h2><div class="cap">Carteles vendidos en el mes y ticket promedio de cada uno.</div>
+      <div class="rd-card"><h2>Mix neón / corpóreo</h2><div class="cap">Carteles vendidos en ${rg ? 'el período' : 'el mes'} y ticket promedio de cada uno.</div>
         <div class="rd-chart">${rdSvgMix(vs)}</div>
         <div class="rd-leg"><span><span class="rd-sw" style="background:${RD_NEON}"></span>Neón</span><span><span class="rd-sw" style="background:${RD_CORP}"></span>Corpóreo</span></div></div>
     </div>
@@ -22689,7 +22785,7 @@ function rdCompararHtml(d) {
       ${fila('Consultas por Instagram (30% de ruido, sin trazabilidad por vendedor)', v => v.actual.consultas_ig || 0)}
       ${fila('Presupuestos por Instagram', v => ap(v).presup_ig || 0)}
       ${fila('Presupuestos marcados como enviados sin mensaje en el chat', v => ap(v).presup_sin_evidencia || 0)}
-      ${fila('Clientes con la OC reenviada (cuenta en el mes de la primera)', v => ap(v).oc_reenvios || 0)}
+      ${fila('Clientes con la OC reenviada (cuenta en ' + (rg ? 'el período' : 'el mes') + ' de la primera)', v => ap(v).oc_reenvios || 0)}
       ${fila('OC mandadas por Bruno/Gaspar', v => ap(v).oc_admin || 0)}
       ${fila('OC de ventas que cerró el equipo', v => ap(v).oc_asistidas || 0)}
       ${fila('Ventas que cerró el equipo (carteles · $)', v => montoN(ap(v).ventas_asistidas_n, ap(v).ventas_asistidas_monto))}
@@ -22763,8 +22859,31 @@ function rdSvgMix(vs) {
 }
 
 function bindRendimiento() {
-  document.querySelectorAll('[data-rd-mes]').forEach(b => b.onclick = () => { rendState.mes = b.dataset.rdMes; render(); });
+  document.querySelectorAll('[data-rd-mes]').forEach(b => b.onclick = () => { rendState.mes = b.dataset.rdMes; rendState.rango = null; rendState.fechasAbiertas = false; render(); });
   document.querySelectorAll('[data-rd-tab]').forEach(b => b.onclick = () => { rendState.tab = b.dataset.rdTab; render(); });
+  document.querySelectorAll('[data-rd-rango]').forEach(b => b.onclick = () => {
+    const k = b.dataset.rdRango, hoy = faToday();
+    if (k === 'elegir') {   // abre/cierra las fechas sin recargar nada
+      rendState.fechasAbiertas = !rendState.fechasAbiertas;
+      const f = document.getElementById('rd-fechas'); if (f) f.hidden = !rendState.fechasAbiertas;
+      b.setAttribute('aria-pressed', String(rendState.fechasAbiertas || !!(rendState.rango && rendState.rango.tipo === 'elegir')));
+      if (rendState.fechasAbiertas) { const i = document.getElementById('rd-desde'); if (i) i.focus(); }
+      return;
+    }
+    const d = k === 'hoy' ? hoy : (k === 'ayer' ? rdDiaMas(hoy, -1) : rdDiaMas(hoy, -6));
+    rendState.rango = { desde: d, hasta: k === 'ayer' ? d : hoy, tipo: k };
+    rendState.fechasAbiertas = false;
+    render();
+  });
+  const ver = () => {
+    const d = (document.getElementById('rd-desde') || {}).value || '', h = (document.getElementById('rd-hasta') || {}).value || '';
+    const err = rdValidarRango(d, h), e = document.getElementById('rd-ferr');
+    if (err) { if (e) e.textContent = err; return; }
+    rendState.rango = { desde: d, hasta: h, tipo: 'elegir' };
+    render();
+  };
+  const vb = document.querySelector('[data-rd-ver]'); if (vb) vb.onclick = ver;
+  ['rd-desde', 'rd-hasta'].forEach(id => { const i = document.getElementById(id); if (i) i.onkeydown = (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); ver(); } }; });
   loadRendimiento(false);
 }
 function bindRendimientoBody() {

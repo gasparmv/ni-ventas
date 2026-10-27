@@ -15012,11 +15012,37 @@ function kpiFilaVenta(r, ctx) {
   return { v, tel, corp, n, monto, montoNorm, bucket, clave };
 }
 
-// Números de UN mes para los 3 vendedores (crudos y sin el +5%). Sin try/catch: si una consulta falla, falla todo
-// (el front reintenta) en vez de guardar ceros en caché.
+// Días AR ('YYYY-MM-DD'). kpiDiaAR: el día AR de un instante (los ts sin zona son UTC, como los compara el SQL).
+function kpiDiaMas(dia, n) { return new Date(Date.parse(dia + 'T00:00:00Z') + n * 864e5).toISOString().slice(0, 10); }
+function kpiHoyAR() { return new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 10); }
+function kpiDiaAR(ts) {
+  const s = String(ts || ''), ms = Date.parse(/(Z|[+-]\d\d:?\d\d)$/i.test(s) ? s : s.replace(' ', 'T') + 'Z');
+  return isFinite(ms) ? new Date(ms - 3 * 3600e3).toISOString().slice(0, 10) : '';
+}
+// Rangos de días a gusto (además de los meses): desde el 1-jul-2026 (el primer mes del panel), hasta hoy, ≤92 días.
+const KPI_RANGO_MIN = '2026-07-01', KPI_RANGO_MAX_DIAS = 92;
+function kpiValidarRango(desde, hasta) {
+  const ok = (d) => /^\d{4}-\d{2}-\d{2}$/.test(d) && !isNaN(Date.parse(d + 'T00:00:00Z')) && new Date(d + 'T00:00:00Z').toISOString().slice(0, 10) === d;
+  if (!ok(desde) || !ok(hasta)) return 'Fecha inválida (tiene que ser AAAA-MM-DD).';
+  if (desde > hasta) return 'La fecha "desde" es posterior a "hasta".';
+  if (hasta > kpiHoyAR()) return 'Ese día todavía no pasó.';
+  if (desde < KPI_RANGO_MIN) return 'Hay datos desde el 1 de julio de 2026.';
+  if (Math.round((Date.parse(hasta + 'T00:00:00Z') - Date.parse(desde + 'T00:00:00Z')) / 864e5) + 1 > KPI_RANGO_MAX_DIAS) return 'Elegí hasta ' + KPI_RANGO_MAX_DIAS + ' días.';
+  return '';
+}
+function kpiDiaBlank() { return { consultas: 0, consultas_ig: 0, presupuestos: 0, oc: 0, ventas: 0, neones: 0, corporeos: 0, monto_neon: 0, monto_corp: 0, monto_neon_norm: 0, monto_corp_norm: 0 }; }
+
+// Números de UN mes para los vendedores (crudos y sin el +5%): el período [día 1, último día]. Devuelve exactamente lo
+// mismo que antes de que existieran los rangos (sin "dias"), así la caché kpi_mes:<v>:<mes> sigue valiendo.
 async function kpiMesVendedores(env, mes) {
+  return kpiPeriodoVendedores(env, mes + '-01', kpiDiaMas(kpiMesMas(mes, 1) + '-01', -1), false);
+}
+// Números de un PERÍODO de días AR [desde, hasta] (de las 03:00Z de desde a las 03:00Z del día siguiente a hasta).
+// Sin try/catch: si una consulta falla, falla todo (el front reintenta) en vez de guardar ceros en caché.
+// conDias = además el desglose día por día, armado en la MISMA pasada (ninguna consulta más a la base).
+async function kpiPeriodoVendedores(env, desde, hasta, conDias) {
   const DAY = 864e5, ahoraMs = Date.now(), ahora = new Date(ahoraMs).toISOString();
-  const since = mes + '-01', untilEx = kpiMesMas(mes, 1) + '-01';
+  const since = desde, untilEx = kpiDiaMas(hasta, 1);
   const sinceUTC = since + 'T03:00:00Z', untilExUTC = untilEx + 'T03:00:00Z';
   const desdeMsgs = new Date(Date.parse(sinceUTC) - 75 * DAY).toISOString();
   const q = async (sql, ...b) => (await env.DB.prepare(sql).bind(...b).all()).results || [];
@@ -15058,7 +15084,7 @@ async function kpiMesVendedores(env, mes) {
   // Instagram (APARTE, no suma): sin el embudo de cursos ("Quiero el regalo", cursos, talleres), spam/proveedores,
   // autorespuestas de otros negocios ni chats sin intención (solo una mención de historia o el saludo de ManyChat).
   const consIgSql = `WITH fi AS (SELECT phone, MIN(ts) t0 FROM wa_messages WHERE direction = 'inbound' AND msg_type NOT IN ${NO_MSG} AND channel = 'ig' AND ts >= ? AND ts < ? GROUP BY phone)
-    SELECT fi.phone, COALESCE(s.assigned_to, '') asg, COALESCE(s.inbox, '') inbox,
+    SELECT fi.phone, fi.t0, COALESCE(s.assigned_to, '') asg, COALESCE(s.inbox, '') inbox,
            (SELECT l.via || '|' || IFNULL(l.from_asg, '') || '|' || IFNULL(l.to_asg, '') FROM chat_assign_log l WHERE l.phone = fi.phone AND l.via NOT LIKE 'auto_%' ORDER BY l.ts ASC LIMIT 1) primero,
            (SELECT IFNULL(l.to_asg, '') FROM chat_assign_log l WHERE l.phone = fi.phone AND l.via LIKE 'no_neon%' ORDER BY l.ts ASC LIMIT 1) deriv
       FROM fi LEFT JOIN wa_chats_summary s ON s.phone = fi.phone
@@ -15134,6 +15160,14 @@ async function kpiMesVendedores(env, mes) {
   });
   const out = {}; for (const v of KPI_VENDEDORES) out[v.slug] = blank();
   const global = { presup_admin: 0, ventas_otros_n: 0, ventas_otros_monto: 0 };
+  // Día por día (solo si se pide): cada cosa en el día AR con el que ya cuenta en el período (consulta = su primer
+  // mensaje; presupuesto = primer envío; OC = enviada; venta = fecha del pedido). Lo que cuenta CLIENTES distintos (OC,
+  // ventas) va al primer día del período en que sumó: así la suma de los días da el total. dd() nunca devuelve null:
+  // un día fuera del período (no debería pasar: el SQL ya filtra por las mismas puntas) va a la punta más cercana.
+  const dias = conDias ? new Map() : null;
+  if (dias) for (let d = since; d < untilEx; d = kpiDiaMas(d, 1)) dias.set(d, Object.fromEntries(KPI_VENDEDORES.map(v => [v.slug, kpiDiaBlank()])));
+  const dd = (fecha, v) => { let d = String(fecha || '').slice(0, 10); if (!dias.has(d)) d = d < since ? since : kpiDiaMas(untilEx, -1); return dias.get(d)[v]; };
+  const ocDia = new Map(), pedDia = new Map(); // 'slug|tel' → primera OC del período; 'slug|clave' → primera fecha de venta
   const quienRecibio = (r, conHum) => {
     let rec;
     if (r.deriv != null) return funnelVendedor(r.deriv || 'joaco');   // devuelto por "No es neón": la consulta es del que la recibió
@@ -15153,11 +15187,12 @@ async function kpiMesVendedores(env, mes) {
     if (KPI_BANDEJAS_FUERA.includes(r.inbox)) continue;
     const v = quienRecibio(r, true), o = out[v]; if (!o) continue;
     o.consultas++;
+    if (dias) dd(kpiDiaAR(r.t0), v).consultas++;
     cohorte.push({ v, tel: kpiTel(r.phone), t0: r.t0 });
   }
   for (const r of consIgR) {
     if (KPI_BANDEJAS_FUERA.includes(r.inbox)) continue;
-    const o = out[quienRecibio(r, false)]; if (o) o.consultas_ig++;
+    const vi = quienRecibio(r, false), o = out[vi]; if (o) { o.consultas_ig++; if (dias) dd(kpiDiaAR(r.t0), vi).consultas_ig++; }
   }
 
   // --- Presupuestos (brief = unidad; fecha = primer envío real; tiene que haber evidencia del envío) ---
@@ -15220,19 +15255,21 @@ async function kpiMesVendedores(env, mes) {
     if (v === '__admin') { global.presup_admin++; continue; }
     const o = out[v]; if (!o) continue;
     o.presupuestos++; if (b.tipo === 'corporea') o.presup_corp++; else o.presup_neon++;
+    if (dias) dd(kpiDiaAR(f), v).presupuestos++;
     o._cli.add(tel);
     const imp = importes.get(tel); if (v === 'agustina' && imp && imp.to_ === 'agustina' && imp.ts < f) o.aparte.traidas_presup++;
   }
   for (const l of presCohorte.values()) l.sort();
   // --- Órdenes de compra (cliente distinto por vendedor; sin reenvíos, sin las del admin ni las de ventas del equipo) ---
   for (const r of ocR) {
-    const o = out[funnelVendedor(r.vendedor) || 'joaco']; if (!o) continue;
+    const ov = funnelVendedor(r.vendedor) || 'joaco', o = out[ov]; if (!o) continue;
     const tel = kpiTel(r.phone);
     if (r.reenvio) { o._ocRe.add(tel); continue; }
     const quien = String(r.por || r.msnd || '').trim();
     if (quien && quien !== 'celular' && quien !== 'app_ig' && !adhocSenderSlug(quien)) { o._ocAd.add(tel); continue; }
     if (asistTels.has(tel)) { o._ocAs.add(tel); continue; }
     o._oc.add(tel);
+    if (dias) { const k = ov + '|' + tel, p = ocDia.get(k); if (p == null || String(r.ts_out) < p) ocDia.set(k, String(r.ts_out)); }
   }
   const ocPrim = new Map(); for (const r of ocPrimR) { const t = kpiTel(r.phone); if (t && (!ocPrim.has(t) || r.t < ocPrim.get(t))) ocPrim.set(t, r.t); }
 
@@ -15248,6 +15285,12 @@ async function kpiMesVendedores(env, mes) {
     o._ped.add(x.clave);
     if (x.corp) { o.corporeos += x.n; o.monto_corp += x.monto; o.monto_corp_norm += x.montoNorm; }
     else { o.neones += x.n; o.monto_neon += x.monto; o.monto_neon_norm += x.montoNorm; }
+    if (dias) {
+      const f = String(x.r.fecha || '').slice(0, 10), k = x.v + '|' + x.clave, p = pedDia.get(k), dx = dd(f, x.v);
+      if (p == null || f < p) pedDia.set(k, f);
+      if (x.corp) { dx.corporeos += x.n; dx.monto_corp += x.monto; dx.monto_corp_norm += x.montoNorm; }
+      else { dx.neones += x.n; dx.monto_neon += x.monto; dx.monto_neon_norm += x.montoNorm; }
+    }
     const imp = importes.get(x.tel);
     if (x.v === 'agustina' && imp && imp.to_ === 'agustina' && imp.ts < (x.r.created_at || x.r.fecha + 'T23:59:59Z')) { o.aparte.traidas_ventas_n += x.n; o.aparte.traidas_ventas_monto += x.monto; }
   }
@@ -15314,6 +15357,7 @@ async function kpiMesVendedores(env, mes) {
   for (const k in out) {
     const o = out[k];
     o.presup_clientes = o._cli.size; o.oc = o._oc.size; o.pedidos = o._ped.size;
+    if (dias) { for (const t of o._oc) dd(kpiDiaAR(ocDia.get(k + '|' + t)), k).oc++; for (const c of o._ped) dd(pedDia.get(k + '|' + c), k).ventas++; }
     // Aparte de OC en CLIENTES que no sumaron por ese motivo (no en mensajes).
     o.aparte.oc_reenvios = [...o._ocRe].filter(t => !o._oc.has(t)).length;
     o.aparte.oc_admin = [...o._ocAd].filter(t => !o._oc.has(t)).length;
@@ -15325,7 +15369,9 @@ async function kpiMesVendedores(env, mes) {
     for (const c of ['monto_neon_norm', 'monto_corp_norm']) o[c] = Math.round(o[c]);
     delete o._cli; delete o._oc; delete o._ocRe; delete o._ocAd; delete o._ocAs; delete o._ped; delete o._resp; delete o._respAll; delete o._presH;
   }
-  return { v: out, g: global, calculado: ahora };
+  const res = { v: out, g: global, calculado: ahora };
+  if (dias) res.dias = [...dias].map(([fecha, por]) => ({ fecha, por }));
+  return res;
 }
 // Derivados: montos (crudos o sin el +5%), tickets y tasas de cohorte.
 function kpiDerivar(o, norm) {
@@ -15392,7 +15438,13 @@ async function kpiSemanas(env, mes) {
   const DAY = 864e5;
   const hoyAR = new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 10);
   const finMes = new Date(Date.parse(kpiMesMas(mes, 1) + '-01T00:00:00Z') - DAY).toISOString().slice(0, 10);
-  const ref = new Date((finMes < hoyAR ? finMes : hoyAR) + 'T00:00:00Z');
+  return kpiSemanasHasta(env, finMes < hoyAR ? finMes : hoyAR);
+}
+// Las 9 semanas que terminan en la que tiene el día refDia (AR). En un rango: refDia = hasta.
+function kpiLunesDe(refDia) { const ref = new Date(refDia + 'T00:00:00Z'); return kpiDiaMas(refDia, -((ref.getUTCDay() + 6) % 7)); }
+async function kpiSemanasHasta(env, refDia) {
+  const DAY = 864e5;
+  const ref = new Date(refDia + 'T00:00:00Z');
   const dow = (ref.getUTCDay() + 6) % 7; // 0 = lunes
   const lunes = new Date(ref.getTime() - (dow + 7 * 8) * DAY);
   const desde = lunes.toISOString().slice(0, 10), hastaEx = new Date(lunes.getTime() + 9 * 7 * DAY).toISOString().slice(0, 10);
@@ -15423,6 +15475,14 @@ async function kpiSemanasCacheado(env, mes) {
   await kvSet(env, k, JSON.stringify(d));
   return d;
 }
+// Semanas de un rango: dependen solo del lunes de la semana de "hasta" (una fila de caché por semana, no por rango).
+async function kpiSemanasRangoCacheado(env, hasta) {
+  const lunes = kpiLunesDe(hasta), k = `kpi_sem:${KPI_CACHE_V}:w:${lunes}`;
+  try { const r = await env.DB.prepare('SELECT v, updated_at FROM kv_cache WHERE k = ?').bind(k).first(); if (r && Date.now() - Date.parse(r.updated_at) < 10 * 60e3) return JSON.parse(r.v); } catch (_) {}
+  const d = await kpiSemanasHasta(env, hasta);
+  await kvSet(env, k, JSON.stringify(d));
+  return d;
+}
 // Meta de plata vigente en ese mes: la última que Gaspar fijó para ese mes o uno anterior (nunca una posterior).
 async function kpiMeta(env, slug, mes) {
   const r = await env.DB.prepare("SELECT v FROM kv_cache WHERE k >= ? AND k <= ? ORDER BY k DESC LIMIT 1").bind(`meta_plata:${slug}:`, `meta_plata:${slug}:${mes}`).first();
@@ -15442,8 +15502,41 @@ async function kpiMesCacheado(env, mes) {
   await kvSet(env, k, JSON.stringify(d));
   return d;
 }
+// Caché de un rango de días: 10 min si incluye hoy o ayer; 1 h si terminó hace menos de 31 días (las cohortes
+// maduran); 12 h después. Los errores no se guardan. Cada rango es una fila: las que nadie pidió en 2 días se borran.
+async function kpiRangoCacheado(env, desde, hasta) {
+  const k = `kpi_rng:${KPI_CACHE_V}:${desde}:${hasta}`;
+  const finMs = Date.parse(kpiDiaMas(hasta, 1) + 'T03:00:00Z');
+  const ttl = hasta >= kpiDiaMas(kpiHoyAR(), -1) ? 10 * 60e3 : (Date.now() - finMs > 31 * 864e5 ? 12 * 3600e3 : 3600e3);
+  try {
+    const r = await env.DB.prepare('SELECT v, updated_at FROM kv_cache WHERE k = ?').bind(k).first();
+    if (r && Date.now() - Date.parse(r.updated_at) < ttl) return JSON.parse(r.v);
+  } catch (_) {}
+  const d = await kpiPeriodoVendedores(env, desde, hasta, true);
+  await kvSet(env, k, JSON.stringify(d));
+  try { await env.DB.prepare("DELETE FROM kv_cache WHERE k >= 'kpi_rng:' AND k < 'kpi_rng;' AND updated_at < ?").bind(new Date(Date.now() - 2 * 864e5).toISOString()).run(); } catch (_) {}
+  return d;
+}
+// Tasas de cohorte de un rango: sin "mes anterior" de respaldo. Si ninguna consulta del período cumplió el plazo, la
+// tasa es null y va el motivo (para mostrarlo tal cual).
+function kpiTasasRango(o) {
+  const t = (num, den, plazo, base) => o[den] ? { v: o[num] / o[den], n: o[den], motivo: '' }
+    : { v: null, n: 0, motivo: !o.coh_n ? 'sin consultas en el período' : (base && o[base] ? 'ninguna con presupuesto y ' + plazo + ' de plazo' : 'todavía no pasaron ' + plazo) };
+  return { presup: t('coh_presup14', 'coh_m14', '14 días'), compra: t('coh_compra30', 'coh_m30', '30 días'), oc: t('coh_oc30', 'coh_m30p', '30 días', 'coh_m30'), venta: t('coh_venta30', 'coh_m30p', '30 días', 'coh_m30') };
+}
+// Monto de cada día (crudo o sin el +5%) en pesos enteros que suman EXACTAMENTE el facturado del período: se redondea
+// lo acumulado y la diferencia de redondeo (centavos) va al último día con ventas.
+function kpiDiasMonto(dias, slug, norm, total) {
+  const out = []; let acc = 0, prev = 0;
+  for (const d of dias) { const p = d.por[slug]; acc += norm ? p.monto_neon_norm + p.monto_corp_norm : p.monto_neon + p.monto_corp; const r = Math.round(acc); out.push(r - prev); prev = r; }
+  const dif = total - prev;
+  if (dif && out.length) { let i = out.length - 1; while (i > 0 && !out[i]) i--; out[i] += dif; }
+  return out;
+}
 // slug = un vendedor (su panel, montos crudos) | '' = comparación de los 3 (solo Gaspar, montos sin el +5%).
-async function buildKpisVendedor(env, { mes, slug }) {
+// desde/hasta = un rango de días: los mismos números del período + "dias" (día por día); sin metas ni "mes pasado".
+async function buildKpisVendedor(env, { mes, slug, desde, hasta }) {
+  if (desde) return buildKpisRango(env, { slug, desde, hasta });
   const ant = kpiMesMas(mes, -1);
   const [act, prev, snap, semanas] = await Promise.all([kpiMesCacheado(env, mes), kpiMesCacheado(env, ant), kpiSnapshot(env), kpiSemanasCacheado(env, mes)]);
   const uno = async (v, norm) => ({
@@ -15456,6 +15549,28 @@ async function buildKpisVendedor(env, { mes, slug }) {
   if (slug) return { mes, anterior: ant, calculado: act.calculado, vendedor: await uno(KPI_VENDEDORES.find(x => x.slug === slug), false) };
   const vendedores = await Promise.all(KPI_VENDEDORES.map(v => uno(v, true)));
   return { mes, anterior: ant, calculado: act.calculado, normalizado: true, global: act.g, vendedores };
+}
+async function buildKpisRango(env, { slug, desde, hasta }) {
+  const [act, snap, semanas] = await Promise.all([kpiRangoCacheado(env, desde, hasta), kpiSnapshot(env), kpiSemanasRangoCacheado(env, hasta)]);
+  const lista = slug ? [KPI_VENDEDORES.find(x => x.slug === slug)] : KPI_VENDEDORES, norm = !slug;
+  const vendedores = lista.map(v => {
+    const actual = kpiDerivar(act.v[v.slug], norm);
+    actual.tasas = kpiTasasRango(act.v[v.slug]);
+    return {
+      slug: v.slug, nombre: v.nombre, actual, anterior: null, meta: null,
+      semanas: semanas.map(s => { const p = s.por[v.slug]; return { desde: s.desde, neon: Math.round(norm ? p.neon_norm : p.neon), corp: Math.round(norm ? p.corp_norm : p.corp) }; }),
+      ahora: snap[v.slug],
+    };
+  });
+  // Día por día: un vendedor recibe solo lo suyo.
+  const montos = Object.fromEntries(vendedores.map(v => [v.slug, kpiDiasMonto(act.dias, v.slug, norm, v.actual.facturado)]));
+  const dias = act.dias.map((d, i) => ({
+    fecha: d.fecha,
+    por: Object.fromEntries(vendedores.map(v => { const p = d.por[v.slug]; return [v.slug, { consultas: p.consultas, consultas_ig: p.consultas_ig, presupuestos: p.presupuestos, oc: p.oc, ventas: p.ventas, neones: p.neones, corporeos: p.corporeos, monto: montos[v.slug][i] }]; })),
+  }));
+  const base = { rango: true, desde, hasta, calculado: act.calculado };
+  if (slug) return { ...base, vendedor: vendedores[0], dias };
+  return { ...base, normalizado: true, global: act.g, vendedores, dias };
 }
 // Funnel de carteles por CAMPAÑA de Meta para [since, until] (días AR, inclusivo):
 //   GASTO   meta_ad_spend_ad (por anuncio; si un día no tiene detalle, meta_ad_spend de la campaña).
@@ -31668,6 +31783,15 @@ const handler = {
         if (!esGaspar) { slug = adhocSenderSlug(session.user); if (!slug) return json({ error: 'forbidden' }, 403); }
         else { const v = funnelVendedor(url.searchParams.get('vendedor') || ''); if (KPI_VENDEDORES.some(x => x.slug === v)) slug = v; }
         if (slug && !KPI_VENDEDORES.some(x => x.slug === slug)) return json({ error: 'forbidden' }, 403); // vendedor nuevo sin panel todavía
+        // ?desde=YYYY-MM-DD&hasta=YYYY-MM-DD (días AR; desde solo = ese día) → un rango a gusto, con el día por día.
+        // Con ?mes= (o sin nada) sigue todo igual.
+        if (!url.searchParams.get('mes') && (url.searchParams.get('desde') || url.searchParams.get('hasta'))) {
+          const desde = String(url.searchParams.get('desde') || ''), hasta = String(url.searchParams.get('hasta') || desde);
+          const motivo = kpiValidarRango(desde, hasta);
+          if (motivo) return json({ error: 'rango', motivo }, 400);
+          const data = await buildKpisVendedor(env, { slug, desde, hasta });
+          return json({ ok: true, ...data });
+        }
         const m = String(url.searchParams.get('mes') || '');
         const mes = /^\d{4}-(0[1-9]|1[0-2])$/.test(m) && m <= kpiMesAR() ? m : kpiMesAR();
         const data = await buildKpisVendedor(env, { mes, slug });
