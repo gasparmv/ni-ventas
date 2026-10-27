@@ -103,6 +103,7 @@
   table.gtabla thead th span, table.gtabla tbody th span { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--sutil); font-size: 11.5px; }
   table.gtabla input[type=number] { width: 84px; }
   .placa .cap .tiempo { color: var(--mute); font-size: 12.5px; }
+  .placa .cap .usa { color: var(--fg); font-size: 12.5px; }
   .placa .cap .aviso-g { color: var(--aviso); font-size: 12.5px; flex-basis: 100%; }
   .leyenda-g { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--mute); padding: 6px 14px 10px; }
   .leyenda-g i { display: inline-block; width: 16px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 5px; }
@@ -886,6 +887,20 @@ function colocada(pz, c) {
   const f = (pts) => pts.map(([x, y]) => [x * cs - y * sn + c.dx, x * sn + y * cs + c.dy]);
   return { poly: f(pz.poly), huecos: pz.huecos.map(f), abiertos: pz.abiertos.map(f), calados: pz.calados.map((s) => ({ pts: f(s.pts), cerrado: s.cerrado, lw: s.lw })), agujeros: pz.agujeros.map((s) => ({ pts: f(s.pts), cerrado: s.cerrado })) };
 }
+// Superficie que consume la lámina s (Gaspar 27-oct: "que aparezca la superficie que consume, en alto ancho y m2"): desde el
+// borde de la placa hasta la pieza más lejana más la separación (por ahí se corta el sobrante), sin pasarse de la lámina.
+// En pantalla la lámina va acostada: ancho = a lo largo (x), alto = el otro lado (y).
+function superficieUsada(s, cs) {
+  const lam = laminaInfo(s), sep = S.cfgNest.sep;
+  let x1 = 0, y1 = 0;
+  for (const c of cs) {
+    const t = c.grados * Math.PI / 180, co = Math.cos(t), sn = Math.sin(t);
+    for (const [x, y] of S.piezas[c.id].poly) { const X = x * co - y * sn + c.dx, Y = x * sn + y * co + c.dy; if (X > x1) x1 = X; if (Y > y1) y1 = Y; }
+  }
+  const ancho = Math.min(lam.largo, x1 + sep), alto = Math.min(lam.ancho, y1 + sep);
+  return { ancho, alto, m2: ancho * alto / 1e6 };
+}
+const fmtCm = (mm) => fmt(mm / 10, Math.round(mm) % 10 ? 1 : 0);
 // Lámina s del resultado: los recortes van primero (índices 0..nRec-1) y después las placas enteras.
 function laminaInfo(s) {
   const r = S.mejor, cfg = S.cfgNest, nRec = r.nRec || 0;
@@ -1371,8 +1386,10 @@ function pintarResultado() {
         if (t.length) extra += `<span class="aviso-g">${t.join(' · ')}</span>`;
       }
     }
+    const u = superficieUsada(s, cs);
+    const usa = `<span class="usa" title="Desde el borde hasta la pieza más lejana, más la separación: lo que queda afuera es sobrante">ocupa alto ${fmtCm(u.alto)} cm × ancho ${fmtCm(u.ancho)} cm · <b>${fmt(u.m2, 2)} m²</b></span>`;
     const d = document.createElement('div'); d.className = 'vista placa';
-    d.innerHTML = `<div class="cap"><b>${esc(lam.titulo)}</b><span class="sutil">${cs.length} pieza${cs.length === 1 ? '' : 's'} · ${fmt(100 * area / lam.area, 0)} % ${lam.tipo === 'recorte' ? 'del recorte' : 'de la placa'} con piezas</span>${extra}<button class="chico" data-sobrante="${s}"${dis} title="Guarda lo que sobra de esta lámina como recorte del taller">Guardar sobrante</button><button class="chico" data-ver="${s}"${dis}>Ver recorrido</button><button class="chico" data-dxf="${s}"${dis}>DXF</button><button class="chico" data-gcode="${s}"${dis}>Código G</button></div><canvas></canvas>`;
+    d.innerHTML = `<div class="cap"><b>${esc(lam.titulo)}</b><span class="sutil">${cs.length} pieza${cs.length === 1 ? '' : 's'} · ${fmt(100 * area / lam.area, 0)} % ${lam.tipo === 'recorte' ? 'del recorte' : 'de la placa'} con piezas</span>${extra}${usa}<button class="chico" data-sobrante="${s}"${dis} title="Guarda lo que sobra de esta lámina como recorte del taller">Guardar sobrante</button><button class="chico" data-ver="${s}"${dis}>Ver recorrido</button><button class="chico" data-dxf="${s}"${dis}>DXF</button><button class="chico" data-gcode="${s}"${dis}>Código G</button></div><canvas></canvas>`;
     cont.appendChild(d);
     dibujarLamina(d.querySelector('canvas'), s);
   }
