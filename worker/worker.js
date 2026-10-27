@@ -21635,13 +21635,17 @@ async function ensureSinFronteraSchema(env) {
   // Nombre del pedido o del cartel (26-oct, migración 071): el título de cada pedido en la lista.
   try { await env.DB.prepare('SELECT nombre FROM sf_cortes LIMIT 0').all(); }
   catch (_) { try { await env.DB.prepare('ALTER TABLE sf_cortes ADD COLUMN nombre TEXT').run(); } catch (_) {} }
+  // Borrado lógico (27-oct, migración 073): borrado_at <> NULL = Gaspar lo borró (no sale en ningún lado; ver corte/borrar).
+  try { await env.DB.prepare('SELECT borrado_at, borrado_por FROM sf_cortes LIMIT 0').all(); }
+  catch (_) { for (const c of ['borrado_at TEXT', 'borrado_por TEXT']) { try { await env.DB.prepare('ALTER TABLE sf_cortes ADD COLUMN ' + c).run(); } catch (_) {} } }
   _sfSchemaOk = true;
 }
 // ----- Pedidos de corte de Sin Frontera (Gaspar 21-oct-2026) -----
 // "Que los chicos de Sin Frontera me puedan encargar cortes de acrílico": el archivo en cualquier formato, material (acrílico o
 // PVC), color, espesor, para cuándo lo necesitan y aclaraciones. Sin precios (tienen cuenta corriente aparte). Gaspar los mueve
 // (Pedido → En corte → Listo → Entregado, o Cancelado); Sin Frontera solo cancela uno que todavía no se empezó y edita los que
-// todavía no están cortados (SF_CORTE_EDITA_SF; Gaspar 26-oct), con aviso a Gaspar de lo que cambió.
+// todavía no están cortados (SF_CORTE_EDITA_SF; Gaspar 26-oct), con aviso a Gaspar de lo que cambió. Gaspar además borra los
+// que todavía no están en corte (27-oct; borrado lógico: borrado_at, ver corte/borrar): toda lectura de sf_cortes los excluye.
 const SF_CORTE_MATERIALES = { acrilico: 'Acrílico', pvc: 'PVC' };
 const SF_CORTE_COLORES = { blanco_opalino: 'Blanco opalino', transparente: 'Transparente', negro: 'Negro' };
 const SF_CORTE_ESTADOS = ['pedido', 'en_corte', 'listo', 'entregado', 'cancelado'];
@@ -21911,9 +21915,10 @@ async function sfArchivoKey(env, qs) {
   try {
     // Archivo de un pedido de corte (c = id del pedido, i = cuál; sin i, el primero). Con v (sfCorteArchV, el front desde el
     // 26-oct) manda la versión: el archivo con esa clave esté donde esté, y si una edición lo sacó del pedido, ninguno.
+    // Pedido borrado (corte/borrar): ninguno (404), aunque el archivo siga en R2 para el "Deshacer".
     const c = parseInt(qs.get('c'), 10) || 0;
     if (c) {
-      const r = await env.DB.prepare('SELECT archivos FROM sf_cortes WHERE id = ?').bind(c).first();
+      const r = await env.DB.prepare('SELECT archivos FROM sf_cortes WHERE id = ? AND borrado_at IS NULL').bind(c).first();
       let a = []; try { a = JSON.parse((r && r.archivos) || '[]'); } catch (_) {}
       const arr = Array.isArray(a) ? a : [], v = String(qs.get('v') || '');
       const x = v ? arr.find(y => y && sfCorteArchV(y.key) === v) : arr[i >= 0 ? i : 0], k = x ? String(x.key || '') : '';
@@ -32923,10 +32928,10 @@ const handler = {
           let row = null; try { row = await env.DB.prepare('SELECT * FROM sf_cortes WHERE id = ?').bind(id).first(); } catch (_) {}
           return json({ ok: true, corte: row ? sfCorteFila(row) : { id } });
         }
-        // GET /admin/sinfrontera/cortes → los pedidos de corte (los últimos 300, el más nuevo primero).
+        // GET /admin/sinfrontera/cortes → los pedidos de corte (los últimos 300, el más nuevo primero; los borrados, no).
         if (request.method === 'GET' && path === '/admin/sinfrontera/cortes') {
           let rows = [];
-          try { rows = (await env.DB.prepare('SELECT * FROM sf_cortes ORDER BY id DESC LIMIT 300').all()).results || []; }
+          try { rows = (await env.DB.prepare('SELECT * FROM sf_cortes WHERE borrado_at IS NULL ORDER BY id DESC LIMIT 300').all()).results || []; }
           catch (_) { return json({ error: 'db', motivo: 'No se pudieron leer los pedidos. Probá de nuevo.' }, 500); }
           return json({ ok: true, cortes: rows.map(sfCorteFila), colores: await sfCorteColoresPropios(env) });
         }
@@ -32938,15 +32943,20 @@ const handler = {
           if (!id || !SF_CORTE_ESTADOS.includes(estado)) return json({ error: 'datos', motivo: 'Elegí un estado de la lista.' }, 400);
           let row = null; try { row = await env.DB.prepare('SELECT * FROM sf_cortes WHERE id = ?').bind(id).first(); } catch (_) {}
           if (!row) return json({ error: 'nada', motivo: 'Ese pedido no existe.' }, 404);
+          if (row.borrado_at) return json({ error: 'borrado', motivo: 'Ese pedido se borró.' }, 404);
           if (row.estado === estado) return json({ ok: true, corte: sfCorteFila(row), sin_cambios: true });
           if (sfExt && !(estado === 'cancelado' && row.estado === 'pedido')) return json({ error: 'forbidden', motivo: row.estado === 'pedido' ? 'Solo se puede cancelar.' : 'Ya se empezó a cortar: para cambiarlo, hablalo con Gaspar.' }, 403);
           const quien = String(body.quien || '').replace(/\s+/g, ' ').trim().slice(0, 40);
           const por = sfExt ? (quien ? quien + ' · Sin Frontera' : 'Sin Frontera') : (fran ? 'Fran' : String(session.user || ''));
           const nowIso = new Date().toISOString();
           let ch = 0;
-          try { const u = await env.DB.prepare('UPDATE sf_cortes SET estado = ?, estado_at = ?, estado_por = ? WHERE id = ? AND estado = ?').bind(estado, nowIso, por, id, row.estado).run(); ch = (u && u.meta && u.meta.changes) || 0; }
+          try { const u = await env.DB.prepare('UPDATE sf_cortes SET estado = ?, estado_at = ?, estado_por = ? WHERE id = ? AND estado = ? AND borrado_at IS NULL').bind(estado, nowIso, por, id, row.estado).run(); ch = (u && u.meta && u.meta.changes) || 0; }
           catch (_) { return json({ error: 'db', motivo: 'No se pudo guardar. Probá de nuevo.' }, 500); }
-          if (!ch) return json({ error: 'cambio', motivo: 'Alguien lo cambió recién. Actualizá la lista y probá de nuevo.' }, 409);
+          if (!ch) {
+            let r3 = null; try { r3 = await env.DB.prepare('SELECT borrado_at FROM sf_cortes WHERE id = ?').bind(id).first(); } catch (_) {}
+            if (r3 && r3.borrado_at) return json({ error: 'borrado', motivo: 'Ese pedido se borró.' }, 404);
+            return json({ error: 'cambio', motivo: 'Alguien lo cambió recién. Actualizá la lista y probá de nuevo.' }, 409);
+          }
           if (sfExt) {
             const txt = 'Sin Frontera canceló el pedido de corte #' + id + (row.nombre ? ' "' + row.nombre + '"' : '') + (quien ? ' (' + quien + ')' : '') + ': ' + (SF_CORTE_MATERIALES[row.material] || row.material) + ' '
               + String(SF_CORTE_COLORES[row.color] || row.color).toLowerCase() + ' de ' + row.espesor + ' mm.';
@@ -32969,6 +32979,7 @@ const handler = {
           const id = parseInt(body.id, 10) || 0;
           let row = null; try { row = id ? await env.DB.prepare('SELECT * FROM sf_cortes WHERE id = ?').bind(id).first() : null; } catch (_) {}
           if (!row) return json({ error: 'nada', motivo: 'Ese pedido no existe.' }, 404);
+          if (row.borrado_at) return json({ error: 'borrado', motivo: 'Ese pedido se borró: ya no se puede editar.' }, 404);
           if (sfExt && !SF_CORTE_EDITA_SF.includes(row.estado)) {
             return json({ error: 'forbidden', motivo: row.estado === 'cancelado' ? 'Ese pedido está cancelado: si lo necesitan, cargá uno nuevo.'
               : (row.estado === 'entregado' ? 'Ese pedido ya se entregó' : 'Ese pedido ya está cortado') + ': para cambiarlo, hablalo con Gaspar.', corte: sfCorteFila(row) }, 403);
@@ -33014,12 +33025,13 @@ const handler = {
           // Con el estado y la última edición que se leyeron: si Gaspar lo pasó a Listo o alguien lo editó en el medio, no se pisa.
           let ch = 0;
           try {
-            const u = await env.DB.prepare("UPDATE sf_cortes SET nombre = ?, material = ?, color = ?, color_hex = ?, espesor = ?, fecha_necesita = ?, aclaraciones = ?, archivos = ?, editado_at = ?, editado_por = ? WHERE id = ? AND estado = ? AND IFNULL(editado_at, '') = ?")
+            const u = await env.DB.prepare("UPDATE sf_cortes SET nombre = ?, material = ?, color = ?, color_hex = ?, espesor = ?, fecha_necesita = ?, aclaraciones = ?, archivos = ?, editado_at = ?, editado_por = ? WHERE id = ? AND estado = ? AND IFNULL(editado_at, '') = ? AND borrado_at IS NULL")
               .bind(nombre, material, col.color, col.hex || null, espesor, fecha, acl, JSON.stringify(arch), nowIso, por, id, row.estado, String(row.editado_at || '')).run();
             ch = (u && u.meta && u.meta.changes) || 0;
           } catch (_) { return json({ error: 'db', motivo: 'No se pudo guardar. Probá de nuevo.' }, 500); }
           if (!ch) {
             let r3 = null; try { r3 = await env.DB.prepare('SELECT * FROM sf_cortes WHERE id = ?').bind(id).first(); } catch (_) {}
+            if (r3 && r3.borrado_at) return json({ error: 'borrado', motivo: 'Ese pedido se borró: ya no se puede editar.' }, 404);
             return json({ error: 'cambio', motivo: 'Alguien lo cambió recién. Tocá Actualizar y volvé a abrirlo para ver cómo quedó.', corte: r3 ? sfCorteFila(r3) : null }, 409);
           }
           if (!SF_CORTE_COLORES[col.color]) { try { await sfCorteColorGuardar(env, col.color, col.hex); } catch (_) {} }
@@ -33038,6 +33050,64 @@ const handler = {
         }
         // ---- De acá para abajo, solo Gaspar ----
         if (sfExt || fran) return json({ error: 'forbidden' }, 403);
+        // POST /admin/sinfrontera/corte/borrar {id} → borra un pedido de corte que todavía no está en corte: Pedido o Cancelado
+        // (Gaspar 27-oct: "permitime borrar pedidos que todavía no estén en corte"). Borrado LÓGICO (borrado_at): no sale más en
+        // las tres pantallas (Gaspar, Fran y Sin Frontera), sus archivos ya no se bajan y no se puede mover ni editar, pero la fila
+        // queda (y los archivos en R2) para el "Deshacer" (corte/restaurar). Atómico con el estado: si en el medio alguien lo pasó a
+        // En corte, no se borra (409 con el pedido como quedó). Si estaba en Pedido, a Fran le llega el aviso, como cuando Sin
+        // Frontera lo cancela (lo puede tener en la cola para cortar); si ya estaba cancelado, no (ya se le había avisado).
+        if (request.method === 'POST' && path === '/admin/sinfrontera/corte/borrar') {
+          let body; try { body = await request.json(); } catch { body = {}; }
+          const id = parseInt(body.id, 10) || 0;
+          if (!id) return json({ error: 'datos', motivo: 'Falta el número de pedido.' }, 400);
+          const nowIso = new Date().toISOString(), quien = String(session.user || '').trim() || 'Gaspar';
+          let row = null;
+          try { row = await env.DB.prepare("UPDATE sf_cortes SET borrado_at = ?, borrado_por = ? WHERE id = ? AND estado IN ('pedido', 'cancelado') AND borrado_at IS NULL RETURNING *").bind(nowIso, quien, id).first(); }
+          catch (_) { return json({ error: 'db', motivo: 'No se pudo borrar. Probá de nuevo.' }, 500); }
+          if (!row) {
+            let r2 = null;
+            try { r2 = await env.DB.prepare('SELECT * FROM sf_cortes WHERE id = ?').bind(id).first(); }
+            catch (_) { return json({ error: 'db', motivo: 'No se pudo borrar. Probá de nuevo.' }, 500); }
+            if (!r2) return json({ error: 'nada', motivo: 'Ese pedido no existe.' }, 404);
+            if (r2.borrado_at) return json({ error: 'borrado', motivo: 'Ese pedido ya estaba borrado.' }, 404);
+            const ya = { en_corte: 'Ya está en corte', listo: 'Ya está cortado', entregado: 'Ya se entregó' }[r2.estado] || 'Ya está en corte';
+            return json({ error: 'cortando', motivo: ya + ': no se puede borrar.', corte: sfCorteFila(r2) }, 409);
+          }
+          const avisado = row.estado === 'pedido';
+          if (avisado) {
+            const pf = sfCorteAvisoFran(env, quien + ' borró el pedido de corte #' + id + (row.nombre ? ' "' + row.nombre + '"' : '') + ': ' + (SF_CORTE_MATERIALES[row.material] || row.material) + ' '
+              + String(SF_CORTE_COLORES[row.color] || row.color).toLowerCase() + ' de ' + row.espesor + ' mm. Ya no está en la lista: no lo cortes.');
+            try { ctx.waitUntil(pf); } catch (_) { await pf; }
+          }
+          return json({ ok: true, id, borrado_at: nowIso, avisado });
+        }
+        // POST /admin/sinfrontera/corte/restaurar {id} → el "Deshacer" de corte/borrar: vuelve tal cual estaba (mismo estado,
+        // archivos y todo). Sin límite de tiempo: es solo de Gaspar, el pedido nunca dejó de estar en la base, y si se da cuenta
+        // tarde se recupera con esta misma ruta en vez de tocar la D1 a mano. A Fran le llega que volvió solo si se le había
+        // avisado el borrado (estaba en Pedido: mientras está borrado el estado no cambia).
+        if (request.method === 'POST' && path === '/admin/sinfrontera/corte/restaurar') {
+          let body; try { body = await request.json(); } catch { body = {}; }
+          const id = parseInt(body.id, 10) || 0;
+          if (!id) return json({ error: 'datos', motivo: 'Falta el número de pedido.' }, 400);
+          const quien = String(session.user || '').trim() || 'Gaspar';
+          let row = null;
+          try { row = await env.DB.prepare('UPDATE sf_cortes SET borrado_at = NULL, borrado_por = NULL WHERE id = ? AND borrado_at IS NOT NULL RETURNING *').bind(id).first(); }
+          catch (_) { return json({ error: 'db', motivo: 'No se pudo deshacer. Probá de nuevo.' }, 500); }
+          if (!row) {
+            let r2 = null;
+            try { r2 = await env.DB.prepare('SELECT * FROM sf_cortes WHERE id = ?').bind(id).first(); }
+            catch (_) { return json({ error: 'db', motivo: 'No se pudo deshacer. Probá de nuevo.' }, 500); }
+            if (!r2) return json({ error: 'nada', motivo: 'Ese pedido no existe.' }, 404);
+            return json({ ok: true, corte: sfCorteFila(r2), sin_cambios: true, avisado: false });   // no estaba borrado (doble toque)
+          }
+          const avisado = row.estado === 'pedido';
+          if (avisado) {
+            const pf = sfCorteAvisoFran(env, quien + ' volvió a poner el pedido de corte #' + id + (row.nombre ? ' "' + row.nombre + '"' : '') + ' (lo había borrado por error): '
+              + (SF_CORTE_MATERIALES[row.material] || row.material) + ' ' + String(SF_CORTE_COLORES[row.color] || row.color).toLowerCase() + ' de ' + row.espesor + ' mm. Lo ves en el CRM, en Cortes de Sin Frontera.');
+            try { ctx.waitUntil(pf); } catch (_) { await pf; }
+          }
+          return json({ ok: true, corte: sfCorteFila(row), avisado });
+        }
         // GET|POST /admin/sinfrontera/fran → el usuario de Fran (router y láser): si existe, si tiene contraseña y su WhatsApp para
         // los avisos de pedidos de corte. POST {password?, telefono?}: la contraseña crea o actualiza el usuario 'fran' (rol 'fran')
         // y lo activa (un usuario activo sin contraseña entraría sin ella: nunca se crea sin); cambiarla cierra sus sesiones.

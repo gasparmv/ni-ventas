@@ -4890,6 +4890,11 @@ table.t.t-pedidos .prod-celda-linea { white-space: normal; line-height: 1.35; }
 .sfcb-card .sfc-acc { order: 90; flex: 1 1 100%; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; margin: 1px 0 0; padding: 0; border: 0; }
 .sfcb-card select.lb-sel.sfc-est { font-size: 12px; line-height: 16px; padding: 2px 20px 2px 8px; }
 .sfcb-card .sfc-cancelar, .sfcb-card .sfc-editar { font-size: 12px !important; line-height: 16px; padding: 2px 9px !important; }
+/* Borrar (27-oct; solo Gaspar, en Pedido o Cancelado): discreto, rojo al pasar; en la tarjeta, a la izquierda, lejos del estado. */
+.sfc-borrar { font-size: 12px !important; padding: 4px 10px !important; color: var(--fg-subtle) !important; border-color: transparent !important; }
+.sfc-borrar:hover, .sfc-borrar:focus-visible { color: #ef4444 !important; border-color: color-mix(in srgb, #ef4444 55%, transparent) !important; background: color-mix(in srgb, #ef4444 10%, transparent) !important; outline: none; }
+.sfcb-card .sfc-borrar { margin-right: auto; line-height: 16px; padding: 2px 9px !important; }
+@media (max-width: 760px) { .sfcb-card .sfc-borrar { font-size: 13px !important; line-height: 20px; padding: 6px 12px !important; } }
 .sfcb-col .sfk-todos { margin-top: 0; }
 .sfcb-ayuda { margin-top: 2px; }
 /* Cancelados: una barra plegable debajo del tablero; abierta, las tarjetas en grilla. */

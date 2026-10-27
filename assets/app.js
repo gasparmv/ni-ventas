@@ -5948,7 +5948,8 @@ function niToast(msg, opts) {
   const col = opts.error ? '#ef4444' : 'var(--neon-cyan, #8FD4DE)';
   const abajo = (window.matchMedia && window.matchMedia('(max-width: 768px)').matches) ? 88 : 24; // en el celu, arriba de la barra de abajo
   const pos = opts.bottom != null ? opts.bottom + 'px' : `calc(${abajo}px + env(safe-area-inset-bottom,0px))`;
-  t.style.cssText = `position:fixed;left:50%;bottom:${pos};transform:translateX(-50%);z-index:400;display:flex;align-items:center;gap:14px;max-width:calc(100vw - 24px);background:var(--ink-200,#1a1a24);color:var(--fg,#fff);border:1px solid ${col};border-radius:14px;padding:12px 16px;font-size:14px;font-weight:600;box-shadow:0 10px 30px rgba(0,0,0,.5)`;
+  // width:max-content: con left:50% el ancho "a medida" solo tenía la mitad derecha de la pantalla (en el celular, "Pedid o #1 borra do").
+  t.style.cssText = `position:fixed;left:50%;bottom:${pos};transform:translateX(-50%);z-index:400;display:flex;align-items:center;gap:14px;width:max-content;max-width:calc(100vw - 24px);background:var(--ink-200,#1a1a24);color:var(--fg,#fff);border:1px solid ${col};border-radius:14px;padding:12px 16px;font-size:14px;font-weight:600;box-shadow:0 10px 30px rgba(0,0,0,.5)`;
   t.innerHTML = `<span style="min-width:0;overflow-wrap:anywhere${opts.error ? ';color:#fca5a5' : ''}">${escapeHtml(msg)}</span>${opts.undo ? '<button type="button" data-ni-toast-undo style="flex:0 0 auto;background:transparent;border:1px solid var(--neon-cyan,#8FD4DE);color:var(--neon-cyan,#8FD4DE);border-radius:9px;padding:8px 14px;font-weight:800;font-size:14px;cursor:pointer">Deshacer</button>' : ''}`;
   const ocultar = () => { t.style.display = 'none'; };
   clearTimeout(window.__niToastT); window.__niToastT = setTimeout(ocultar, opts.ms || (opts.undo ? 5000 : (opts.error ? 4500 : 2600)));
@@ -9277,12 +9278,15 @@ async function sfcCargarYa(silent) {
     if (STATE.user !== user) return;
     if ((STATE._sfcGen || 0) !== gen) { sfcCargar({ silent: true }); return; }   // vieja: se pidió antes de un cambio guardado
     const antes = JSON.stringify((STATE.sfCortes && STATE.sfCortes.colores) || []);
-    STATE.sfCortes = { cortes: j.cortes || [], colores: Array.isArray(j.colores) ? j.colores : [], at: Date.now() };
+    STATE.sfCortes = { cortes: sfcBorrVista(j.cortes || []), colores: Array.isArray(j.colores) ? j.colores : [], at: Date.now() };
     if (antes !== JSON.stringify(STATE.sfCortes.colores)) STATE._sfcColoresCambio = true;
   } catch (e) {
     if (STATE.user !== user) return;
     if (!silent || !STATE.sfCortes || STATE.sfCortes.error) STATE.sfCortes = { error: e.message || 'No se pudo cargar', at: Date.now() };
   } finally { STATE._sfcCargando = null; }
+  // El pedido que estaban editando ya no está (lo borró Gaspar desde otro lado): se cierra el editor.
+  const edId = STATE.sfcEditId;
+  if (STATE.view === 'sf-cortes' && edId && STATE.sfCortes && !STATE.sfCortes.error && !STATE._sfcEnviando && !sfcCorte(edId)) { sfcEditarCancelar(); niToast('El pedido #' + edId + ' se borró: ya no se puede editar.', { error: true }); return; }
   if (STATE.view === 'sf-cortes') { sfcPintarLista(); if (STATE._sfcColoresCambio) { STATE._sfcColoresCambio = false; sfcPintarColores(true); } }
 }
 function renderSfCortes() {
@@ -9501,7 +9505,7 @@ async function sfcEnviar() {
     } catch (e) {
       STATE._sfcEnviando = false;
       // Cambió en el medio (otro lo editó, pasó a En corte o ya no se puede editar): se reabre con cómo quedó.
-      if (e && (e.code === 'cambio' || e.code === 'cortando' || (e.code === 'forbidden' && e.data && e.data.corte))) { sfcEditarReabrir(id, F, e); return; }
+      if (e && (e.code === 'cambio' || e.code === 'cortando' || e.code === 'borrado' || (e.code === 'forbidden' && e.data && e.data.corte))) { sfcEditarReabrir(id, F, e); return; }
       sfcPintarArchivos();
       err(String((e && e.message) || 'No se pudo guardar. Probá de nuevo.'));
     }
@@ -9543,8 +9547,10 @@ function sfcFilaHtml(c) {
   const arch = (c.archivos || []).map((a, i) => `<a class="sfc-arch" href="${escapeHtml(sfUrl('c=' + c.id + '&i=' + i + (a.v ? '&v=' + encodeURIComponent(a.v) : '') + '&dl=1'))}" target="_blank" rel="noopener" title="Bajar ${escapeHtml(a.nombre)} (${sfcPeso(a.bytes)})">${/^image\//.test(a.tipo) ? '🖼' : '📄'} ${escapeHtml(a.nombre)}</a>`).join('');
   const ed = sfcPuedeEditar(c), tit = sfcTitulo(c);
   const editar = ed ? `<button type="button" class="btn btn-ghost sfc-editar" data-sfc-editar="${c.id}">Editar</button>` : '';
+  // Borrar (Gaspar 27-oct): solo él, y solo si todavía no está en corte (sfcBorrar).
+  const borrar = sfcPuedeBorrar(c) ? `<button type="button" class="btn btn-ghost sfc-borrar" data-sfc-borrar="${c.id}" title="Borrar el pedido #${c.id}" aria-label="Borrar el pedido #${c.id}">Borrar</button>` : '';
   const acc = adm
-    ? `${editar}<select class="lb-sel sfc-est" data-sfc-estado="${c.id}" style="--c:${E[2]}" aria-label="Estado del pedido #${c.id}">${SFC_ESTADOS.map(([v, t]) => `<option value="${v}"${v === c.estado ? ' selected' : ''}>${t}</option>`).join('')}</select>`
+    ? `${borrar}${editar}<select class="lb-sel sfc-est" data-sfc-estado="${c.id}" style="--c:${E[2]}" aria-label="Estado del pedido #${c.id}">${SFC_ESTADOS.map(([v, t]) => `<option value="${v}"${v === c.estado ? ' selected' : ''}>${t}</option>`).join('')}</select>`
     : `<span class="sfc-est-pill" style="--c:${E[2]}">${E[1]}</span>${editar}${c.estado === 'pedido' ? `<button type="button" class="btn btn-ghost sfc-cancelar" data-sfc-cancelar="${c.id}">Cancelar</button>` : ''}`;
   // Sin nombre (los cargados antes del 26-oct): quien lo puede editar lo toca y va directo al campo del nombre.
   const sinNom = !tit.sinNombre ? '' : ed ? `<button type="button" class="sfc-sinnom" data-sfc-nombrar="${c.id}" title="Ponerle nombre" aria-label="Ponerle nombre al pedido #${c.id}">sin nombre ✎</button>`
@@ -9586,6 +9592,80 @@ async function sfcCambiarEstado(id, estado, el) {
   if (el) el.disabled = false;
   // Sin Frontera canceló el pedido que tenía abierto para editar: ya no se puede editar, se cierra el formulario.
   if (STATE.sfcEditId === id && !sfcPuedeEditar(c)) sfcEditarCancelar(); else sfcPintarLista();
+  sfcCargar({ silent: true });
+}
+// ----- Borrar (Gaspar 27-oct: "permitime borrar pedidos que todavía no estén en corte") -----
+// Solo Gaspar y solo en Pedido o Cancelado (el worker es la barrera: si alguien lo pasó a En corte en el medio, 409). Borrado
+// lógico: desaparece de las tres pantallas (Gaspar, Fran y Sin Frontera), pero queda en la base, así "Deshacer" lo vuelve a
+// poner tal cual. La tarjeta se va al instante y vuelve si no se pudo borrar.
+const SFC_BORRABLE = ['pedido', 'cancelado'];
+function sfcPuedeBorrar(c) { return isAdmin() && !!c && SFC_BORRABLE.includes(c.estado); }
+// Borrados y restauraciones en vuelo, por id: { c, ver, deshacer }. Una lista que se pidió en el medio (el worker todavía no lo
+// borró, o todavía no lo restauró) no hace volver ni desaparecer la tarjeta: sfcCargarYa pasa la lista por acá.
+function sfcBorrVista(cs) {
+  const B = STATE._sfcBorr; if (!B) return cs;
+  Object.keys(B).forEach(k => {
+    const b = B[k], id = +k;
+    cs = b.ver ? (cs.some(x => x.id === id) ? cs : cs.concat([b.c])) : cs.filter(x => x.id !== id);
+  });
+  return cs;
+}
+// 'No se pudo borrar el #3. Probá de nuevo.' / 'No se borró el #3: Ya está en corte…' / '…: sin conexión'.
+function sfcBorrErr(e, pref, corto, id) {
+  const m = String((e && e.status && e.message) || 'sin conexión');
+  return m.indexOf(pref) === 0 ? pref + ' el #' + id + m.slice(pref.length) : corto + ' el #' + id + ': ' + m;
+}
+function sfcBorrPoner(c, on) {
+  const D = STATE.sfCortes; if (!D || D.error) return;
+  const sin = (D.cortes || []).filter(x => x.id !== c.id);
+  D.cortes = on ? [c].concat(sin).sort((a, b) => b.id - a.id) : sin;
+}
+async function sfcBorrar(id) {
+  let c = sfcCorte(id);
+  if (!sfcPuedeBorrar(c) || (STATE._sfcBorr && STATE._sfcBorr[id])) return;
+  const t = sfcTitulo(c);
+  const ok = await showConfirm('¿Borrar el pedido #' + id + (t.sinNombre ? '' : ' "' + t.txt + '"') + '?\nSe borra para vos, para Fran y para Sin Frontera.'
+    + (c.estado === 'pedido' ? ' A Fran le llega un aviso.' : ''), { title: 'Borrar pedido', confirmLabel: 'Sí, borrar', cancelLabel: 'No', variant: 'warn' }).catch(() => false);
+  if (!ok) return;
+  c = sfcCorte(id);   // la lista se pudo actualizar mientras se confirmaba
+  if (!sfcPuedeBorrar(c)) { niToast(c ? 'No se borró: el #' + id + ' ya está ' + sfcEstado(c.estado)[1].toLowerCase() + '.' : 'Ese pedido ya no está.', { error: true }); return; }
+  if (STATE._sfcBorr && STATE._sfcBorr[id]) return;
+  const B = STATE._sfcBorr || (STATE._sfcBorr = {}), b = B[id] = { c, ver: false, deshacer: false };
+  if (STATE.sfcEditId === id) sfcEditarCancelar();
+  sfcCambioGuardado(); sfcBorrPoner(c, false); sfcPintarLista();
+  niToast('Pedido #' + id + ' borrado', { undo: () => sfcBorrarDeshacer(id, c), ms: 8000 });
+  let e = null;
+  try { await sfFetch('/admin/sinfrontera/corte/borrar', { id }); } catch (x) { e = x; }
+  if (e && e.code !== 'borrado') {
+    // No se borró (sin conexión, o lo pasaron a En corte en el medio: viene con cómo quedó): vuelve la tarjeta, salvo que ya no exista.
+    delete B[id]; sfcCambioGuardado();
+    if (e.code !== 'nada') { sfcBorrPoner(e.data && e.data.corte && e.data.corte.id === id ? e.data.corte : c, true); STATE._sfcbMovido = id; }
+    sfcPintarLista();
+    const quedo = b.deshacer && e.code !== 'cortando';   // tocaron Deshacer mientras tanto: no es un error, salvo que haya cambiado de estado
+    niToast(quedo ? 'El #' + id + ' no se llegó a borrar: quedó como estaba.' : sfcBorrErr(e, 'No se pudo borrar', 'No se borró', id), { error: !quedo });
+    sfcCargar({ silent: true });
+    return;
+  }
+  if (b.deshacer) { sfcBorrarRestaurar(id); return; }   // tocaron Deshacer mientras se borraba
+  delete B[id]; sfcCambioGuardado();
+  sfcCargar({ silent: true });
+}
+// Deshacer: la tarjeta vuelve al instante. Si el borrado todavía está en vuelo, lo restaura sfcBorrar cuando termina.
+function sfcBorrarDeshacer(id, c) {
+  const B = STATE._sfcBorr || (STATE._sfcBorr = {}), b = B[id];
+  if (b && b.deshacer) return;
+  if (b) b.deshacer = b.ver = true; else B[id] = { c, ver: true, deshacer: true };
+  sfcCambioGuardado(); sfcBorrPoner(c, true); STATE._sfcbMovido = id; sfcPintarLista();
+  if (!b) sfcBorrarRestaurar(id);
+}
+async function sfcBorrarRestaurar(id) {
+  const B = STATE._sfcBorr || {}, b = B[id]; if (!b) return;
+  let j = null, e = null;
+  try { j = await sfFetch('/admin/sinfrontera/corte/restaurar', { id }); } catch (x) { e = x; }
+  delete B[id]; sfcCambioGuardado();
+  // No se pudo: sigue borrado y el aviso trae Deshacer de nuevo para reintentar (la tarjeta ya no está en la pantalla).
+  if (e) { sfcBorrPoner(b.c, false); sfcPintarLista(); niToast(sfcBorrErr(e, 'No se pudo deshacer', 'No se pudo deshacer', id), { error: true, undo: () => sfcBorrarDeshacer(id, b.c), ms: 10000 }); }
+  else { if (j && j.corte) sfcBorrPoner(j.corte, true); sfcPintarLista(); niToast('Pedido #' + id + ' de vuelta' + (j && j.avisado ? '. Le avisamos a Fran.' : '')); }
   sfcCargar({ silent: true });
 }
 // Usuario de Fran (router y láser; Gaspar 22-oct): la contraseña crea o cambia su usuario y el WhatsApp es para avisarle cada
@@ -9925,6 +10005,7 @@ function sfcBind(root) {
     }
     if (e.target.closest('[data-sfc-refresh]')) { if (STATE.sfCortes && STATE.sfCortes.error) { STATE.sfCortes = null; sfcPintarLista(); } sfcCargar({}); return; }
     const c = e.target.closest('[data-sfc-cancelar]'); if (c) sfcCambiarEstado(+c.getAttribute('data-sfc-cancelar'), 'cancelado', c);
+    const bo = e.target.closest('[data-sfc-borrar]'); if (bo) sfcBorrar(+bo.getAttribute('data-sfc-borrar'));
   });
   sfcbBind(root);
 }
