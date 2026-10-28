@@ -587,7 +587,11 @@ function distBorde(p, poly) {
 }
 // Trazo expandido: un trazo alineado por dentro o por fuera Illustrator lo escribe en el PDF como un relleno con dos bordes
 // (un anillo del ancho del trazo). Si el borde de adentro va parejo al de afuera a 12 mm o menos, es eso y no una pieza con
-// un hueco. Emma alinea el trazo rojo por dentro: el borde de afuera coincide exacto con la base (25-oct, semana 47).
+// un hueco. Del calado se toma la línea del medio. Del corte, el borde que es la medida real, que depende de cómo se alineó el
+// trazo: lo decide bordeDeCorte() con el calado de la misma página y, si no puede, queda el de afuera. Emanuel (Emma) alinea
+// por fuera: la medida es el borde de adentro, a 10 mm del calado (el zorro de la semana 44 y la cli 47, donde da las medidas
+// vendidas: 1000, 500, 1400 mm). Hasta el 28-oct se tomaba siempre el de afuera y esas piezas salían 6 mm más grandes por
+// lado; el 25-oct se creyó que la cli 47 venía alineada por dentro porque la base vieja con que se comparó también estaba a 16.
 function anillo(subs) {
   if (subs.length !== 2 || !subs[0].cerrado || !subs[1].cerrado) return null;
   let A = { pts: subs[0].pts, area: areaPts(subs[0].pts) }, B = { pts: subs[1].pts, area: areaPts(subs[1].pts) };
@@ -604,6 +608,71 @@ function contiene(A, B) {
   const mu = muestras(B.pts, 7); let d = 0;
   for (const p of mu) if (dentro(p, A.pts)) d++;
   return d * 2 > mu.length;
+}
+// La base de un cartel va a CALADO_AL_BORDE mm del eje del calado: 3 del surco (la mitad de la fresa de 6) + 7 de acrílico
+// (regla de Gaspar). De un anillo de corte se toma el borde que queda a esa distancia, con CALADO_TOL mm de tolerancia; si
+// los dos quedan casi igual de cerca (a menos de BORDE_EMPATE mm de diferencia) no se decide. La distancia de cada borde es
+// el percentil BORDE_PCT de las de sus puntos: lo que dista donde la base abraza al calado. La mediana no sirve con una base
+// que se aparta del calado en buena parte del contorno (en la cli 47, la pieza de 2012 × 500 da 15,3 mm de mediana en el
+// borde bueno y 10,0 de percentil 10); y si ese trazo viniera alineado por dentro, el borde de adentro quedaría a ~9 y ganaría.
+const CALADO_AL_BORDE = 3 + 7, CALADO_TOL = 3, BORDE_EMPATE = 1, BORDE_PCT = 0.1;
+// n puntos repartidos parejo a lo largo de un contorno cerrado (muestras() reparte por vértice, y las curvas tienen muchos más
+// vértices que las rectas).
+function porLargo(pts, n) {
+  const L = []; let tot = 0;
+  for (let i = 0; i < pts.length; i++) { const d = dist(pts[i], pts[(i + 1) % pts.length]); L.push(d); tot += d; }
+  if (!(tot > 0)) return pts.slice(0, 1);
+  const out = []; let i = 0, ac = 0;
+  for (let k = 0; k < n; k++) {
+    const s = (k + 0.5) * tot / n;
+    while (i < pts.length - 1 && ac + L[i] < s) ac += L[i++];
+    const a = pts[i], b = pts[(i + 1) % pts.length], t = L[i] ? Math.min(1, Math.max(0, (s - ac) / L[i])) : 0;
+    out.push([a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])]);
+  }
+  return out;
+}
+// Distancia de un contorno al eje de calado más cercano: el percentil BORDE_PCT entre puntos parejos del contorno; segs:
+// [ax, ay, bx, by, ...].
+function distAlEje(pts, segs) {
+  const d = porLargo(pts, 160).map(([x, y]) => {
+    let m = Infinity;
+    for (let i = 0; i < segs.length; i += 4) {
+      const ax = segs[i], ay = segs[i + 1], vx = segs[i + 2] - ax, vy = segs[i + 3] - ay, L = vx * vx + vy * vy;
+      let t = L ? ((x - ax) * vx + (y - ay) * vy) / L : 0; t = t < 0 ? 0 : t > 1 ? 1 : t;
+      const dx = x - ax - t * vx, dy = y - ay - t * vy, q = dx * dx + dy * dy;
+      if (q < m) m = q;
+    }
+    return Math.sqrt(m);
+  }).sort((u, v) => u - v);
+  return d[Math.floor(BORDE_PCT * (d.length - 1))];
+}
+// Qué borde de un anillo de corte es la medida real: el que queda a CALADO_AL_BORDE mm del eje del calado (distAlEje). ejes:
+// los ejes del calado de la página ({ pts, cerrado, bb }). El calado se busca adentro de dentroDe y afuera de fueraDe (cada
+// trazo va o no según dónde queda la mayor parte, como en duenio): para una pieza, adentro de su borde de afuera; para un
+// corte de adentro (un hueco), adentro de su pieza y afuera del hueco, porque el calado va en el material de alrededor.
+// Devuelve { borde: 'afuera' | 'adentro' | null, motivo, dA, dB } (motivo, cuando borde es null: 'sinCalado', 'lejos' o
+// 'empate'; dA y dB, la distancia de cada borde).
+function bordeDeCorte(an, ejes, dentroDe, fueraDe) {
+  const R = CALADO_AL_BORDE + CALADO_TOL + an.ancho + 1, b = caja(an.afuera);
+  const x0 = b.x0 - R, y0 = b.y0 - R, x1 = b.x1 + R, y1 = b.y1 + R, segs = [];
+  for (const e of ejes) {
+    if (e.bb.x1 < x0 || e.bb.x0 > x1 || e.bb.y1 < y0 || e.bb.y0 > y1) continue;
+    const mu = muestras(e.pts, 9); let k = 0;
+    for (const p of mu) if (dentro(p, dentroDe) && !(fueraDe && dentro(p, fueraDe))) k++;
+    if (k * 2 <= mu.length) continue;
+    const P = e.pts, n = e.cerrado ? P.length : P.length - 1;
+    for (let i = 0; i < n; i++) {
+      const p = P[i], q = P[(i + 1) % P.length];
+      if (Math.max(p[0], q[0]) < x0 || Math.min(p[0], q[0]) > x1 || Math.max(p[1], q[1]) < y0 || Math.min(p[1], q[1]) > y1) continue;
+      segs.push(p[0], p[1], q[0], q[1]);
+    }
+  }
+  if (!segs.length) return { borde: null, motivo: 'sinCalado' };
+  const dA = distAlEje(an.afuera, segs), dB = distAlEje(an.adentro, segs);
+  const eA = Math.abs(dA - CALADO_AL_BORDE), eB = Math.abs(dB - CALADO_AL_BORDE);
+  if (!(Math.min(eA, eB) <= CALADO_TOL)) return { borde: null, motivo: 'lejos', dA, dB };
+  if (Math.abs(eA - eB) < BORDE_EMPATE) return { borde: null, motivo: 'empate', dA, dB };
+  return { borde: eA < eB ? 'afuera' : 'adentro', motivo: null, dA, dB };
 }
 // Un contorno de corte abierto con 3 puntos o más al que le faltan CIERRE_SOLO mm o menos para cerrar se cierra solo (armar,
 // la revisión del paso 1 y los recortes dibujados usan la misma regla).
@@ -642,9 +711,9 @@ function armar() {
   const piezas = [];
   for (const a of S.archivos) {
     if (a.estado !== 'ok') continue;
-    const r = a.res = { piezas: 0, calados: 0, agujeros: 0, sueltos: 0, abiertosSueltos: 0, cerrados: 0, repetidos: 0, chicos: 0, fondos: 0, ignorados: 0, anillos: 0, unidas: 0, salen: 0 };
+    const r = a.res = { piezas: 0, calados: 0, agujeros: 0, sueltos: 0, abiertosSueltos: 0, cerrados: 0, repetidos: 0, chicos: 0, fondos: 0, ignorados: 0, bordeAdentro: 0, bordeAfuera: 0, bordeSinCalado: 0, bordeLejos: 0, bordeEmpate: 0, caladoAnillo: 0, unidas: 0, salen: 0 };
     for (const pg of a.paginas) {
-      const cortes = [], abiertos = [], detalles = [], ignorados = [];
+      const cortes = [], abiertos = [], detalles = [], ignorados = [], ejes = [];
       const meter = (cl, s, porTrazo) => {
         if (cl === 'ignorar') { ignorados.push(s); return; }
         if (cl === 'corte') {
@@ -660,9 +729,13 @@ function armar() {
         let subs = el.subs;
         if (cl !== 'ignorar' && !porTrazo) {
           const an = anillo(subs);
-          if (an && cl === 'corte') { subs = [{ pts: an.afuera, cerrado: true, lw: 0 }]; r.anillos++; }
-          else if (an && cl === 'calado') { const lz = NestGcode.desplazar(an.afuera, -an.ancho / 2); if (lz.length) { subs = lz.map((p) => ({ pts: p, cerrado: true, lw: an.ancho })); r.anillos++; } }
+          // el borde del corte se elige más abajo, cuando ya están todos los calados de la página (pueden venir después)
+          if (an && cl === 'corte') { cortes.push({ pts: an.afuera, an }); continue; }
+          if (an && cl === 'calado') { const lz = NestGcode.desplazar(an.afuera, -an.ancho / 2); if (lz.length) { subs = lz.map((p) => ({ pts: p, cerrado: true, lw: an.ancho })); r.caladoAnillo++; } }
         }
+        // ejes del calado, para elegir el borde de los anillos de corte: los trazos y la línea del medio de los anillos (de un
+        // relleno blanco común no se sabe dónde va el eje)
+        if (cl === 'calado' && (porTrazo || subs !== el.subs)) for (const s of subs) ejes.push({ pts: s.pts, cerrado: s.cerrado, bb: caja(s.pts) });
         for (const s of subs) if (!(unidos && unidos[cl] && !s.cerrado)) meter(cl, s, porTrazo);
       }
       if (unidos) for (const cl of Object.keys(unidos)) {
@@ -673,7 +746,7 @@ function armar() {
       }
       r.ignorados += ignorados.length;
       const cs = [];
-      for (const { pts, solo } of cortes) { const ar = areaPts(pts); if (ar < 1) { r.chicos++; continue; } if (solo) r.cerrados++; cs.push({ pts, area: ar, bb: caja(pts) }); }
+      for (const { pts, solo, an } of cortes) { const ar = areaPts(pts); if (ar < 1) { r.chicos++; continue; } if (solo) r.cerrados++; cs.push({ pts, area: ar, bb: caja(pts), an }); }
       cs.sort((u, v) => v.area - u.area);
       const unicos = [];
       for (const c of cs) {
@@ -684,6 +757,17 @@ function armar() {
         const c = unicos[i]; c.padre = -1;
         for (let j = i - 1; j >= 0; j--) if (contiene(unicos[j], c)) { c.padre = j; break; }
         c.prof = c.padre < 0 ? 0 : unicos[c.padre].prof + 1;
+      }
+      // Anillos de corte: el borde que es la medida real (bordeDeCorte). Una pieza busca el calado adentro de su borde de
+      // afuera; un corte de adentro, en su pieza (que ya pasó: unicos va de mayor a menor). Si no se puede saber, el de afuera.
+      for (const c of unicos) {
+        if (!c.an) continue;
+        const hueco = c.prof % 2 === 1, d = bordeDeCorte(c.an, ejes, hueco ? unicos[c.padre].pts : c.an.afuera, hueco ? c.an.afuera : null);
+        if (d.borde === 'adentro') { c.pts = c.an.adentro; c.area = areaPts(c.pts); c.bb = caja(c.pts); r.bordeAdentro++; }
+        else if (d.borde === 'afuera') r.bordeAfuera++;
+        else if (d.motivo === 'sinCalado') r.bordeSinCalado++;
+        else if (d.motivo === 'lejos') r.bordeLejos++;
+        else r.bordeEmpate++;
       }
       const pzs = [];
       for (const c of unicos) {
@@ -1172,7 +1256,16 @@ function avisosArchivos() {
       if (av.profundo) out.push({ grave: true, t: `${n}: tiene bloques metidos uno adentro de otro en más de 8 niveles; ${p(av.profundo, 'bloque', 'bloques')} de más adentro no se ${av.profundo === 1 ? 'leyó' : 'leyeron'} y no se ${av.profundo === 1 ? 'corta' : 'cortan'}. Descomponelos (Explode) antes de exportar.` });
     }
     if (r.cerrados && !sinUnir) out.push({ t: `${n}: ${p(r.cerrados, `contorno ${dxf ? 'de corte' : 'rojo'} no cerraba`, `contornos ${dxf ? 'de corte' : 'rojos'} no cerraban`)} por ${fmt(CIERRE_SOLO)} mm o menos; se ${r.cerrados === 1 ? 'cerró' : 'cerraron'}.` });
-    if (r.anillos) out.push({ t: `${n}: ${p(r.anillos, 'línea venía', 'líneas venían')} como trazo grueso alineado por dentro o por fuera (en el PDF queda un relleno de dos bordes): el corte toma el borde de afuera y el calado, la línea del medio.` });
+    // trazos alineados (anillos): qué borde se tomó y, si no se pudo saber, cómo evitarlo
+    const aDiez = `el que queda a ${fmt(CALADO_AL_BORDE)} mm del calado (3 del surco + 7 de acrílico)`, lineas = (k) => p(k, 'línea de corte venía', 'líneas de corte venían');
+    if (r.bordeAdentro) out.push({ t: `${n}: ${lineas(r.bordeAdentro)} como trazo alineado por fuera: se tomó el borde de adentro, ${aDiez}.` });
+    if (r.bordeAfuera) out.push({ t: `${n}: ${lineas(r.bordeAfuera)} como trazo alineado por dentro: se tomó el borde de afuera, ${aDiez}.` });
+    const duda = r.bordeSinCalado + r.bordeLejos + r.bordeEmpate;
+    if (duda) {
+      const por = [r.bordeSinCalado && 'no tiene calado adentro', r.bordeLejos && `ningún borde queda a ${fmt(CALADO_AL_BORDE)} mm del calado`, r.bordeEmpate && 'los dos bordes quedan casi igual de cerca del calado'].filter(Boolean).join(' o ');
+      out.push({ t: `${n}: ${lineas(duda)} como trazo alineado por dentro o por fuera y no se pudo saber qué borde es la medida real (${por}): se tomó el borde de afuera. Si la medida real es la línea de adentro, en Illustrator poné el trazo rojo en "Alinear trazo al centro".` });
+    }
+    if (r.caladoAnillo) out.push({ t: `${n}: ${p(r.caladoAnillo, 'calado venía', 'calados venían')} como trazo alineado por dentro o por fuera: se tomó la línea del medio.` });
     if (r.repetidos) out.push({ t: `${n}: ${p(r.repetidos, 'contorno estaba repetido', 'contornos estaban repetidos')} uno encima del otro; se ${r.repetidos === 1 ? 'tomó' : 'tomaron'} una sola vez.` });
     if (a.textos) out.push({ grave: true, t: `${n}: tiene textos sin pasar a contornos; no se cortan. ${dxf ? 'Hay que pasarlos a contornos antes de exportar el DXF.' : 'En Illustrator: Texto › Crear contornos.'}` });
     if (a.imagenes) out.push({ t: `${n}: tiene ${p(a.imagenes, 'imagen', 'imágenes')}; se ${a.imagenes === 1 ? 'ignora' : 'ignoran'}.` });
