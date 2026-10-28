@@ -34056,6 +34056,27 @@ const handler = {
         let frenos = []; try { frenos = await corteFrenosLista(env, { rol: 'admin', cfg: cfgF }); } catch (_) {}
         return json({ ok: !!r.ok, frenos, resultado: r.resultado || null, motivo: r.ok ? '' : (r.motivo || 'No se pudo') }, r.ok ? 200 : (r.status || 409));
       }
+      // GET /admin/corte/web-detalle?tel=<teléfono>&fecha=<hoja_fecha> → el detalle de un pedido web (Gaspar 28-oct: "si clickeo el
+      // pedido de web, que aparezca todo el detalle, inclusive el comprobante de pago si pagó"). Admin. Los envíos de la landing de
+      // esa semana (datos, dirección, DNI, insumos, estimado), sus señas con los comprobantes y los comprobantes que mandó por
+      // WhatsApp desde que pidió (corte_pago_check). Las piezas (fotos, medidas) ya las tiene el tablero.
+      if (request.method === 'GET' && path === '/admin/corte/web-detalle') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        const tel = String(url.searchParams.get('tel') || '').replace(/\D/g, ''), fecha = String(url.searchParams.get('fecha') || '').slice(0, 12);
+        if (!tel) return json({ error: 'falta tel' }, 400);
+        const q = async (sql, ...b) => { try { return (await env.DB.prepare(sql).bind(...b).all()).results || []; } catch (_) { return []; } };
+        const pj = s => { try { return JSON.parse(s || 'null'); } catch (_) { return null; } };
+        const envios = await q('SELECT id, created_at, nombre, nombre_hoja, nuevo, entrega, datos_json, insumos_json, n_disenos, estimado, hoja_fecha FROM corte_landing_envios WHERE telefono = ? AND IFNULL(prueba, 0) = 0' + (fecha ? ' AND hoja_fecha = ?' : '') + ' ORDER BY id', ...(fecha ? [tel, fecha] : [tel]));
+        const senas = envios.length ? await q(`SELECT * FROM corte_senas WHERE envio_id IN (${envios.map(() => '?').join(',')}) ORDER BY id`, ...envios.map(e => e.id)) : [];
+        const desde = envios.length ? String(envios[0].created_at || '') : '';
+        const pagos = desde ? await q("SELECT k.monto, k.checked_at, m.ts, IFNULL(m.media_url, '') AS k FROM corte_pago_check k LEFT JOIN wa_messages m ON m.wamid = k.wamid WHERE k.phone = ? AND IFNULL(k.es_comprobante, 0) = 1 AND IFNULL(m.ts, k.checked_at) >= ? ORDER BY IFNULL(m.ts, k.checked_at)", tel, desde) : [];
+        return json({ ok: true,
+          envios: envios.map(e => ({ id: e.id, at: e.created_at || '', nombre: e.nombre || '', nombre_hoja: e.nombre_hoja || '', nuevo: +e.nuevo === 1, entrega: e.entrega || '', datos: pj(e.datos_json) || {}, insumos: pj(e.insumos_json) || [], disenos: +e.n_disenos || 0, estimado: +e.estimado || 0, fecha: e.hoja_fecha || '' })),
+          senas: senas.map(s => ({ id: s.id, envio_id: s.envio_id, tipo: s.tipo || '', estado: s.estado, monto: +s.monto || 0, pagado: +s.pagado_monto || 0, caja: s.caja || '', motivo: s.revisar_motivo || '', nota: s.nota || '', pagada_at: s.pagada_at || '', pagada_por: s.pagada_por || '',
+            comprobantes: corteSenaComps(s).map(c => ({ key: c.key, monto: c.monto, caja: c.caja, titular: c.titular, via: c.via, at: c.at, leido: c.leido, repetido: c.repetido })) })),
+          pagos_wa: pagos.filter(p => p.k).map(p => ({ key: p.k, monto: +p.monto || 0, at: p.ts || p.checked_at || '' })),
+        });
+      }
       // GET /admin/corte/senas → panel "Señas web" (pedidos web de los que no son alumnos que esperan la seña). Admin.
       // POST /admin/corte/senas/:id {accion} → 'confirmar' {monto?, caja?} (acreditada: el pedido sigue) · 'liberar' {alumno?}
       // (sigue sin seña; alumno:true = no se le pide más) · 'cancelar' (cancela las piezas retenidas). → {ok, senas}

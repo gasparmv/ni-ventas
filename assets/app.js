@@ -5378,7 +5378,7 @@ function renderCorte() {
   // todavía deben de tandas anteriores).
   // El board del admin es de cobros de ALUMNOS → excluye la producción propia de neón (producto='NEON').
   // Los pedidos web todavía sin tanda (hasta la carga del sábado/domingo) van en su propio panel, no como una semana más.
-  const pedidosWeb = pedidos.filter(p => p.origen === 'landing' && !p.tanda_id);
+  const pedidosWeb = pedidos.filter(p => p.origen === 'landing' && !p.tanda_id && p.estado !== 'cancelado');
   const pedidosAlum = pedidos.filter(p => p.producto !== 'NEON' && !(p.origen === 'landing' && !p.tanda_id));
   // Navegador de semanas (como un calendario): cada tanda es una semana. Slidear ‹ (más vieja) / › (más nueva).
   const tandaMap = {};
@@ -10538,9 +10538,9 @@ function corteWebPanelHtml(web) {
     const d = g.items.filter(p => !corteEsInsumo(p)), ins = g.items.filter(corteEsInsumo);
     const m = d.filter(p => p.estado !== 'pedido').length;
     const thumbs = d.map(p => `<a href="${escapeHtml(mediaUrl(p.foto_key))}" target="_blank" rel="noopener" title="${escapeHtml((p.diseno_nombre || 'diseño') + ' · ' + (p.medida_declarada || ''))}" style="display:inline-flex;flex-direction:column;align-items:center;gap:3px;width:74px;text-decoration:none;color:var(--fg-mute)">${p.foto_key ? `<img src="${escapeHtml(disenoThumb(p.foto_key, 160))}" loading="lazy" alt="" style="width:62px;height:62px;object-fit:cover;border-radius:7px;background:#fff;border:1px solid ${p.estado !== 'pedido' ? '#22c55e' : 'var(--border)'}">` : ''}<span style="font-size:10.5px;line-height:1.2;text-align:center;overflow-wrap:anywhere">${escapeHtml(p.diseno_nombre || 'diseño')}</span></a>`).join('');
-    return `<div style="display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap;padding:10px 0;border-top:1px solid var(--border)">
+    return `<div data-corte-web-det="${escapeHtml(g.fecha + '|' + (g.tel || g.nombre))}" title="Ver todo el pedido" style="display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap;padding:10px 0;border-top:1px solid var(--border);cursor:pointer">
       <div style="min-width:170px;flex:0 0 auto">
-        <div style="font-weight:700">${escapeHtml(g.nombre)}</div>
+        <div style="font-weight:700">${escapeHtml(g.nombre)} <span style="font-size:11px;font-weight:600;color:var(--accent-cyan,#8FD4DE)">· ver detalle →</span></div>
         <div style="font-size:12px;color:var(--fg-mute);margin-top:2px">tanda del ${escapeHtml(lunes(g.fecha))} · ${g.entrega === 'envio' ? 'envío' : (g.entrega === 'retira' ? 'retira' : 'entrega sin definir')} · ${escapeHtml(hora(g.llego))}</div>
         <div style="font-size:12px;margin-top:4px;color:${d.length && m === d.length ? '#22c55e' : 'var(--fg-subtle)'}">${d.length ? `Emma midió ${m} de ${d.length}` : 'solo insumos'}</div>
         ${g.items.some(p => p.sena_estado === 'pendiente') ? '<div style="font-size:12px;margin-top:4px;color:#f59e0b;font-weight:700">💰 esperando la seña</div>' : ''}
@@ -10556,6 +10556,79 @@ function corteWebPanelHtml(web) {
     </div>
     ${lista.map(fila).join('')}
   </div>`;
+}
+// Detalle de un pedido web (Gaspar 28-oct: "si clickeo el pedido de web me aparezca todo el detalle, inclusive el comprobante de
+// pago si pagó"): cliente, entrega y dirección, diseños con foto y medidas, insumos, la seña con sus comprobantes y los que mandó por
+// WhatsApp desde que pidió. Las piezas salen del tablero; el resto, de /admin/corte/web-detalle. clave = 'hoja_fecha|tel o nombre'.
+const CORTE_WEB_EST = { pedido: 'Recibido · falta diseñar', matriz_lista: 'Diseñado', cortado: 'Cortado', embalado: 'Embalado', cobrado: 'Cobrado', despachado: 'Despachado', entregado: 'Entregado' };
+const CORTE_SENA_EST = { pendiente: 'Esperando el pago', revisar: 'A revisar', pagada: 'Pagada', aplicada: 'Pagada (descontada en el cobro)', liberada: 'Sin seña', cancelada: 'Cancelada' };
+function corteWebCompHtml(c) {
+  const k = String(c.key || ''); if (!k) return '';
+  const tipo = compTipoDeKey(k), pie = [c.monto ? fmtMoney(c.monto) : '', c.caja || '', c.at ? new Date(c.at).toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }) : ''].filter(Boolean).join(' · ');
+  const vis = tipo === 'image' ? `<img src="${escapeHtml(disenoThumb(k, 240))}" onerror="this.style.opacity='.3'" style="display:block;width:96px;height:96px;object-fit:cover;border-radius:8px;background:#fff;border:1px solid var(--border)">` : `<div style="width:96px;height:96px;display:flex;align-items:center;justify-content:center;border-radius:8px;border:1px solid var(--border);font-size:28px">📄</div>`;
+  return `<button type="button" data-cwd-comp="${escapeHtml(k)}" data-cwd-tipo="${escapeHtml(tipo)}" title="Ver el comprobante" style="background:none;border:0;padding:0;cursor:zoom-in;color:var(--fg);text-align:center;width:100px">${vis}<div style="font-size:11px;margin-top:3px;color:var(--fg-mute)">${escapeHtml(pie)}</div></button>`;
+}
+function corteWebDetHtml(items, det) {
+  const dis = items.filter(p => !corteEsInsumo(p)), ins = items.filter(corteEsInsumo);
+  const fila = (l, v) => v ? `<div style="display:flex;gap:8px;font-size:13px;padding:2px 0"><span style="min-width:96px;color:var(--fg-mute)">${escapeHtml(l)}</span><b style="font-weight:600;overflow-wrap:anywhere">${escapeHtml(String(v))}</b></div>` : '';
+  const hora = iso => { const d = new Date(iso); return isNaN(d.getTime()) ? '' : d.toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires', weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }); };
+  const p0 = items[0] || {};
+  const envs = (det && det.envios) || [];
+  const dirTxt = (x) => x && x.calle ? [x.recibe ? 'Recibe ' + x.recibe : '', x.calle, x.localidad, x.provincia, x.cp ? 'CP ' + x.cp : ''].filter(Boolean).join(', ') : '';
+  let h = `<div style="margin-bottom:12px">${fila('Teléfono', p0.telefono ? corteFmtTel(p0.telefono) : '')}${fila('Tanda del', String(p0.hoja_fecha || '').split('/').slice(0, 2).join('/'))}${fila('Entrega', p0.entrega === 'envio' ? 'Envío' : (p0.entrega === 'retira' ? 'Retira en el taller' : 'Sin definir'))}</div>`;
+  if (!det) h += '<div style="font-size:12.5px;color:var(--fg-mute);margin-bottom:10px">Cargando los datos del pedido y los pagos…</div>';
+  for (const e of envs) {
+    const dn = (e.datos && e.datos.nuevo) || {}, dd = (e.datos && e.datos.dir) || {};
+    h += `<div style="border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:10px">
+      <div style="font-weight:700;font-size:13px;margin-bottom:4px">Pedido del ${escapeHtml(hora(e.at))}${e.nuevo ? ' · <span style="color:#f59e0b">cliente nuevo</span>' : ''}</div>
+      ${fila('DNI', dn.dni || '')}${fila('Dirección', dirTxt(dd) || dirTxt(dn) || (e.entrega === 'envio' ? 'la de su ficha (LTV)' : ''))}${fila('Estimado', e.estimado ? fmtMoney(e.estimado) : '')}
+    </div>`;
+  }
+  if (dis.length) h += `<div style="font-weight:800;font-size:13px;margin:4px 0 6px">Diseños (${dis.length})</div><div style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px">${dis.map(p => `<div style="display:flex;gap:10px;align-items:flex-start">
+      ${p.foto_key ? `<a href="${escapeHtml(mediaUrl(p.foto_key))}" target="_blank" rel="noopener"><img src="${escapeHtml(disenoThumb(p.foto_key, 240))}" style="width:84px;height:84px;object-fit:cover;border-radius:8px;background:#fff;border:1px solid var(--border)"></a>` : '<div style="width:84px;height:84px;border-radius:8px;border:1px dashed var(--border)"></div>'}
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:700">${escapeHtml(p.diseno_nombre || 'Diseño')}${(parseInt(p.cantidad, 10) || 1) > 1 ? ' × ' + (parseInt(p.cantidad, 10) || 1) : ''}</div>
+        ${fila('Pidió', p.medida_declarada || '')}${fila('Medida Emma', p.ancho_real && p.alto_real ? p.ancho_real + ' × ' + p.alto_real + ' cm' : '')}${fila('Estado', CORTE_WEB_EST[p.estado] || p.estado)}${fila('Aclaraciones', p.aclaraciones || '')}${p.cliente_cambio_txt ? fila('Cambió', p.cliente_cambio_txt) : ''}
+      </div></div>`).join('')}</div>`;
+  if (ins.length) h += `<div style="font-weight:800;font-size:13px;margin:4px 0 6px">Insumos</div><div style="margin-bottom:12px">${ins.map(p => fila((parseInt(p.cantidad, 10) || 1) + ' ×', (p.diseno_nombre || p.producto) + (p.precio ? ' · ' + fmtMoney(p.precio) : '') + ' · ' + (CORTE_WEB_EST[p.estado] || p.estado))).join('')}</div>`;
+  if (det) {
+    const ss = det.senas || [], pw = det.pagos_wa || [];
+    h += '<div style="font-weight:800;font-size:13px;margin:4px 0 6px">💳 Pago</div>';
+    for (const s of ss) {
+      h += `<div style="border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:8px">
+        ${fila(s.tipo === 'insumos' ? 'Pago (insumos)' : 'Seña', fmtMoney(s.monto) + ' · ' + (CORTE_SENA_EST[s.estado] || s.estado))}${s.pagado ? fila('Pagó', fmtMoney(s.pagado) + (s.caja ? ' a ' + s.caja : '')) : ''}${s.motivo ? fila('A revisar', s.motivo) : ''}${s.nota ? fila('Nota', s.nota) : ''}
+        ${(s.comprobantes || []).length ? `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">${s.comprobantes.map(corteWebCompHtml).join('')}</div>` : ''}
+      </div>`;
+    }
+    if (pw.length) h += `<div style="font-size:12.5px;color:var(--fg-mute);margin:4px 0">Comprobantes que mandó por WhatsApp</div><div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">${pw.map(corteWebCompHtml).join('')}</div>`;
+    if (!ss.length && !pw.length) h += '<div style="font-size:12.5px;color:var(--fg-mute)">Todavía no hay comprobantes de pago.</div>';
+  }
+  return h;
+}
+async function corteWebDetalle(clave) {
+  const [fecha, quien] = String(clave || '').split('|');
+  const items = (STATE.cortePedidos || []).filter(p => p.origen === 'landing' && !p.tanda_id && p.estado !== 'cancelado' && (p.hoja_fecha || '') === fecha && (p.telefono || p.cliente_nombre || '') === quien);
+  if (!items.length) { niToast('No encontré ese pedido (actualizá)', { error: true }); return; }
+  const tel = String(items[0].telefono || '').replace(/\D/g, '');
+  const bg = document.createElement('div'); bg.className = 'modal-bg';
+  bg.innerHTML = `<div class="modal modal--login" style="max-width:640px;max-height:92vh;display:flex;flex-direction:column"><div class="modal-h"><h3 style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">🌐 Pedido web · ${escapeHtml(items[0].cliente_nombre || 'cliente')}</h3></div><div class="modal-body" data-cwd-body style="overflow:auto">${corteWebDetHtml(items, null)}</div><div class="modal-actions">${tel ? '<button class="btn btn-ghost" data-cwd-chat>Abrir el chat</button>' : ''}<button class="btn btn-cyan" data-cwd-cerrar>Cerrar</button></div></div>`;
+  document.body.appendChild(bg); void bg.offsetWidth; bg.classList.add('open');
+  const cerrar = () => { bg.classList.remove('open'); setTimeout(() => bg.remove(), 150); document.removeEventListener('keydown', onKey); };
+  const onKey = (e) => { if (e.key === 'Escape' && !document.getElementById('img-lightbox')) cerrar(); };
+  document.addEventListener('keydown', onKey);
+  bg.addEventListener('click', (e) => {
+    if (e.target === bg || e.target.closest('[data-cwd-cerrar]')) { cerrar(); return; }
+    const c = e.target.closest('[data-cwd-comp]'); if (c) { compVer(c.getAttribute('data-cwd-comp'), c.getAttribute('data-cwd-tipo') || 'image'); return; }
+    if (e.target.closest('[data-cwd-chat]')) { cerrar(); STATE.view = 'chat'; chatState.selectedPhone = tel; if (typeof enterMobileChatConversation === 'function') enterMobileChatConversation(); try { selectChatContact(tel); } catch (_) {} location.hash = 'chat'; render(); }
+  });
+  if (!tel) { bg.querySelector('[data-cwd-body]').innerHTML = corteWebDetHtml(items, { envios: [], senas: [], pagos_wa: [] }); return; }
+  let det = { envios: [], senas: [], pagos_wa: [] };
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/corte/web-detalle?tel=' + encodeURIComponent(tel) + '&fecha=' + encodeURIComponent(fecha), { headers: authHeaders() });
+    const j = await r.json().catch(() => null);
+    if (r.ok && j && j.ok) det = j; else niToast('No pude traer los pagos del pedido', { error: true });
+  } catch (_) { niToast('No pude traer los pagos del pedido', { error: true }); }
+  const body = bg.querySelector('[data-cwd-body]'); if (body && document.body.contains(bg)) body.innerHTML = corteWebDetHtml(items, det);
 }
 function corteHerramientasHtml() {
   const st = STATE.corteSinTel || [];
@@ -11212,6 +11285,8 @@ async function bindCorte() {
   // "Sin pagar" después del martes 16 h: el botón rojo de la derecha (solo admin).
   if (isAdmin()) { corteSinPagarFetch(false); const spb = document.querySelector('[data-corte-sinpagar]'); if (spb) spb.onclick = corteSinPagarModal; }
   if (isAdmin()) corteSenasBind(); // señas de pedidos web
+  // Pedidos web en camino: tocar un cliente abre todo el pedido (las miniaturas siguen abriendo la foto).
+  document.querySelectorAll('[data-corte-web-det]').forEach(el => { el.onclick = (e) => { if (e.target.closest('a')) return; corteWebDetalle(el.getAttribute('data-corte-web-det')); }; });
   if (isAdmin()) corteFrenosBind(); // frenos del corte: Para resolver
   // Aníbal: tandas y pagos (Gaspar abre el panel desde la tarjeta; Aníbal lo ve en su pantalla).
   if (isAdmin() || isAnibalUser(STATE.user)) { anibalFetch(false); document.querySelectorAll('[data-anb-abrir]').forEach(b => { b.onclick = anibalModal; }); const ap = document.querySelector('[data-anb-panel]'); if (ap) anibalBindAcciones(ap); }
