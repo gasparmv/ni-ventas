@@ -243,7 +243,7 @@
       <label class="check" id="ver-ped-caja" hidden><input type="checkbox" id="c-ver-ped"> Ver de qué pedido es cada pieza</label>
     </div>
     <p class="aviso-perfil" id="r-aviso-perfil" hidden></p>
-    <p class="nota">Cada DXF tiene la placa en milímetros, con el origen abajo a la izquierda (largo en X, ancho en Y), y tres grupos (bloques) en sus capas: CORTE, CALADO y AGUJEROS. Los agujeros redondos salen como círculos; lo demás, como polilíneas. El ZIP lleva también el código G de cada placa (se configura en el paso 6).</p>
+    <p class="nota">Cada DXF tiene la placa en milímetros, con el origen abajo a la izquierda (largo en X, ancho en Y), y tres grupos (bloques) en sus capas: CORTE, CALADO y AGUJEROS. Los agujeros redondos salen como círculos; lo demás, como polilíneas de rectas y arcos (las curvas van como arcos, a 0,05 mm o menos del dibujo, sin un nodo cada poquito). El ZIP lleva también el código G de cada placa (se configura en el paso 6).</p>
     <div class="placas" id="placas"></div>
   </section>
 
@@ -298,6 +298,7 @@
 <script src="clipper.js?v=1"></script>
 <script src="gcode.js?v=5"></script>
 <script src="dxf.js?v=4"></script>
+<script src="arcos.js?v=1"></script>
 <script>
 'use strict';
 // Nesting de placas para el corte (Gaspar 25-oct-2026). Lee los .ai/.pdf de Emma con pdf.js, separa por color (corte rojo,
@@ -308,6 +309,7 @@
 // sueltos y, si Gaspar quiere, los une en figuras cerradas.
 const PT = 25.4 / 72;        // 1 punto de PDF en mm
 const TOL_CURVA = 0.05;      // mm: error máximo al pasar las curvas a tramos rectos
+const TOL_ARCO = TOL_CURVA;  // mm: desvío máximo de las rectas y arcos del DXF contra esos tramos (arcos.js)
 const TOL_NEST = 0.05;       // mm: simplificación del contorno para acomodar (el motor la suma a la separación)
 const COL = { corte: '#ff4d4d', calado: '#f2f2f2', agujero: '#4d8dff', suelto: '#ff9f1a', ignorado: '#4a5263', fondo: '#0b0d11', placa: '#161a22' };
 const CLASES = [['corte', 'Corte'], ['calado', 'Calado'], ['agujero', 'Agujeros'], ['ignorar', 'Ignorar']];
@@ -1408,10 +1410,19 @@ function dxfPlaca(h) {
   const cfg = S.cfgNest, lam = laminaInfo(h), L = [];
   const g = (dest, c, v) => { dest.push(String(c).padStart(3, ' '), String(v)); };
   const n = (v) => (Math.round(v * 1000) / 1000 || 0).toFixed(3);
+  // bulge (tan(ángulo/4), positivo antihorario) sin notación exponencial; '' si es 0 a 10 decimales (recta)
+  const nb = (b) => { const s = b.toFixed(10).replace(/\.?0+$/, ''); return s === '0' || s === '-0' ? '' : s; };
+  // Cada polilínea sale como rectas y arcos (bulge en el código 42 del VERTEX) a TOL_ARCO de la original (Gaspar 28-oct: con
+  // un vértice cada poquito Aspire mostraba la "P" llena de nodos y la máquina cortaba a los saltos). Mismo inicio y sentido.
   const poli = (dest, capa, pts, cerrada) => {
     if (pts.length < 2) return;
+    const vs = window.NestArcos ? NestArcos.ajustar(pts, cerrada, TOL_ARCO) : pts.map(([x, y]) => [x, y, 0]);
+    if (vs.length < 2) return;
     g(dest, 0, 'POLYLINE'); g(dest, 8, capa); g(dest, 66, 1); g(dest, 10, '0.000'); g(dest, 20, '0.000'); g(dest, 30, '0.000'); g(dest, 70, cerrada ? 1 : 0);
-    for (const [x, y] of pts) { g(dest, 0, 'VERTEX'); g(dest, 8, capa); g(dest, 10, n(x)); g(dest, 20, n(y)); g(dest, 30, '0.000'); }
+    for (const [x, y, b] of vs) {
+      g(dest, 0, 'VERTEX'); g(dest, 8, capa); g(dest, 10, n(x)); g(dest, 20, n(y)); g(dest, 30, '0.000');
+      const sb = b ? nb(b) : ''; if (sb) g(dest, 42, sb);
+    }
     g(dest, 0, 'SEQEND'); g(dest, 8, capa);
   };
   // Un bloque por grupo (cada uno en su capa), en orden de mecanizado: calados, agujeros y cortes (los de adentro primero).
