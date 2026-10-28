@@ -1262,7 +1262,7 @@ function avisosArchivos() {
     if (r.bordeAfuera) out.push({ t: `${n}: ${lineas(r.bordeAfuera)} como trazo alineado por dentro: se tomó el borde de afuera, ${aDiez}.` });
     const duda = r.bordeSinCalado + r.bordeLejos + r.bordeEmpate;
     if (duda) {
-      const por = [r.bordeSinCalado && 'no tiene calado adentro', r.bordeLejos && `ningún borde queda a ${fmt(CALADO_AL_BORDE)} mm del calado`, r.bordeEmpate && 'los dos bordes quedan casi igual de cerca del calado'].filter(Boolean).join(' o ');
+      const por = [r.bordeSinCalado && (r.bordeSinCalado === 1 ? 'no tiene calado adentro' : 'no tienen calado adentro'), r.bordeLejos && `ningún borde queda a ${fmt(CALADO_AL_BORDE)} mm del calado`, r.bordeEmpate && 'los dos bordes quedan casi igual de cerca del calado'].filter(Boolean).join(' o ');
       out.push({ t: `${n}: ${lineas(duda)} como trazo alineado por dentro o por fuera y no se pudo saber qué borde es la medida real (${por}): se tomó el borde de afuera. Si la medida real es la línea de adentro, en Illustrator poné el trazo rojo en "Alinear trazo al centro".` });
     }
     if (r.caladoAnillo) out.push({ t: `${n}: ${p(r.caladoAnillo, 'calado venía', 'calados venían')} como trazo alineado por dentro o por fuera: se tomó la línea del medio.` });
