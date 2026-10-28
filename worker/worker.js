@@ -3667,7 +3667,7 @@ async function avisarClienteVigilado(env, m) {
 // usado por todo el scoping de chats/cache) se DERIVA de este array. canonWorker/AVISO_WORKERS (tracking)
 // y PEDIDO_VEND_MAP (hoja contable) se sincronizan aparte por tener namespaces propios.
 // maxCuota = tope del REGULADOR de consultas (lo que cada uno puede elegir por día). Desde el 28-oct la cuota es un
-// objetivo (maybeRepartirANadia): probKv/defProb ya no se usan para repartir.
+// objetivo que se completa al ritmo del día (maybeRepartirANadia, repartoAvanceDia): probKv/defProb ya no se usan.
 const COMERCIALES_SECUNDARIOS = [
   { slug: 'facundo',  nombre: 'Facu', cuotaKv: 'nadia_cuota_diaria',    probKv: 'facundo_reparto_prob', phoneKv: 'nadia_phone',    defProb: 0.25, maxCuota: 30 },
   { slug: 'agustina', nombre: 'Agus', cuotaKv: 'agustina_cuota_diaria', probKv: 'agustina_reparto_prob', phoneKv: 'agustina_phone', defProb: 0.30, maxCuota: 25 },
@@ -3678,8 +3678,8 @@ const COMERCIALES_SECUNDARIOS = [
 
 // ===== REGULADOR DE CONSULTAS (oct-2026, pedido de Gaspar) =====
 // Facu y Agus eligen cuántas consultas (leads del reparto) quieren por día: la de MAÑANA en cualquier
-// momento y la de HOY solo antes de las 12:00 AR. Desde el 28-oct es un OBJETIVO: mientras tengan lugar, las consultas
-// van a ellos; lo que pasa de su número sigue al otro secundario o a Joaco. Gaspar puede fijarla para cualquiera
+// momento y la de HOY solo antes de las 12:00 AR. Desde el 28-oct es un OBJETIVO: les van llegando a lo largo del día hasta
+// completarla (Joaco recibe el resto, desde temprano). Gaspar puede fijarla para cualquiera
 // (queda bloqueada para el vendedor ese día). Sin elección → la cuota por defecto (c.cuotaKv).
 // kv 'cuota_dia:<slug>:<YYYY-MM-DD>' = número; kv 'cuota_dia_meta:<slug>:<fecha>' = {by, at, lock}.
 function fechasAR() {
@@ -3713,6 +3713,14 @@ async function estadoCuotaVendedor(env, c) {
     hoy: { fecha: f.hoy, cuota: hoy.cuota, origen: hoy.origen, asignados, pausado: !!(pausa && f.hoy <= pausa), editable: f.hAR < 12 && hoy.origen !== 'admin' },
     manana: { fecha: f.manana, cuota: man.cuota, origen: man.origen, pausado: !!(pausa && f.manana <= pausa), editable: man.origen !== 'admin' },
   };
+}
+// Qué parte de las consultas del día ya entró a esta hora AR (precotiz_pilot 8 al 27-oct: a las 8 el bot larga de golpe lo que
+// entró a la noche, ~30 % del día; después parejo hasta las 22). Lo usa el reparto para ir al ritmo del día.
+const REPARTO_AVANCE = [[0, 0], [8, 0.05], [8.5, 0.30], [22, 0.97], [24, 1]];
+function repartoAvanceDia(ms) {
+  const ar = new Date((ms || Date.now()) - 3 * 3600000), t = ar.getUTCHours() + ar.getUTCMinutes() / 60;
+  for (let i = 1; i < REPARTO_AVANCE.length; i++) if (t <= REPARTO_AVANCE[i][0]) { const [t0, p0] = REPARTO_AVANCE[i - 1], [t1, p1] = REPARTO_AVANCE[i]; return p0 + (p1 - p0) * (t - t0) / (t1 - t0); }
+  return 1;
 }
 // Nombre para el saludo del bot/auto-reply según a quién quedó asignado el chat (default Joaco).
 function saludoVendedor(assignedTo) {
@@ -3765,11 +3773,14 @@ async function maybeRepartirANadia(env, phone) {
     const orden = _cands.slice(rot).concat(_cands.slice(0, rot));
     const hoyAR = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString().slice(0, 10);
     let esCorp = null;   // se calcula una sola vez, recién si hay una candidata de solo neón
-    // La cuota es un OBJETIVO (Gaspar 28-oct: "si eligieron más, habría que haberle dado menos a Joaco"). Antes cada consulta
-    // se sorteaba con una probabilidad fija por vendedor y la cuota era solo un tope: en los días flojos no llegaban a lo que
-    // eligieron (semana 21-27/10: Facu 66 de 70, Agus 87 de 100, Debi 56 de 90) y el resto iba a Joaco. Ahora, mientras alguno
-    // tenga lugar, la consulta va al que tiene más lugar libre en proporción a su cuota (empate: la rotación por teléfono);
-    // Joaco recibe solo cuando todos llegaron a la suya o la consulta no es para ellos.
+    // La cuota es un OBJETIVO que se completa A LO LARGO DEL DÍA (Gaspar 28-oct: "si eligieron más, habría que haberle dado
+    // menos a Joaco" y "le tienen que llegar mensajes desde temprano"). Antes cada consulta se sorteaba con una probabilidad fija
+    // y la cuota era solo un tope: en los días flojos no llegaban (21-27/10: Facu 66 de 70, Agus 87 de 100, Debi 56 de 90).
+    // Ahora cada uno va al ritmo del día (cuota × repartoAvanceDia): si está atrasado, la consulta es para él (el más atrasado
+    // en proporción; empate: la rotación por teléfono); si todos van al día, es de Joaco. Además Joaco recibe siempre 1 de cada 4
+    // (por el teléfono), así le llegan desde temprano aunque el día venga flojo.
+    if (_h % 4 === 0) return;
+    const avance = repartoAvanceDia();
     const libres = [];
     for (const c of orden) {
       // Vendedora de solo neón (Debi): nunca un lead de corpóreo.
@@ -3787,10 +3798,11 @@ async function maybeRepartirANadia(env, phone) {
       // la cuota es del reparto automático (si no, traerse contactos le cortaba los leads nuevos del día).
       const asignados = await contarAsignadosHoy(env, c.slug);
       if (asignados >= cuota) continue;                                 // ya llegó a SU cuota del día
-      libres.push({ c, libre: (cuota - asignados) / cuota });
+      const atraso = (cuota * avance - asignados) / cuota;
+      if (atraso > 0) libres.push({ c, atraso });                      // va atrasado con su ritmo del día
     }
     if (libres.length) {
-      const c = libres.reduce((m, x) => (x.libre > m.libre ? x : m)).c;   // a igual lugar libre, gana el primero de la rotación
+      const c = libres.reduce((m, x) => (x.atraso > m.atraso ? x : m)).c;   // a igual atraso, gana el primero de la rotación
       const _ts = new Date().toISOString();
       await env.DB.prepare("UPDATE wa_chats_summary SET assigned_to = ?, assigned_at = ? WHERE phone = ?").bind(c.slug, _ts, phone).run();
       await logAsignacion(env, phone, '', c.slug, 'reparto', 'sistema', _ts);
