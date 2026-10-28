@@ -3666,8 +3666,8 @@ async function avisarClienteVigilado(env, m) {
 // CONFIG.defaultUsers (front) + 1 en el registro espejo del front. VENDEDORES_SECUNDARIOS (más abajo,
 // usado por todo el scoping de chats/cache) se DERIVA de este array. canonWorker/AVISO_WORKERS (tracking)
 // y PEDIDO_VEND_MAP (hoja contable) se sincronizan aparte por tener namespaces propios.
-// maxCuota = tope del REGULADOR de consultas (lo que cada uno puede elegir por día). Con las
-// probabilidades actuales, en un día pico Facu llega a ~30 y Agus a ~22: pedir más no se cumpliría.
+// maxCuota = tope del REGULADOR de consultas (lo que cada uno puede elegir por día). Desde el 28-oct la cuota es un
+// objetivo (maybeRepartirANadia): probKv/defProb ya no se usan para repartir.
 const COMERCIALES_SECUNDARIOS = [
   { slug: 'facundo',  nombre: 'Facu', cuotaKv: 'nadia_cuota_diaria',    probKv: 'facundo_reparto_prob', phoneKv: 'nadia_phone',    defProb: 0.25, maxCuota: 30 },
   { slug: 'agustina', nombre: 'Agus', cuotaKv: 'agustina_cuota_diaria', probKv: 'agustina_reparto_prob', phoneKv: 'agustina_phone', defProb: 0.30, maxCuota: 25 },
@@ -3678,8 +3678,8 @@ const COMERCIALES_SECUNDARIOS = [
 
 // ===== REGULADOR DE CONSULTAS (oct-2026, pedido de Gaspar) =====
 // Facu y Agus eligen cuántas consultas (leads del reparto) quieren por día: la de MAÑANA en cualquier
-// momento y la de HOY solo antes de las 12:00 AR. Es un TOPE (no cambia la probabilidad del reparto):
-// lo que no toman sigue al otro secundario o a Joaco, como siempre. Gaspar puede fijarla para cualquiera
+// momento y la de HOY solo antes de las 12:00 AR. Desde el 28-oct es un OBJETIVO: mientras tengan lugar, las consultas
+// van a ellos; lo que pasa de su número sigue al otro secundario o a Joaco. Gaspar puede fijarla para cualquiera
 // (queda bloqueada para el vendedor ese día). Sin elección → la cuota por defecto (c.cuotaKv).
 // kv 'cuota_dia:<slug>:<YYYY-MM-DD>' = número; kv 'cuota_dia_meta:<slug>:<fecha>' = {by, at, lock}.
 function fechasAR() {
@@ -3765,6 +3765,12 @@ async function maybeRepartirANadia(env, phone) {
     const orden = _cands.slice(rot).concat(_cands.slice(0, rot));
     const hoyAR = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString().slice(0, 10);
     let esCorp = null;   // se calcula una sola vez, recién si hay una candidata de solo neón
+    // La cuota es un OBJETIVO (Gaspar 28-oct: "si eligieron más, habría que haberle dado menos a Joaco"). Antes cada consulta
+    // se sorteaba con una probabilidad fija por vendedor y la cuota era solo un tope: en los días flojos no llegaban a lo que
+    // eligieron (semana 21-27/10: Facu 66 de 70, Agus 87 de 100, Debi 56 de 90) y el resto iba a Joaco. Ahora, mientras alguno
+    // tenga lugar, la consulta va al que tiene más lugar libre en proporción a su cuota (empate: la rotación por teléfono);
+    // Joaco recibe solo cuando todos llegaron a la suya o la consulta no es para ellos.
+    const libres = [];
     for (const c of orden) {
       // Vendedora de solo neón (Debi): nunca un lead de corpóreo.
       if (c.soloNeon) { if (esCorp === null) esCorp = await leadEsCorporeo(env, phone, _vert); if (esCorp) continue; }
@@ -3779,19 +3785,18 @@ async function maybeRepartirANadia(env, phone) {
       try { const _av = await env.DB.prepare("SELECT activo FROM users_panel WHERE id = ?").bind(c.slug).first(); if (!_av || +_av.activo !== 1) continue; } catch (_) {}
       // Los chats que la vendedora se TRAJO a mano ("Traer de Joaco", chat_assign_log via='import') no cuentan:
       // la cuota es del reparto automático (si no, traerse contactos le cortaba los leads nuevos del día).
-      if ((await contarAsignadosHoy(env, c.slug)) >= cuota) continue;   // ya llegó a SU cuota del día
-      const prob = parseFloat(await kvGet(env, c.probKv, String(c.defProb))) || c.defProb;
-      // Sorteo determinístico por teléfono PERO independiente por vendedor (mezclamos el slug al hash),
-      // así el mismo lead puede tocarle a uno u otro con probabilidades independientes.
-      let _hv = _h; for (let _i = 0; _i < c.slug.length; _i++) _hv = (_hv * 31 + c.slug.charCodeAt(_i)) >>> 0;
-      if ((_hv % 100) >= Math.round(prob * 100)) continue;             // a este lead no le toca este vendedor
+      const asignados = await contarAsignadosHoy(env, c.slug);
+      if (asignados >= cuota) continue;                                 // ya llegó a SU cuota del día
+      libres.push({ c, libre: (cuota - asignados) / cuota });
+    }
+    if (libres.length) {
+      const c = libres.reduce((m, x) => (x.libre > m.libre ? x : m)).c;   // a igual lugar libre, gana el primero de la rotación
       const _ts = new Date().toISOString();
       await env.DB.prepare("UPDATE wa_chats_summary SET assigned_to = ?, assigned_at = ? WHERE phone = ?").bind(c.slug, _ts, phone).run();
       await logAsignacion(env, phone, '', c.slug, 'reparto', 'sistema', _ts);
       try { await env.DB.prepare("UPDATE briefs SET comercial_id = ? WHERE cliente_wa_id = ?").bind(c.slug, phone).run(); } catch (_) {} // el brief/comisión sigue al lead
       const notif = await kvGet(env, c.phoneKv, '');
       if (notif) { try { await waSendText(env, notif, 'Tenés un lead nuevo de carteles para atender en el CRM 🙌'); } catch (_) {} }
-      return;                                                          // asignado; no seguir con los demás
     }
   } catch (_) {}
 }

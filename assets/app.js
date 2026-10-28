@@ -416,7 +416,7 @@ function panelConsultasHtml() {
       ${head}
       ${bloque('hoy', 'Hoy', d.hoy)}
       ${bloque('manana', 'Mañana', d.manana)}
-      <div class="muted" style="font-size:11px;line-height:1.5">Es un tope: los días flojos puede que no llegues. La de mañana la podés cambiar cuando quieras; la de hoy, hasta las 12. Lo que no tomes le llega a ${otro} o a Joaco, no se pierde ninguna consulta.</div>
+      <div class="muted" style="font-size:11px;line-height:1.5">Te van llegando hasta completar tu número (los días flojos puede que no llegues). La de mañana la podés cambiar cuando quieras; la de hoy, hasta las 12. Lo que pase de tu número le llega a ${otro} o a Joaco, no se pierde ninguna consulta.</div>
     </div>`;
 }
 function refreshPanelConsultas() {
@@ -536,7 +536,7 @@ function renderRepartoPanel() {
       <tbody>${repartoState.data.map(s => `<tr style="border-top:1px solid var(--border)"><td style="padding:8px 6px;vertical-align:top"><b>${escapeHtml(s.nombre)}</b><div class="muted" style="font-size:11px">por defecto ${s.cuota_default}</div></td>${celda(s, 'hoy')}${celda(s, 'manana')}</tr>`).join('')}
         <tr style="border-top:1px solid var(--border)"><td style="padding:8px 6px"><b>Joaco</b></td><td colspan="2" class="muted" style="padding:8px 6px;font-size:12px">Sin tope: recibe todo lo que no toman los demás.</td></tr>
       </tbody></table>
-    <div class="muted" style="font-size:11px;margin-top:6px">Es un tope: con días flojos puede que no lleguen. Si la fijás vos, ellos no la pueden cambiar ese día (tocá "liberar" para que vuelvan a decidir).</div>`;
+    <div class="muted" style="font-size:11px;margin-top:6px">Mientras tengan lugar, las consultas van a ellos; Joaco recibe lo que sobra (los días flojos puede que no lleguen). Si la fijás vos, ellos no la pueden cambiar ese día (tocá "liberar" para que vuelvan a decidir).</div>`;
   // Cada acción manda la FECHA que se ve en pantalla (el server rechaza si ya cambió el día).
   const fechaDe = (slug, dia) => { const s0 = (repartoState.data || []).find(r => r.slug === slug); return (s0 && s0[dia] && s0[dia].fecha) || ''; };
   const cuotaDe = (slug, dia) => { const s0 = (repartoState.data || []).find(r => r.slug === slug); return s0 && s0[dia] ? s0[dia].cuota : 0; };
