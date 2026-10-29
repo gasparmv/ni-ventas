@@ -21779,7 +21779,127 @@ function franRutaOk(request, path, url) {
   }
   // También carga pedidos, por si Sin Frontera no lo hizo (Gaspar 22-oct): subir el archivo y el alta.
   if (request.method === 'PUT' && path === '/admin/sinfrontera/corte/archivo') return true;
+  // Sus recortes del taller en el nesting (Gaspar 29-oct): los suyos y nada más (nestingRecortesRoute).
+  if (path === '/admin/nesting/recortes' || path.startsWith('/admin/nesting/recortes/')) return true;
   return request.method === 'POST' && (path === '/admin/sinfrontera/corte/estado' || path === '/admin/sinfrontera/corte' || path === '/admin/sinfrontera/corte/editar');
+}
+// ----- Recortes del taller del nesting, guardados en el usuario (Gaspar 29-oct-2026) -----
+// "Que Fran entre con el mismo user al nesting y que pueda guardarse recortes por material". Hasta acá vivían en el
+// localStorage de cada compu; ahora cada usuario (Gaspar y Fran) tiene los suyos en D1, con material, color y espesor. El
+// nesting (misma página estática, mismo origen que el CRM) usa el token de la sesión del CRM. Gaspar además puede ver y
+// acomodar los de otro (?de=); Fran, solo los suyos. Borrado lógico (borrado_at).
+const NEST_REC_MAX = 300;           // recortes vivos por usuario
+const NEST_REC_MAX_JSON = 600000;   // bytes de los contornos de un recorte
+const NEST_REC_MATERIALES = ['acrilico', 'pvc', 'mdf', 'policarbonato', 'alto_impacto'];
+const NEST_REC_ORIGENES = ['medidas', 'archivo', 'sobrante'];
+let _nestRecSchemaOk = false;
+async function ensureNestingRecortesSchema(env) {
+  if (_nestRecSchemaOk) return;
+  await env.DB.prepare("CREATE TABLE IF NOT EXISTS nesting_recortes (dueno TEXT NOT NULL, id TEXT NOT NULL, nombre TEXT NOT NULL DEFAULT '', material TEXT NOT NULL DEFAULT '', color TEXT NOT NULL DEFAULT '', color_hex TEXT, espesor TEXT NOT NULL DEFAULT '', rings TEXT NOT NULL, largo REAL NOT NULL, ancho REAL NOT NULL, area REAL NOT NULL, origen TEXT, usar INTEGER NOT NULL DEFAULT 0, creado_at TEXT NOT NULL, creado_por TEXT, editado_at TEXT, editado_por TEXT, borrado_at TEXT, borrado_por TEXT, PRIMARY KEY (dueno, id))").run();
+  _nestRecSchemaOk = true;
+}
+// Dueño de los recortes de una sesión: 'fran' o el usuario sin tildes ni espacios ('gaspar').
+function nestRecDueno(user) { return esUsuarioFran(user) ? 'fran' : String(user || '').trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, ''); }
+// Contornos en mm (el primero, el borde; los demás, huecos), ya llevados a la esquina (0, 0) por el nesting. null si no sirve.
+function nestRecRings(v) {
+  if (!Array.isArray(v) || !v.length || v.length > 80) return null;
+  let n = 0, x1 = 0, y1 = 0;
+  const out = [];
+  for (const r of v) {
+    if (!Array.isArray(r) || r.length < 3) return null;
+    n += r.length; if (n > 40000) return null;
+    const q = [];
+    for (const p of r) {
+      if (!Array.isArray(p) || p.length !== 2) return null;
+      const x = +p[0], y = +p[1];
+      if (!isFinite(x) || !isFinite(y) || x < -1 || y < -1 || x > 20000 || y > 20000) return null;
+      q.push([Math.round(x * 100) / 100, Math.round(y * 100) / 100]);
+      if (x > x1) x1 = x; if (y > y1) y1 = y;
+    }
+    out.push(q);
+  }
+  return { rings: out, largo: x1, ancho: y1 };
+}
+// Material, color y espesor de un recorte. Todo vacío = "sin material" (los que venían de antes).
+function nestRecMaterial(b) {
+  const material = String(b.material || '').trim().toLowerCase();
+  if (material && !NEST_REC_MATERIALES.includes(material)) return { error: 'Material desconocido.' };
+  const color = String(b.color || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+  const hex = /^#[0-9a-f]{6}$/i.test(String(b.color_hex || '')) ? String(b.color_hex) : null;
+  const esp = String(b.espesor == null ? '' : b.espesor).replace(',', '.').trim();
+  if (esp && !/^\d{1,2}(\.\d{1,2})?$/.test(esp)) return { error: 'El espesor va en mm, con números (por ejemplo 3 o 2,5).' };
+  return { material, color, color_hex: hex, espesor: esp ? String(parseFloat(esp)) : '' };
+}
+function nestRecFila(r) {
+  let rings = []; try { rings = JSON.parse(r.rings); } catch (_) {}
+  return { id: r.id, dueno: r.dueno, nombre: r.nombre, material: r.material, color: r.color, color_hex: r.color_hex || '', espesor: r.espesor, rings, largo: r.largo, ancho: r.ancho, area: r.area, origen: r.origen || '', usar: !!r.usar, creado_at: r.creado_at, creado_por: r.creado_por || '', editado_at: r.editado_at || '', editado_por: r.editado_por || '' };
+}
+async function nestingRecortesRoute(request, env, url, path, session) {
+  const fran = esUsuarioFran(session.user), admin = !fran && (await getSessionRole(env, session.user)) === 'admin';
+  if (!fran && !admin) return json({ error: 'forbidden' }, 403);
+  try { await ensureNestingRecortesSchema(env); } catch (_) { return json({ error: 'db', motivo: 'No se pudo preparar la base. Probá de nuevo.' }, 500); }
+  const yo = nestRecDueno(session.user);
+  if (!yo) return json({ error: 'forbidden' }, 403);
+  const quien = fran ? 'Fran' : String(session.user || '').trim().slice(0, 40);
+  let body = {};
+  if (request.method === 'POST') { try { body = await request.json(); } catch (_) { return json({ error: 'JSON inválido' }, 400); } if (!body || typeof body !== 'object') body = {}; }
+  // De quién son los recortes que se miran o se tocan: los propios; Gaspar puede pasar ?de= / {de} para ver y acomodar los de otro.
+  const deRaw = String((request.method === 'GET' ? url.searchParams.get('de') : body.de) || '').trim().toLowerCase();
+  const de = admin && /^[a-z0-9]{1,40}$/.test(deRaw) ? deRaw : yo;
+  const ahora = new Date().toISOString();
+  // GET /admin/nesting/recortes[?de=] → {yo, de, admin, duenos: [{dueno, n}] (solo admin), recortes}
+  if (request.method === 'GET' && path === '/admin/nesting/recortes') {
+    const { results } = await env.DB.prepare('SELECT * FROM nesting_recortes WHERE dueno = ? AND borrado_at IS NULL ORDER BY creado_at').bind(de).all();
+    let duenos = [];
+    if (admin) duenos = ((await env.DB.prepare('SELECT dueno, COUNT(*) AS n FROM nesting_recortes WHERE borrado_at IS NULL GROUP BY dueno').all()).results || []).map(x => ({ dueno: x.dueno, n: x.n }));
+    return json({ ok: true, yo, de, admin, duenos, recortes: (results || []).map(nestRecFila) });
+  }
+  if (request.method !== 'POST') return json({ error: 'not found' }, 404);
+  const id = String(body.id || '');
+  if (!/^[a-z0-9]{4,40}$/i.test(id)) return json({ error: 'Falta el recorte.' }, 400);
+  // POST /admin/nesting/recortes/guardar {id, nombre, material, color, color_hex, espesor, rings, area, origen, usar} → uno nuevo
+  // (también los que subió de su compu, con su mismo id: si ya está, no se pisa y responde ya: true).
+  if (path === '/admin/nesting/recortes/guardar') {
+    const g = nestRecRings(body.rings);
+    if (!g) return json({ error: 'El contorno del recorte no sirve.' }, 400);
+    const ringsTxt = JSON.stringify(g.rings);
+    if (ringsTxt.length > NEST_REC_MAX_JSON) return json({ error: 'El recorte tiene demasiados puntos.' }, 400);
+    if (g.largo < 20 || g.ancho < 20) return json({ error: 'El recorte es muy chico.' }, 400);
+    const m = nestRecMaterial(body); if (m.error) return json({ error: m.error }, 400);
+    const area = Math.max(0, Math.min(+body.area || 0, g.largo * g.ancho));
+    const origen = NEST_REC_ORIGENES.includes(body.origen) ? body.origen : 'medidas';
+    const nombre = String(body.nombre || '').replace(/\s+/g, ' ').trim().slice(0, 120) || 'Recorte';
+    const vivos = await env.DB.prepare('SELECT COUNT(*) AS n FROM nesting_recortes WHERE dueno = ? AND borrado_at IS NULL').bind(de).first();
+    if (vivos && vivos.n >= NEST_REC_MAX) return json({ error: `Ya hay ${NEST_REC_MAX} recortes guardados: borrá los que ya no están en el taller.` }, 409);
+    const r = await env.DB.prepare('INSERT INTO nesting_recortes (dueno, id, nombre, material, color, color_hex, espesor, rings, largo, ancho, area, origen, usar, creado_at, creado_por) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(dueno, id) DO NOTHING')
+      .bind(de, id, nombre, m.material, m.color, m.color_hex, m.espesor, ringsTxt, Math.round(g.largo * 100) / 100, Math.round(g.ancho * 100) / 100, area, origen, body.usar ? 1 : 0, ahora, quien).run();
+    const fila = await env.DB.prepare('SELECT * FROM nesting_recortes WHERE dueno = ? AND id = ?').bind(de, id).first();
+    if (!fila || fila.borrado_at) return json({ error: 'Ese recorte se borró.' }, 409);
+    return json({ ok: true, ya: !(r && r.meta && r.meta.changes), recorte: nestRecFila(fila) });
+  }
+  // POST /admin/nesting/recortes/editar {id, nombre?, usar?, material?, color?, color_hex?, espesor?} → lo que venga.
+  if (path === '/admin/nesting/recortes/editar') {
+    const sets = [], vals = [];
+    if (body.nombre != null) { const n = String(body.nombre).replace(/\s+/g, ' ').trim().slice(0, 120); if (!n) return json({ error: 'Poné un nombre.' }, 400); sets.push('nombre = ?'); vals.push(n); }
+    if (body.usar != null) { sets.push('usar = ?'); vals.push(body.usar ? 1 : 0); }
+    if (body.material != null || body.color != null || body.espesor != null) {
+      const m = nestRecMaterial(body); if (m.error) return json({ error: m.error }, 400);
+      sets.push('material = ?', 'color = ?', 'color_hex = ?', 'espesor = ?'); vals.push(m.material, m.color, m.color_hex, m.espesor);
+    }
+    if (!sets.length) return json({ error: 'No hay nada para cambiar.' }, 400);
+    const r = await env.DB.prepare('UPDATE nesting_recortes SET ' + sets.join(', ') + ', editado_at = ?, editado_por = ? WHERE dueno = ? AND id = ? AND borrado_at IS NULL').bind(...vals, ahora, quien, de, id).run();
+    if (!(r && r.meta && r.meta.changes)) return json({ error: 'Ese recorte ya no está.' }, 404);
+    return json({ ok: true, recorte: nestRecFila(await env.DB.prepare('SELECT * FROM nesting_recortes WHERE dueno = ? AND id = ?').bind(de, id).first()) });
+  }
+  // POST /admin/nesting/recortes/borrar {id} → borrado lógico; /restaurar {id} lo vuelve a poner (el "Deshacer").
+  if (path === '/admin/nesting/recortes/borrar' || path === '/admin/nesting/recortes/restaurar') {
+    const borrar = path.endsWith('/borrar');
+    const r = await env.DB.prepare(borrar ? 'UPDATE nesting_recortes SET borrado_at = ?, borrado_por = ? WHERE dueno = ? AND id = ? AND borrado_at IS NULL' : 'UPDATE nesting_recortes SET borrado_at = NULL, borrado_por = NULL, editado_at = ?, editado_por = ? WHERE dueno = ? AND id = ? AND borrado_at IS NOT NULL')
+      .bind(ahora, quien, de, id).run();
+    if (!(r && r.meta && r.meta.changes)) return json({ error: 'Ese recorte ya no está.' }, 404);
+    return json({ ok: true });
+  }
+  return json({ error: 'not found' }, 404);
 }
 // Aviso a Fran de un pedido de corte (nuevo o cancelado), si Gaspar cargó su WhatsApp (agenda_phones 'fran'): texto si le
 // escribió al número del negocio en las últimas 23 h; si no, la plantilla de servicio (sinRespEnviar, como a Neyen).
@@ -33055,6 +33175,8 @@ const handler = {
         }
         return json({ error: 'not found' }, 404);
       }
+      // Recortes del taller del nesting (Gaspar y Fran, cada uno los suyos): nestingRecortesRoute.
+      if (path === '/admin/nesting/recortes' || path.startsWith('/admin/nesting/recortes/')) return await nestingRecortesRoute(request, env, url, path, session);
       if (path.startsWith('/admin/sinfrontera/')) {
         const sfExt = esUsuarioSinFrontera(session.user), fran = esUsuarioFran(session.user);
         if (fran ? !franRutaOk(request, path, url) : (!sfExt && (await getSessionRole(env, session.user)) !== 'admin')) return json({ error: 'forbidden' }, 403);

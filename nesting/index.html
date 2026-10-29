@@ -86,6 +86,21 @@
   .rec .nom { font-weight: 700; }
   .rec .det { color: var(--mute); font-size: 12.5px; flex: 1; min-width: 150px; }
   .rec label { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+  .rec.otro { opacity: .55; }
+  .rec .mat-ed { flex-basis: 100%; display: flex; gap: 8px; align-items: end; flex-wrap: wrap; padding: 6px 0 2px; }
+  .rec .mat-ed label { display: grid; gap: 3px; font-size: 12px; color: var(--mute); }
+  .rec-quien { margin: 0; font-size: 13px; color: var(--mute); }
+  .rec-quien b { color: var(--fg); }
+  .rec-quien a { color: var(--acento); }
+  .rec-quien.err { color: var(--aviso); }
+  .rec-quien select { margin-left: 4px; }
+  .rec-mat { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 0 0; font-size: 13.5px; }
+  .rec-mat select { min-width: 220px; }
+  .rec-grupo { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; margin: 14px 0 0; font-size: 13px; font-weight: 700; }
+  .rec-grupo .sutil { font-weight: 400; font-size: 12.5px; }
+  .rec-grupo .sw, .rec-mat .sw { display: inline-block; width: 12px; height: 12px; border-radius: 50%; border: 1px solid #ffffff59; vertical-align: -1px; }
+  .rec-grupo .sw.trans, .rec-mat .sw.trans { background: repeating-conic-gradient(#9aa3b5 0 25%, #e9ecf2 0 50%) 0 0 / 6px 6px; }
+  input.mm { width: 74px; }
   .form-rec { border: 1px solid var(--borde); border-radius: 10px; padding: 12px; margin: 10px 0 0; background: var(--panel2); display: grid; gap: 10px; }
   .form-rec .filas { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px 14px; }
   .form-rec label { display: grid; gap: 4px; font-size: 12.5px; color: var(--mute); }
@@ -206,7 +221,10 @@
     </div>
     <div class="recortes">
       <h3>Recortes del taller</h3>
-      <p class="sutil" style="margin:0">Se llenan primero los recortes tildados, del más grande al más chico. Quedan guardados en esta compu.</p>
+      <p class="rec-quien" id="rec-quien"></p>
+      <p class="sutil" style="margin:4px 0 0">Se llenan primero los recortes tildados del material de este corte, del más grande al más chico.</p>
+      <div class="rec-mat" id="rec-mat"></div>
+      <datalist id="colores-rec"></datalist>
       <div id="lista-recortes"></div>
       <div class="acciones" style="margin-top:10px">
         <button id="b-rec-medidas">+ Recorte por medidas</button>
@@ -218,6 +236,9 @@
           <label>Nombre<input type="text" id="r-nombre" placeholder="por ejemplo: acrílico 3 mm, estante de arriba"></label>
           <label>Largo (mm)<input type="number" id="r-largo" min="50" step="1" value="1200"></label>
           <label>Ancho (mm)<input type="number" id="r-ancho" min="50" step="1" value="600"></label>
+          <label>Material<select id="r-material"></select></label>
+          <label>Color<input type="text" id="r-color" list="colores-rec" maxlength="40" placeholder="blanco opalino, transparente, negro…"></label>
+          <label>Espesor (mm)<input type="number" id="r-espesor" min="0.5" max="50" step="0.5" placeholder="3"></label>
         </div>
         <div class="filas" id="r-esquinas"></div>
         <canvas id="r-vista"></canvas>
@@ -318,7 +339,7 @@ const VERSION_MOTOR = '6'; // subirla (y la de nest-core.js?v= arriba) cada vez 
 const TOLS_UNION = [0.001, 0.01, 0.05, 0.1, 0.5, 1, 2]; // mm: a cuánto se toman como la misma las puntas de dos trazos sueltos
 const TOL_UNION = 0.01;
 const CIERRE_SOLO = 2;       // mm: un contorno de corte abierto (3 puntos o más) que no cierra por esto o menos se cierra solo
-const S = { archivos: [], sec: 0, mapa: {}, mapaDef: {}, revZoom: new Map(), piezas: [], grandes: [], cfg: cargarCfg(), recortes: cargarRecortes(), recNest: [], perfiles: cargarPerfiles(), gcodeCache: new Map(), mejor: null, firmaMejor: '', workers: [], firmaWorkers: '', vivos: 0, corridas: 0, t0: 0, ronda: 0, corriendo: false, timer: null, nest: null, cfgNest: null, pintarPend: false };
+const S = { archivos: [], sec: 0, mapa: {}, mapaDef: {}, revZoom: new Map(), piezas: [], grandes: [], cfg: cargarCfg(), recortes: cargarRecortes(), recMatSel: cargarMatSel(), recNest: [], perfiles: cargarPerfiles(), gcodeCache: new Map(), mejor: null, firmaMejor: '', workers: [], firmaWorkers: '', vivos: 0, corridas: 0, t0: 0, ronda: 0, corriendo: false, timer: null, nest: null, cfgNest: null, pintarPend: false };
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const fmt = (n, d = 0) => Number(n).toLocaleString('es-AR', { minimumFractionDigits: d, maximumFractionDigits: d });
@@ -1330,8 +1351,8 @@ function prepararNest() {
   cfgDelForm();
   const cfg = S.cfg, angs = [];
   for (let g = 0; g < 180; g += cfg.paso) angs.push(g * Math.PI / 180);
-  // Recortes tildados, del más grande al más chico; las placas enteras entran si está tildado o si no hay recortes.
-  const recs = S.recortes.filter((r) => r.usar).sort((a, b) => b.area - a.area);
+  // Recortes tildados del material de este corte (el del lote o el elegido), del más grande al más chico; las placas enteras entran si está tildado o si no hay recortes.
+  const selMat = matDelCorte(), recs = S.recortes.filter((r) => usaRecorte(r, selMat)).sort((a, b) => b.area - a.area);
   const cajas = recs.map((r) => [r.largo, r.ancho]);
   if (cfg.enteras !== false || !recs.length) cajas.push([cfg.largo, cfg.ancho]);
   const nest = [], grandes = [], conHuecos = [], medidas = [];
@@ -1676,14 +1697,129 @@ const nombreGcode = (s) => nombreDxf(s).replace(/\.dxf$/, '.' + (perfilActual().
 function bajarGcode(s) { bajar(new Blob([gcodeLamina(s).texto], { type: 'text/plain' }), nombreGcode(s)); }
 
 // ───────────── recortes del taller ─────────────
+// Desde el 29-oct quedan guardados en el usuario del CRM, cada uno los suyos (Gaspar: "que Fran entre con el mismo user al
+// nesting y que pueda guardarse recortes por material"): esta página toma la sesión del CRM de esta compu (mismo sitio) y
+// los guarda con la API del worker (/admin/nesting/recortes), con material, color y espesor. Sin sesión, o si el CRM no
+// contesta, siguen en el localStorage de esta compu como antes; esos (y los que ya estaban acá) se suben solos a su usuario
+// la próxima vez que entra con sesión, con el material que diga su nombre, y quedan de respaldo en nesting_recortes_respaldo.
+// Se usan solo los tildados del material de este corte: el del lote del CRM o el que se elige arriba de la lista.
 const ESQUINAS = [['bl', 'abajo a la izquierda'], ['br', 'abajo a la derecha'], ['tr', 'arriba a la derecha'], ['tl', 'arriba a la izquierda']];
 const ORIGEN = { medidas: 'por medidas', archivo: 'dibujado', sobrante: 'sobrante de un nesting' };
+const API_CRM = 'https://ni-ventas-tracker.neoninfinito.workers.dev';
+const MATERIALES_REC = [['acrilico', 'Acrílico'], ['pvc', 'PVC'], ['mdf', 'MDF'], ['policarbonato', 'Policarbonato'], ['alto_impacto', 'Alto impacto']];
+const COLORES_REC = ['blanco opalino', 'transparente', 'negro'];
+const COLOR_MUESTRA = { 'blanco opalino': '#f2f3ee', negro: '#111111' };
+// modo: 'cargando' | 'servidor' (en el usuario) | 'local' (en esta compu; aviso: sin_sesion | vencida | sin_permiso | error)
+const REC = { modo: 'cargando', aviso: '', tok: '', yo: '', de: '', admin: false, duenos: [], edit: '' };
 function cargarRecortes() {
   try { const v = JSON.parse(localStorage.getItem('nesting_recortes') || '[]'); return Array.isArray(v) ? v.filter((r) => r && Array.isArray(r.rings)) : []; } catch (_) { return []; }
 }
+// En el usuario cada cambio va solo a la API (agregarRecorte, editarRecorte, borrarRecorte); esto es para el modo local.
 function guardarRecortes() {
+  if (REC.modo === 'servidor') return;
   try { localStorage.setItem('nesting_recortes', JSON.stringify(S.recortes)); }
   catch (_) { $('rec-nota').textContent = 'No se pudieron guardar los recortes en esta compu: duran hasta que cierres la página.'; }
+}
+const recMatKey = (m) => (m && m.material ? [m.material, sinAcentos(m.color), m.espesor || ''].join('|') : '');
+function recMatTxt(m) {
+  if (!m || !m.material) return 'Sin material';
+  const lbl = (MATERIALES_REC.find((x) => x[0] === m.material) || [0, m.material])[1];
+  return [lbl, sinAcentos(m.color), m.espesor ? fmtEsp(m.espesor) + ' mm' : 'sin espesor'].filter(Boolean).join(' ');
+}
+function recMuestra(m) {
+  const c = m && sinAcentos(m.color);
+  if (!c) return '';
+  if (c === 'transparente') return '<i class="sw trans"></i>';
+  const h = /^#[0-9a-f]{6}$/i.test(String(m.color_hex || '')) ? m.color_hex : COLOR_MUESTRA[c];
+  return h ? `<i class="sw" style="background:${h}"></i>` : '';
+}
+// El material del lote del CRM ("Acrílico", "Blanco opalino", "4"), si es uno que se conoce.
+function loteMat() {
+  const L = S.lote; if (!L) return null;
+  const k = sinAcentos(L.material).replace(/ /g, '_'), mat = MATERIALES_REC.find((x) => x[0] === k), mm = espesorNum(L.espesor);
+  return mat ? { material: mat[0], color: sinAcentos(L.color), color_hex: L.hex || '', espesor: mm != null ? String(mm) : '' } : null;
+}
+// Material de este corte: el del lote; si no, el que se eligió arriba de la lista (null = cualquiera, todos los tildados).
+function matDelCorte() { return loteMat() || S.recMatSel || null; }
+function cargarMatSel() { try { const v = JSON.parse(localStorage.getItem('nesting_rec_mat') || 'null'); return v && v.material ? v : null; } catch (_) { return null; } }
+function guardarMatSel() { try { localStorage.setItem('nesting_rec_mat', JSON.stringify(S.recMatSel || null)); } catch (_) {} }
+const usaRecorte = (r, sel) => !!r.usar && (!sel || recMatKey(r) === recMatKey(sel));
+// Material que dice el nombre de un recorte viejo: el lote del CRM en un sobrante ("Sobrante de … (acrilico-blanco-opalino-4mm,
+// 29/10)") o escrito a mano ("acrílico 3 mm, estante de arriba"). null si no dice el material y el espesor.
+function materialDeNombre(nom) {
+  const t = sinAcentos(nom).replace(/(\d),(\d)/g, '$1.$2');
+  let m = t.match(/\b(acrilico|pvc|mdf|policarbonato|alto-impacto)-([a-z0-9-]*?)-?(\d+(?:\.\d+)?)mm\b/);
+  if (m) return { material: m[1].replace('-', '_'), color: m[2].replace(/-+/g, ' ').trim(), espesor: String(parseFloat(m[3])) };
+  const mat = MATERIALES_REC.find(([k]) => t.includes(k.replace('_', ' '))), e = t.match(/(\d+(?:\.\d+)?)\s*mm\b/);
+  if (!mat || !e) return null;
+  const col = ['blanco opalino', 'opalino', 'transparente', 'cristal', 'negro', 'blanco'].find((c) => t.includes(c)) || '';
+  return { material: mat[0], color: col === 'opalino' ? 'blanco opalino' : col === 'cristal' ? 'transparente' : col, espesor: String(parseFloat(e[1])) };
+}
+// API de recortes del worker con el token de la sesión del CRM. Gaspar mirando los de otro: van con {de}.
+async function recApi(ruta, body) {
+  const de = REC.de && REC.de !== REC.yo ? REC.de : '';
+  const op = body ? { method: 'POST', headers: { Authorization: 'Bearer ' + REC.tok, 'Content-Type': 'application/json' }, body: JSON.stringify(de ? { ...body, de } : body) } : { headers: { Authorization: 'Bearer ' + REC.tok } };
+  let r = null, d = null;
+  try { r = await fetch(API_CRM + '/admin/nesting/recortes' + ruta + (!body && de ? '?de=' + encodeURIComponent(de) : ''), op); } catch (_) {}
+  if (!r) { const e = new Error('No se pudo conectar con el CRM. Revisá internet y probá de nuevo.'); e.status = 0; throw e; }
+  try { d = await r.json(); } catch (_) {}
+  if (!r.ok || !d || d.error) {
+    const e = new Error(r.status === 401 ? 'Tu sesión del CRM venció: entrá de nuevo al CRM y recargá esta página.' : r.status === 403 ? 'Tu usuario no puede guardar recortes.' : (d && (d.motivo || d.error)) || 'No se pudo guardar. Probá de nuevo.');
+    e.status = r.status; throw e;
+  }
+  return d;
+}
+// Tokens de la sesión del CRM en esta compu: el de Gaspar (adminToken, aunque esté mirando como otro) y el del usuario activo.
+function tokensCrm() {
+  const g = (k) => { try { return localStorage.getItem(k) || ''; } catch (_) { return ''; } };
+  return [g('niventas.adminToken'), g('niventas.token')].filter((t, i, a) => t && a.indexOf(t) === i);
+}
+function ponerRecortes(lista) {
+  const antes = S.recortes.filter((r) => r.usar).map((r) => r.id).sort().join();
+  S.recortes = (lista || []).filter((r) => r && Array.isArray(r.rings) && r.rings.length);
+  pintarRecortes();
+  if ((S.mejor || S.corriendo) && S.recortes.filter((r) => r.usar).map((r) => r.id).sort().join() !== antes) invalidarResultado('Cambiaron los recortes: volvé a acomodar.');
+}
+async function iniciarRecortes() {
+  const toks = tokensCrm();
+  let d = null, ult = null;
+  for (const t of toks) {
+    REC.tok = t;
+    try { d = await recApi(''); break; } catch (e) { ult = e; if (e.status !== 401 && e.status !== 403) break; }
+  }
+  if (!d) {
+    REC.modo = 'local'; REC.tok = '';
+    REC.aviso = !toks.length ? 'sin_sesion' : ult && ult.status === 401 ? 'vencida' : ult && ult.status === 403 ? 'sin_permiso' : 'error';
+    pintarRecortes(); return;
+  }
+  REC.modo = 'servidor'; REC.yo = d.yo; REC.de = d.de; REC.admin = !!d.admin; REC.duenos = d.duenos || [];
+  const locales = cargarRecortes();
+  if (locales.length) await subirLocales(locales);
+  else ponerRecortes(d.recortes);
+}
+// Los que estaban guardados en esta compu pasan al usuario (con su mismo id: si ya se habían subido, no se duplican).
+async function subirLocales(locales) {
+  $('rec-nota').textContent = `Pasando a tu usuario ${plural(locales.length, 'recorte que estaba guardado', 'recortes que estaban guardados')} en esta compu…`;
+  const quedan = [];
+  let subidos = 0, sinMat = 0;
+  for (const r of locales) {
+    const m = r.material ? r : materialDeNombre(r.nombre);
+    try {
+      await recApi('/guardar', { id: r.id, nombre: r.nombre, rings: r.rings, area: r.area, origen: r.origen, usar: !!r.usar, material: (m && m.material) || '', color: (m && m.color) || '', color_hex: (m && m.color_hex) || '', espesor: (m && m.espesor) || '' });
+      subidos++; if (!m) sinMat++;
+    } catch (e) { if (e.status === 0 || e.status >= 500 || e.status === 401) quedan.push(r); } // el resto (contorno que no sirve, tope) no se reintenta
+  }
+  try {
+    const resp = JSON.parse(localStorage.getItem('nesting_recortes_respaldo') || '[]'), ids = new Set(resp.map((r) => r.id));
+    localStorage.setItem('nesting_recortes_respaldo', JSON.stringify(resp.concat(locales.filter((r) => !ids.has(r.id)))));
+    localStorage.setItem('nesting_recortes', JSON.stringify(quedan));
+  } catch (_) {}
+  let d = null;
+  try { d = await recApi(''); } catch (_) {}
+  ponerRecortes(d ? d.recortes : []);
+  $('rec-nota').textContent = (subidos ? `Pasé a tu usuario ${plural(subidos, 'recorte que estaba guardado', 'recortes que estaban guardados')} en esta compu.` : '')
+    + (sinMat ? ` ${plural(sinMat, 'no dice', 'no dicen')} de qué material es: elegíselo con "Material".` : '')
+    + (quedan.length ? ` ${plural(quedan.length, 'quedó', 'quedaron')} en esta compu por un error: se ${verbo(quedan.length, 'pasa solo', 'pasan solos')} la próxima vez.` : '');
 }
 const idNuevo = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 const hoyCorto = () => new Date().toLocaleDateString('es-AR', { day: 'numeric', month: 'numeric' });
@@ -1720,7 +1856,20 @@ function leerFormRecorte() {
     if (tipo && (esq[k].a <= 0 || esq[k].b <= 0)) return { error: `Falta la medida de la esquina de ${ESQUINAS.find((x) => x[0] === k)[1]}: cuánto se saca en el largo y en el ancho.` };
   }
   const r = poligonoMedidas(L, A, esq);
-  return r.error ? r : { ring: r.ring, nombre: $('r-nombre').value.trim(), L, A };
+  if (r.error) return r;
+  const m = leerMaterial($('r-material'), $('r-color'), $('r-espesor'));
+  return m.error ? m : { ring: r.ring, nombre: $('r-nombre').value.trim(), L, A, mat: m.mat };
+}
+// Material, color y espesor de un formulario (el de "por medidas" o el de "Material" de un recorte). Sin material = sin elegir.
+function leerMaterial(selMat, inColor, inEsp) {
+  const material = selMat.value, color = sinAcentos(inColor.value).slice(0, 40), e = parseFloat(String(inEsp.value).replace(',', '.'));
+  if (!material) return { mat: null };
+  if (!(e > 0 && e <= 50)) return { error: 'Poné el espesor del material en mm (por ejemplo 3).' };
+  return { mat: { material, color, color_hex: '', espesor: String(Math.round(e * 100) / 100) } };
+}
+function ponerMaterial(selMat, inColor, inEsp, m) {
+  selMat.innerHTML = '<option value="">sin elegir</option>' + MATERIALES_REC.map(([k, t]) => `<option value="${k}">${t}</option>`).join('');
+  selMat.value = (m && m.material) || ''; inColor.value = (m && m.color) || ''; inEsp.value = (m && m.espesor) || '';
 }
 function vistaFormRecorte() {
   const f = leerFormRecorte(), cv = $('r-vista');
@@ -1732,21 +1881,99 @@ function vistaFormRecorte() {
 function abrirFormRecorte() {
   $('r-esquinas').innerHTML = ESQUINAS.map(([k, t]) => `<label>Esquina de ${t} (mm)<span class="esq"><select data-esq="${k}"><option value="">entera</option><option value="escalon">escalón</option><option value="diagonal">diagonal</option></select><input type="number" data-esq-a="${k}" min="0" step="1" placeholder="largo"> × <input type="number" data-esq-b="${k}" min="0" step="1" placeholder="ancho"></span></label>`).join('');
   $('r-nombre').value = ''; $('form-rec').hidden = false;
+  ponerMaterial($('r-material'), $('r-color'), $('r-espesor'), matDelCorte());
   vistaFormRecorte();
 }
-function agregarRecorte(rec) {
-  S.recortes.push(rec);
-  guardarRecortes(); pintarRecortes();
-  if (rec.usar && (S.mejor || S.corriendo)) invalidarResultado('Cambiaron los recortes: volvé a acomodar.');
+// Un recorte nuevo: en el usuario (la API) o en esta compu. Devuelve si quedó guardado.
+async function agregarRecorte(rec) {
+  const m = rec.mat; delete rec.mat;
+  Object.assign(rec, { material: (m && m.material) || '', color: (m && m.color) || '', color_hex: (m && m.color_hex) || '', espesor: (m && m.espesor) || '' });
+  S.recortes.push(rec); pintarRecortes();
+  if (REC.modo === 'servidor') {
+    try { const d = await recApi('/guardar', rec); const i = S.recortes.indexOf(rec); if (i >= 0) S.recortes[i] = d.recorte; pintarRecortes(); }
+    catch (e) { S.recortes = S.recortes.filter((x) => x !== rec); pintarRecortes(); $('rec-nota').textContent = 'No se guardó el recorte: ' + e.message; return false; }
+  } else guardarRecortes();
+  if (usaRecorte(rec, matDelCorte()) && (S.mejor || S.corriendo)) invalidarResultado('Cambiaron los recortes: volvé a acomodar.');
+  return true;
+}
+// Cambiar usar o el material de un recorte; si no se pudo guardar en el usuario, vuelve como estaba.
+async function editarRecorte(r, cambios) {
+  const sel = matDelCorte(), antes = { ...r }, usabaAntes = usaRecorte(r, sel);
+  Object.assign(r, cambios); pintarRecortes();
+  if (REC.modo === 'servidor') {
+    try { const d = await recApi('/editar', { id: r.id, ...cambios }); Object.assign(r, d.recorte); }
+    catch (e) { Object.assign(r, antes); $('rec-nota').textContent = 'No se guardó el cambio: ' + e.message; }
+    pintarRecortes();
+  } else guardarRecortes();
+  if (usaRecorte(r, sel) !== usabaAntes && (S.mejor || S.corriendo)) invalidarResultado('Cambiaron los recortes: volvé a acomodar.');
+}
+async function borrarRecorte(r) {
+  if (REC.modo === 'servidor') {
+    try { await recApi('/borrar', { id: r.id }); } catch (e) { $('rec-nota').textContent = 'No se borró: ' + e.message; return; }
+  }
+  S.recortes = S.recortes.filter((x) => x !== r); guardarRecortes(); pintarRecortes();
+  if (usaRecorte(r, matDelCorte()) && (S.mejor || S.corriendo)) invalidarResultado('Cambiaron los recortes: volvé a acomodar.');
+}
+const nomUsuario = (s) => (s ? s[0].toUpperCase() + s.slice(1) : '');
+// Quién está (la sesión del CRM) y, para Gaspar, de quién son los recortes que mira.
+function pintarQuien() {
+  const el = $('rec-quien');
+  el.classList.toggle('err', REC.modo === 'local' && REC.aviso !== 'sin_sesion');
+  if (REC.modo === 'cargando') { el.textContent = 'Buscando tus recortes…'; return; }
+  if (REC.modo === 'local') {
+    el.innerHTML = {
+      sin_sesion: 'No entraste al CRM en esta compu: los recortes quedan guardados solo acá. <a href="../" target="_blank" rel="noopener">Entrá al CRM</a> con tu usuario y recargá esta página para tenerlos en tu usuario.',
+      vencida: 'Tu sesión del CRM venció: los recortes quedan solo en esta compu. <a href="../" target="_blank" rel="noopener">Entrá de nuevo al CRM</a> y recargá esta página.',
+      sin_permiso: 'Tu usuario del CRM no guarda recortes: quedan solo en esta compu.',
+      error: 'No se pudo conectar con el CRM: los recortes de ahora quedan en esta compu y se pasan solos a tu usuario la próxima vez.',
+    }[REC.aviso] || '';
+    return;
+  }
+  const ajeno = REC.de !== REC.yo;
+  let sel = '';
+  if (REC.admin) {
+    const ds = new Map([[REC.yo, 0]]);
+    for (const x of REC.duenos) ds.set(x.dueno, x.n);
+    for (const k of ['fran', REC.de]) if (!ds.has(k)) ds.set(k, 0);
+    sel = ` · <label>Ver los recortes de<select id="rec-de">${[...ds].map(([k, n]) => `<option value="${esc(k)}"${k === REC.de ? ' selected' : ''}>${esc(nomUsuario(k))}${k === REC.yo ? ' (vos)' : ''} · ${fmt(n)}</option>`).join('')}</select></label>`;
+  }
+  el.innerHTML = `Entraste como <b>${esc(nomUsuario(REC.yo))}</b>: ${ajeno ? `estás viendo los recortes de <b>${esc(nomUsuario(REC.de))}</b> (lo que guardes o cambies queda en los suyos)` : 'tus recortes quedan guardados en tu usuario y los ves desde cualquier compu'}.${sel}`;
+}
+// Material de este corte: el del lote (fijo) o uno de los que hay en los recortes ("cualquiera" = todos los tildados, como antes).
+function pintarMatSel() {
+  const el = $('rec-mat'), lm = loteMat();
+  if (lm) { el.innerHTML = `Material de este corte: ${recMuestra(lm)}<b>${esc(recMatTxt(lm))}</b> <span class="sutil">(el del lote del CRM)</span>`; return; }
+  const combos = new Map();
+  for (const r of S.recortes) if (r.material) combos.set(recMatKey(r), { material: r.material, color: r.color, color_hex: r.color_hex, espesor: r.espesor });
+  if (S.recMatSel) combos.set(recMatKey(S.recMatSel), S.recMatSel);
+  S.recCombos = combos;
+  if (!combos.size) { el.innerHTML = ''; return; }
+  const k = recMatKey(S.recMatSel);
+  el.innerHTML = `<label for="rec-mat-sel">Material de este corte:</label><select id="rec-mat-sel"><option value="">cualquiera (todos los tildados)</option>${[...combos].sort((a, b) => recMatTxt(a[1]).localeCompare(recMatTxt(b[1]))).map(([key, m]) => `<option value="${esc(key)}"${key === k ? ' selected' : ''}>${esc(recMatTxt(m))}</option>`).join('')}</select>`;
 }
 function pintarRecortes() {
-  const cont = $('lista-recortes');
-  cont.innerHTML = S.recortes.length ? '' : '<p class="sutil" style="margin:8px 0 0">Todavía no hay recortes guardados.</p>';
-  for (const r of S.recortes) {
-    const d = document.createElement('div'); d.className = 'rec';
-    d.innerHTML = `<canvas></canvas><span class="nom">${esc(r.nombre)}</span><span class="det">${fmt(r.largo / 10, 1)} × ${fmt(r.ancho / 10, 1)} cm · ${fmt(r.area / 1e6, 2)} m² · ${ORIGEN[r.origen] || ''}</span><label><input type="checkbox" data-rec-usar="${esc(r.id)}"${r.usar ? ' checked' : ''}> Usar</label><button class="chico" data-rec-borrar="${esc(r.id)}">Borrar</button>`;
-    cont.appendChild(d);
-    dibujarRings(d.querySelector('canvas'), r.rings, r.largo, r.ancho, 96, 54);
+  pintarQuien(); pintarMatSel();
+  $('colores-rec').innerHTML = [...new Set(COLORES_REC.concat(S.recortes.map((r) => sinAcentos(r.color)).filter(Boolean)))].map((c) => `<option value="${esc(c)}">`).join('');
+  const cont = $('lista-recortes'), sel = matDelCorte(), ks = sel ? recMatKey(sel) : null;
+  cont.innerHTML = S.recortes.length ? '' : `<p class="sutil" style="margin:8px 0 0">${REC.modo === 'cargando' ? '' : 'Todavía no hay recortes guardados.'}</p>`;
+  // Por material: primero el de este corte, después los demás y al final los que no tienen material.
+  const grupos = new Map();
+  for (const r of S.recortes) { const k = recMatKey(r); if (!grupos.has(k)) grupos.set(k, []); grupos.get(k).push(r); }
+  const orden = [...grupos.keys()].sort((a, b) => (a === ks ? -1 : b === ks ? 1 : !a ? 1 : !b ? -1 : recMatTxt(grupos.get(a)[0]).localeCompare(recMatTxt(grupos.get(b)[0]))));
+  for (const k of orden) {
+    const rs = grupos.get(k), otro = !!sel && k !== ks;
+    const h = document.createElement('div'); h.className = 'rec-grupo';
+    h.innerHTML = `${recMuestra(rs[0])}<span>${esc(recMatTxt(rs[0]))} · ${plural(rs.length, 'recorte', 'recortes')}</span>${!k ? '<span class="sutil">elegí el material de cada uno con "Material"</span>' : otro ? '<span class="sutil">otro material: no se usa en este corte</span>' : ''}`;
+    cont.appendChild(h);
+    for (const r of rs) {
+      const d = document.createElement('div'); d.className = 'rec' + (otro || (sel && !k) ? ' otro' : '');
+      const por = r.creado_por && r.creado_por.toLowerCase() !== REC.de ? ` · lo guardó ${esc(r.creado_por)}` : '';
+      d.innerHTML = `<canvas></canvas><span class="nom">${esc(r.nombre)}</span><span class="det">${fmt(r.largo / 10, 1)} × ${fmt(r.ancho / 10, 1)} cm · ${fmt(r.area / 1e6, 2)} m² · ${ORIGEN[r.origen] || ''}${por}</span><label><input type="checkbox" data-rec-usar="${esc(r.id)}"${r.usar ? ' checked' : ''}> Usar</label><button class="chico" data-rec-mat="${esc(r.id)}">Material</button><button class="chico" data-rec-borrar="${esc(r.id)}">Borrar</button>`
+        + (REC.edit === r.id ? `<div class="mat-ed" data-rec-ed="${esc(r.id)}"><label>Material<select data-ed="material"></select></label><label>Color<input type="text" data-ed="color" list="colores-rec" maxlength="40" placeholder="blanco opalino…"></label><label>Espesor (mm)<input type="number" class="mm" data-ed="espesor" min="0.5" max="50" step="0.5"></label><button class="chico primario" data-rec-mat-ok="${esc(r.id)}">Guardar</button><button class="chico" data-rec-mat-no>Cancelar</button><span class="err" data-ed="error"></span></div>` : '');
+      cont.appendChild(d);
+      if (REC.edit === r.id) { const q = (n) => d.querySelector(`[data-ed="${n}"]`); ponerMaterial(q('material'), q('color'), q('espesor'), r.material ? r : null); }
+      dibujarRings(d.querySelector('canvas'), r.rings, r.largo, r.ancho, 96, 54);
+    }
   }
 }
 // Recorte dibujado: el contorno cerrado más grande de la primera página es el borde; los cerrados que están adentro, huecos.
@@ -1903,16 +2130,20 @@ function guardarSobrante(s, btn) {
     let rec = null;
     try { rec = calcularSobrante(s); } catch (e) { console.error(e); }
     if (!rec) { btn.textContent = 'No sobra nada que sirva'; return; }
-    const lam = laminaInfo(s);
-    agregarRecorte({ id: idNuevo(), nombre: `Sobrante de ${lam.archivo} (${nombreBase()}, ${hoyCorto()})`, ...rec, origen: 'sobrante', usar: false });
-    btn.textContent = 'Guardado ✓';
-    $('rec-nota').textContent = 'El sobrante quedó en Recortes del taller, destildado: tildalo cuando ya esté cortada esta tanda.';
+    const lam = laminaInfo(s), mat = matDelCorte();
+    btn.textContent = 'Guardando…';
+    agregarRecorte({ id: idNuevo(), nombre: `Sobrante de ${lam.archivo} (${nombreBase()}, ${hoyCorto()})`, ...rec, origen: 'sobrante', usar: false, mat }).then((ok) => {
+      if (!ok) { btn.disabled = false; btn.textContent = 'Guardar sobrante'; return; }
+      btn.textContent = 'Guardado ✓';
+      $('rec-nota').textContent = `El sobrante quedó en Recortes del taller${mat ? ', en ' + recMatTxt(mat) : ' sin material (elegíselo con "Material")'}, destildado: tildalo cuando ya esté cortada esta tanda.`;
+    });
   }, 30);
 }
 
 // ───────────── lote del CRM ─────────────
 // "Armar placas" del CRM (Cortes de Sin Frontera, 27-oct) abre esta página con ?lote=<id> y le pasa los archivos de los pedidos
-// de un mismo material, color y espesor, de pestaña a pestaña (postMessage, mismo origen): esta página no toca tokens ni la API.
+// de un mismo material, color y espesor, de pestaña a pestaña (postMessage, mismo origen): el lote no usa tokens ni la API (los
+// recortes del taller sí, con la sesión del CRM: ver "recortes del taller").
 // Apretón de manos: acá se avisa {tipo:'nesting-listo', lote} a la pestaña que la abrió; el CRM manda {tipo:'nesting-progreso'}
 // mientras baja y después {tipo:'nesting-lote', lote, titulo, material, color, color_hex, espesor, pedidos, archivos: [File],
 // fallaron}. Solo se acepta del mismo origen, de esa pestaña y con ese lote, y una sola vez. Cada archivo viene con su pedido
@@ -1971,7 +2202,7 @@ function recibirLote(d) {
   S.lote = L; S.loteEspera = null; clearTimeout(S.tLote);
   try { history.replaceState(null, '', location.pathname); } catch (_) {} // recargar = el nesting de siempre (los archivos no vuelven)
   $('c-ver-ped').checked = true;
-  elegirPerfilLote(); pintarPerfil(); pintarLote();
+  elegirPerfilLote(); pintarPerfil(); pintarLote(); pintarRecortes();
   const ids = new Set(pedidos.map((p) => p.id));
   if (files.length) agregarArchivos(files, (f) => { const m = /^#(\d+) /.exec(f.name); return m && ids.has(+m[1]) ? +m[1] : null; });
 }
@@ -2101,6 +2332,7 @@ document.addEventListener('keydown', (e) => {
 });
 window.addEventListener('resize', () => { if (!$('anim').hidden) { prepararAnimacion(); pintarAnim(); } });
 pintarRecortes();
+iniciarRecortes();
 $('b-rec-medidas').addEventListener('click', abrirFormRecorte);
 $('form-rec').addEventListener('input', vistaFormRecorte);
 $('form-rec').addEventListener('change', vistaFormRecorte);
@@ -2108,29 +2340,49 @@ $('r-cancelar').addEventListener('click', () => { $('form-rec').hidden = true; }
 $('r-guardar').addEventListener('click', () => {
   const f = leerFormRecorte();
   if (f.error) { $('r-error').textContent = f.error; return; }
-  agregarRecorte({ id: idNuevo(), nombre: f.nombre || `Recorte ${S.recortes.length + 1}`, ...normalizarRings([f.ring]), origen: 'medidas', usar: true });
   $('form-rec').hidden = true; $('rec-nota').textContent = '';
+  agregarRecorte({ id: idNuevo(), nombre: f.nombre || `Recorte ${S.recortes.length + 1}`, ...normalizarRings([f.ring]), origen: 'medidas', usar: true, mat: f.mat });
 });
 $('b-rec-archivo').addEventListener('click', () => $('inp-rec').click());
 $('inp-rec').addEventListener('change', async () => {
   const f = $('inp-rec').files[0]; $('inp-rec').value = '';
   if (!f) return;
   $('rec-nota').textContent = 'Leyendo ' + f.name + '…';
-  try { const rec = await recorteDesdeArchivo(f), aviso = rec.aviso; delete rec.aviso; agregarRecorte(rec); $('rec-nota').textContent = aviso || ''; }
+  try { const rec = await recorteDesdeArchivo(f), aviso = rec.aviso; delete rec.aviso; rec.mat = matDelCorte(); $('rec-nota').textContent = aviso || ''; await agregarRecorte(rec); }
   catch (e) { $('rec-nota').textContent = (e && e.message) || String(e); }
 });
 $('lista-recortes').addEventListener('change', (e) => {
   const c = e.target.closest('[data-rec-usar]'); if (!c) return;
   const r = S.recortes.find((x) => x.id === c.getAttribute('data-rec-usar')); if (!r) return;
-  r.usar = c.checked; guardarRecortes();
-  if (S.mejor || S.corriendo) invalidarResultado('Cambiaron los recortes: volvé a acomodar.');
+  editarRecorte(r, { usar: c.checked });
 });
 $('lista-recortes').addEventListener('click', (e) => {
-  const b = e.target.closest('[data-rec-borrar]'); if (!b) return;
-  const r = S.recortes.find((x) => x.id === b.getAttribute('data-rec-borrar')); if (!r) return;
-  if (!confirm('¿Borrar el recorte "' + r.nombre + '"?')) return;
-  S.recortes = S.recortes.filter((x) => x !== r); guardarRecortes(); pintarRecortes();
-  if (r.usar && (S.mejor || S.corriendo)) invalidarResultado('Cambiaron los recortes: volvé a acomodar.');
+  const buscar = (attr) => { const b = e.target.closest('[' + attr + ']'); return b ? S.recortes.find((x) => x.id === b.getAttribute(attr)) : null; };
+  let r = buscar('data-rec-borrar');
+  if (r) { if (confirm('¿Borrar el recorte "' + r.nombre + '"?')) borrarRecorte(r); return; }
+  r = buscar('data-rec-mat');
+  if (r) { REC.edit = REC.edit === r.id ? '' : r.id; pintarRecortes(); return; }
+  if (e.target.closest('[data-rec-mat-no]')) { REC.edit = ''; pintarRecortes(); return; }
+  r = buscar('data-rec-mat-ok');
+  if (r) {
+    const box = e.target.closest('[data-rec-ed]'), q = (n) => box.querySelector(`[data-ed="${n}"]`), m = leerMaterial(q('material'), q('color'), q('espesor'));
+    if (m.error) { q('error').textContent = m.error; return; }
+    REC.edit = '';
+    editarRecorte(r, { material: (m.mat && m.mat.material) || '', color: (m.mat && m.mat.color) || '', color_hex: '', espesor: (m.mat && m.mat.espesor) || '' });
+  }
+});
+// Material de este corte (sin lote) y, para Gaspar, de quién son los recortes que mira.
+$('rec-mat').addEventListener('change', (e) => {
+  if (e.target.id !== 'rec-mat-sel') return;
+  const antes = S.recortes.filter((r) => usaRecorte(r, matDelCorte())).map((r) => r.id).join();
+  S.recMatSel = (S.recCombos && S.recCombos.get(e.target.value)) || null; guardarMatSel(); pintarRecortes();
+  if ((S.mejor || S.corriendo) && S.recortes.filter((r) => usaRecorte(r, matDelCorte())).map((r) => r.id).join() !== antes) invalidarResultado('Cambiaron los recortes: volvé a acomodar.');
+});
+$('rec-quien').addEventListener('change', async (e) => {
+  if (e.target.id !== 'rec-de' || REC.modo !== 'servidor') return;
+  const antes = REC.de; REC.de = e.target.value; REC.edit = '';
+  try { ponerRecortes((await recApi('')).recortes); $('rec-nota').textContent = ''; }
+  catch (err) { REC.de = antes; pintarRecortes(); $('rec-nota').textContent = err.message; }
 });
 $('c-enteras').addEventListener('change', () => { cfgDelForm(); if (S.mejor || S.corriendo) invalidarResultado('Cambió la configuración: volvé a acomodar.'); });
 let anchoPrevio = window.innerWidth;

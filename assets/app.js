@@ -9356,6 +9356,7 @@ function renderSfCortes() {
       ${isSinFronteraOnly() ? `<span>· Estás como <b>${escapeHtml(op || 'sin nombre')}</b> <button type="button" class="logi-link" data-sf-op>${op ? 'cambiar' : 'poner nombre'}</button></span>` : ''}
       <span style="flex:1"></span>
       <button class="btn btn-ghost" data-sfc-refresh>Actualizar</button>
+      ${gestiona ? '<a class="btn btn-ghost" href="nesting/" target="_blank" rel="noopener" style="text-decoration:none" title="Abre el nesting con tu usuario: tus recortes del taller, por material">🧩 Nesting</a>' : ''}
       ${adm ? '<button class="btn btn-ghost" data-sfc-fran title="El usuario de Fran, que hace estos cortes, y su WhatsApp para los avisos">Usuario de Fran</button>' : ''}
     </div>
     ${STATE.sfcEditId ? sfcEditarHtml() : gestiona ? sfcCargarHtml() : sfcFormHtml()}
