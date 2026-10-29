@@ -21788,8 +21788,10 @@ function franRutaOk(request, path, url) {
 // localStorage de cada compu; ahora cada usuario (Gaspar y Fran) tiene los suyos en D1, con material, color y espesor. El
 // nesting (misma página estática, mismo origen que el CRM) usa el token de la sesión del CRM. Gaspar además puede ver y
 // acomodar los de otro (?de=); Fran, solo los suyos. Borrado lógico (borrado_at).
-const NEST_REC_MAX = 300;           // recortes vivos por usuario
-const NEST_REC_MAX_JSON = 600000;   // bytes de los contornos de un recorte
+const NEST_REC_MAX = 300;               // recortes vivos por usuario
+const NEST_REC_MAX_JSON = 300000;       // bytes de los contornos de un recorte (uno dibujado tiene unos pocos miles de puntos)
+const NEST_REC_MAX_PUNTOS = 15000;
+const NEST_REC_MAX_BYTES = 15000000;    // contornos de todas las filas de un usuario, vivas y borradas (techo de la tabla y del GET)
 const NEST_REC_MATERIALES = ['acrilico', 'pvc', 'mdf', 'policarbonato', 'alto_impacto'];
 const NEST_REC_ORIGENES = ['medidas', 'archivo', 'sobrante'];
 let _nestRecSchemaOk = false;
@@ -21807,7 +21809,7 @@ function nestRecRings(v) {
   const out = [];
   for (const r of v) {
     if (!Array.isArray(r) || r.length < 3) return null;
-    n += r.length; if (n > 40000) return null;
+    n += r.length; if (n > NEST_REC_MAX_PUNTOS) return null;
     const q = [];
     for (const p of r) {
       if (!Array.isArray(p) || p.length !== 2) return null;
@@ -21871,6 +21873,12 @@ async function nestingRecortesRoute(request, env, url, path, session) {
     const nombre = String(body.nombre || '').replace(/\s+/g, ' ').trim().slice(0, 120) || 'Recorte';
     const vivos = await env.DB.prepare('SELECT COUNT(*) AS n FROM nesting_recortes WHERE dueno = ? AND borrado_at IS NULL').bind(de).first();
     if (vivos && vivos.n >= NEST_REC_MAX) return json({ error: `Ya hay ${NEST_REC_MAX} recortes guardados: borrá los que ya no están en el taller.` }, 409);
+    // Techo de bytes por usuario, contando los borrados (que si no crecerían sin límite): si se pasa, primero se van los borrados.
+    const bytes = async () => +(((await env.DB.prepare('SELECT SUM(LENGTH(rings)) AS b FROM nesting_recortes WHERE dueno = ?').bind(de).first()) || {}).b || 0);
+    if ((await bytes()) + ringsTxt.length > NEST_REC_MAX_BYTES) {
+      await env.DB.prepare('DELETE FROM nesting_recortes WHERE dueno = ? AND borrado_at IS NOT NULL').bind(de).run();
+      if ((await bytes()) + ringsTxt.length > NEST_REC_MAX_BYTES) return json({ error: 'Se llenó el lugar para recortes: borrá los que ya no están en el taller.' }, 409);
+    }
     const r = await env.DB.prepare('INSERT INTO nesting_recortes (dueno, id, nombre, material, color, color_hex, espesor, rings, largo, ancho, area, origen, usar, creado_at, creado_por) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(dueno, id) DO NOTHING')
       .bind(de, id, nombre, m.material, m.color, m.color_hex, m.espesor, ringsTxt, Math.round(g.largo * 100) / 100, Math.round(g.ancho * 100) / 100, area, origen, body.usar ? 1 : 0, ahora, quien).run();
     const fila = await env.DB.prepare('SELECT * FROM nesting_recortes WHERE dueno = ? AND id = ?').bind(de, id).first();
@@ -21894,6 +21902,13 @@ async function nestingRecortesRoute(request, env, url, path, session) {
   // POST /admin/nesting/recortes/borrar {id} → borrado lógico; /restaurar {id} lo vuelve a poner (el "Deshacer").
   if (path === '/admin/nesting/recortes/borrar' || path === '/admin/nesting/recortes/restaurar') {
     const borrar = path.endsWith('/borrar');
+    if (!borrar) {
+      const vivos = await env.DB.prepare('SELECT COUNT(*) AS n FROM nesting_recortes WHERE dueno = ? AND borrado_at IS NULL').bind(de).first();
+      if (vivos && vivos.n >= NEST_REC_MAX) return json({ error: `Ya hay ${NEST_REC_MAX} recortes guardados.` }, 409);
+    } else {
+      // Los borrados hace más de 30 días se van del todo (el "deshacer" es para el momento).
+      try { await env.DB.prepare('DELETE FROM nesting_recortes WHERE dueno = ? AND borrado_at IS NOT NULL AND borrado_at < ?').bind(de, new Date(Date.now() - 30 * 864e5).toISOString()).run(); } catch (_) {}
+    }
     const r = await env.DB.prepare(borrar ? 'UPDATE nesting_recortes SET borrado_at = ?, borrado_por = ? WHERE dueno = ? AND id = ? AND borrado_at IS NULL' : 'UPDATE nesting_recortes SET borrado_at = NULL, borrado_por = NULL, editado_at = ?, editado_por = ? WHERE dueno = ? AND id = ? AND borrado_at IS NOT NULL')
       .bind(ahora, quien, de, id).run();
     if (!(r && r.meta && r.meta.changes)) return json({ error: 'Ese recorte ya no está.' }, 404);

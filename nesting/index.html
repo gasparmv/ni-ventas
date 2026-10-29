@@ -94,6 +94,8 @@
   .rec-quien a { color: var(--acento); }
   .rec-quien.err { color: var(--aviso); }
   .rec-quien select { margin-left: 4px; }
+  .rec-pasar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 0 0; padding: 8px 12px; border-left: 3px solid var(--aviso); border-radius: 0 8px 8px 0; background: color-mix(in srgb, var(--aviso) 10%, transparent); font-size: 13px; }
+  .rec-pasar[hidden] { display: none !important; }
   .rec-mat { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 0 0; font-size: 13.5px; }
   .rec-mat select { min-width: 220px; }
   .rec-grupo { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; margin: 14px 0 0; font-size: 13px; font-weight: 700; }
@@ -223,6 +225,7 @@
       <h3>Recortes del taller</h3>
       <p class="rec-quien" id="rec-quien"></p>
       <p class="sutil" style="margin:4px 0 0">Se llenan primero los recortes tildados del material de este corte, del más grande al más chico.</p>
+      <div class="rec-pasar" id="rec-pasar" hidden></div>
       <div class="rec-mat" id="rec-mat"></div>
       <datalist id="colores-rec"></datalist>
       <div id="lista-recortes"></div>
@@ -1745,40 +1748,61 @@ function cargarMatSel() { try { const v = JSON.parse(localStorage.getItem('nesti
 function guardarMatSel() { try { localStorage.setItem('nesting_rec_mat', JSON.stringify(S.recMatSel || null)); } catch (_) {} }
 const usaRecorte = (r, sel) => !!r.usar && (!sel || recMatKey(r) === recMatKey(sel));
 // Material que dice el nombre de un recorte viejo: el lote del CRM en un sobrante ("Sobrante de … (acrilico-blanco-opalino-4mm,
-// 29/10)") o escrito a mano ("acrílico 3 mm, estante de arriba"). null si no dice el material y el espesor.
+// 29/10)") o escrito a mano ("acrílico 3 mm, estante de arriba"). El espesor es un "N mm" de hasta 50 que no sea parte de una
+// medida ("1200 x 600 mm"); si no hay, va sin espesor. null si no dice el material.
 function materialDeNombre(nom) {
   const t = sinAcentos(nom).replace(/(\d),(\d)/g, '$1.$2');
-  let m = t.match(/\b(acrilico|pvc|mdf|policarbonato|alto-impacto)-([a-z0-9-]*?)-?(\d+(?:\.\d+)?)mm\b/);
-  if (m) return { material: m[1].replace('-', '_'), color: m[2].replace(/-+/g, ' ').trim(), espesor: String(parseFloat(m[3])) };
-  const mat = MATERIALES_REC.find(([k]) => t.includes(k.replace('_', ' '))), e = t.match(/(\d+(?:\.\d+)?)\s*mm\b/);
-  if (!mat || !e) return null;
+  const esp = (v) => { const e = Math.round(parseFloat(v) * 100) / 100; return e > 0 && e <= 50 ? String(e) : ''; };
+  const m = t.match(/\b(acrilico|pvc|mdf|policarbonato|alto-impacto)-([a-z0-9-]*?)-?(\d+(?:\.\d+)?)mm\b/);
+  if (m) return { material: m[1].replace('-', '_'), color: m[2].replace(/-+/g, ' ').trim(), espesor: esp(m[3]) };
+  const mat = MATERIALES_REC.find(([k]) => t.includes(k.replace('_', ' ')));
+  if (!mat) return null;
+  let e = '';
+  for (const x of t.matchAll(/(\d+(?:\.\d+)?)\s*mm\b/g)) {
+    if (/x\s*$/.test(t.slice(0, x.index)) || /^\s*x/.test(t.slice(x.index + x[0].length))) continue;
+    e = esp(x[1]); if (e) break;
+  }
   const col = ['blanco opalino', 'opalino', 'transparente', 'cristal', 'negro', 'blanco'].find((c) => t.includes(c)) || '';
-  return { material: mat[0], color: col === 'opalino' ? 'blanco opalino' : col === 'cristal' ? 'transparente' : col, espesor: String(parseFloat(e[1])) };
+  return { material: mat[0], color: col === 'opalino' ? 'blanco opalino' : col === 'cristal' ? 'transparente' : col, espesor: e };
 }
-// API de recortes del worker con el token de la sesión del CRM. Gaspar mirando los de otro: van con {de}.
-async function recApi(ruta, body) {
-  const de = REC.de && REC.de !== REC.yo ? REC.de : '';
+// API de recortes del worker con el token de la sesión del CRM. Gaspar mirando los de otro: van con {de} (o el dueño que se
+// pase). Con un 401 (cerró sesión y volvió a entrar en el CRM) prueba una vez con el token nuevo, si es del mismo usuario.
+async function recApi(ruta, body, dueno, reintento) {
+  const de = dueno || (REC.de && REC.de !== REC.yo ? REC.de : '');
   const op = body ? { method: 'POST', headers: { Authorization: 'Bearer ' + REC.tok, 'Content-Type': 'application/json' }, body: JSON.stringify(de ? { ...body, de } : body) } : { headers: { Authorization: 'Bearer ' + REC.tok } };
   let r = null, d = null;
   try { r = await fetch(API_CRM + '/admin/nesting/recortes' + ruta + (!body && de ? '?de=' + encodeURIComponent(de) : ''), op); } catch (_) {}
   if (!r) { const e = new Error('No se pudo conectar con el CRM. Revisá internet y probá de nuevo.'); e.status = 0; throw e; }
+  if (r.status === 401 && !reintento && REC.yo) {
+    const viejo = REC.tok;
+    for (const t of tokensCrm()) {
+      if (t === viejo) continue;
+      REC.tok = t;
+      try { if ((await recApi('', null, '', true)).yo === REC.yo) return await recApi(ruta, body, dueno, true); } catch (_) {}
+    }
+    REC.tok = viejo;
+  }
   try { d = await r.json(); } catch (_) {}
   if (!r.ok || !d || d.error) {
-    const e = new Error(r.status === 401 ? 'Tu sesión del CRM venció: entrá de nuevo al CRM y recargá esta página.' : r.status === 403 ? 'Tu usuario no puede guardar recortes.' : (d && (d.motivo || d.error)) || 'No se pudo guardar. Probá de nuevo.');
+    const e = new Error(r.status === 401 ? 'Tu sesión del CRM venció: entrá de nuevo al CRM.' : r.status === 403 ? 'Tu usuario no puede guardar recortes.' : (d && (d.motivo || d.error)) || 'No se pudo guardar. Probá de nuevo.');
     e.status = r.status; throw e;
   }
   return d;
 }
+const fallaDeRed = (e) => e.status === 0 || e.status === 401 || e.status >= 500;
 // Tokens de la sesión del CRM en esta compu: el de Gaspar (adminToken, aunque esté mirando como otro) y el del usuario activo.
 function tokensCrm() {
   const g = (k) => { try { return localStorage.getItem(k) || ''; } catch (_) { return ''; } };
   return [g('niventas.adminToken'), g('niventas.token')].filter((t, i, a) => t && a.indexOf(t) === i);
 }
+// Los que quedaron en esta compu para pasar al usuario (nesting_recortes): fn recibe la lista y devuelve la nueva.
+function pendientesLocales(fn) { try { localStorage.setItem('nesting_recortes', JSON.stringify(fn(cargarRecortes()))); } catch (_) {} }
+const idsUsados = () => S.recortes.filter((r) => usaRecorte(r, matDelCorte())).map((r) => r.id).sort().join();
 function ponerRecortes(lista) {
-  const antes = S.recortes.filter((r) => r.usar).map((r) => r.id).sort().join();
+  const antes = idsUsados();
   S.recortes = (lista || []).filter((r) => r && Array.isArray(r.rings) && r.rings.length);
   pintarRecortes();
-  if ((S.mejor || S.corriendo) && S.recortes.filter((r) => r.usar).map((r) => r.id).sort().join() !== antes) invalidarResultado('Cambiaron los recortes: volvé a acomodar.');
+  if ((S.mejor || S.corriendo) && idsUsados() !== antes) invalidarResultado('Cambiaron los recortes: volvé a acomodar.');
 }
 async function iniciarRecortes() {
   const toks = tokensCrm();
@@ -1793,33 +1817,50 @@ async function iniciarRecortes() {
     pintarRecortes(); return;
   }
   REC.modo = 'servidor'; REC.yo = d.yo; REC.de = d.de; REC.admin = !!d.admin; REC.duenos = d.duenos || [];
-  const locales = cargarRecortes();
-  if (locales.length) await subirLocales(locales);
-  else ponerRecortes(d.recortes);
+  ponerRecortes(d.recortes);
+  ofrecerPasarLocales();
 }
-// Los que estaban guardados en esta compu pasan al usuario (con su mismo id: si ya se habían subido, no se duplican).
-async function subirLocales(locales) {
-  $('rec-nota').textContent = `Pasando a tu usuario ${plural(locales.length, 'recorte que estaba guardado', 'recortes que estaban guardados')} en esta compu…`;
-  const quedan = [];
-  let subidos = 0, sinMat = 0;
+// Los que estaban guardados en esta compu (sin usuario): se pregunta a quién pasarlos (en una compu compartida pueden ser de
+// otro). Gaspar elige si van a los suyos o a los de Fran.
+function ofrecerPasarLocales() {
+  const locales = cargarRecortes(), el = $('rec-pasar');
+  el.hidden = !locales.length;
+  if (!locales.length) return;
+  const nombres = locales.slice(0, 4).map((r) => '"' + r.nombre + '"').join(', ') + (locales.length > 4 ? '…' : '');
+  const destinos = REC.admin ? [[REC.yo, 'A mis recortes'], ['fran', 'A los de Fran']] : [[REC.yo, 'Pasarlos a mis recortes']];
+  el.innerHTML = `<span>En esta compu hay ${plural(locales.length, 'recorte guardado', 'recortes guardados')} sin usuario (${esc(nombres)}). ¿${verbo(locales.length, 'Es tuyo', 'Son tuyos')}?</span>`
+    + destinos.map(([k, t]) => `<button class="chico primario" data-pasar="${esc(k)}">${esc(t)}</button>`).join('') + '<button class="chico" data-pasar-no>Ahora no</button>';
+}
+// Los pasa al usuario (con su mismo id: si ya se habían pasado, no se duplican), con el material que diga su nombre.
+async function subirLocales(dueno) {
+  const locales = cargarRecortes(), el = $('rec-pasar');
+  el.innerHTML = `<span>Pasando ${plural(locales.length, 'recorte', 'recortes')}…</span>`;
+  const quedan = [], subidos = [];
+  let sinMat = 0, noPasaron = 0;
+  const deArg = dueno !== REC.yo ? dueno : '';
   for (const r of locales) {
     const m = r.material ? r : materialDeNombre(r.nombre);
-    try {
-      await recApi('/guardar', { id: r.id, nombre: r.nombre, rings: r.rings, area: r.area, origen: r.origen, usar: !!r.usar, material: (m && m.material) || '', color: (m && m.color) || '', color_hex: (m && m.color_hex) || '', espesor: (m && m.espesor) || '' });
-      subidos++; if (!m) sinMat++;
-    } catch (e) { if (e.status === 0 || e.status >= 500 || e.status === 401) quedan.push(r); } // el resto (contorno que no sirve, tope) no se reintenta
+    const base = { id: r.id, nombre: r.nombre, rings: r.rings, area: r.area, origen: r.origen, usar: !!r.usar };
+    const conMat = { ...base, material: (m && m.material) || '', color: (m && m.color) || '', color_hex: (m && m.color_hex) || '', espesor: (m && m.espesor) || '' };
+    try { subidos.push((await recApi('/guardar', conMat, deArg)).recorte); if (!m || !m.espesor) sinMat++; }
+    catch (e) {
+      if (fallaDeRed(e)) { quedan.push(r); continue; }
+      // Un material que el CRM no acepta: va sin material. Lo que igual no entra (contorno raro, tope) queda en el respaldo.
+      try { subidos.push((await recApi('/guardar', base, deArg)).recorte); sinMat++; } catch (e2) { if (fallaDeRed(e2)) quedan.push(r); else noPasaron++; }
+    }
   }
+  try { localStorage.setItem('nesting_recortes', JSON.stringify(quedan)); } catch (_) {}
   try {
     const resp = JSON.parse(localStorage.getItem('nesting_recortes_respaldo') || '[]'), ids = new Set(resp.map((r) => r.id));
     localStorage.setItem('nesting_recortes_respaldo', JSON.stringify(resp.concat(locales.filter((r) => !ids.has(r.id)))));
-    localStorage.setItem('nesting_recortes', JSON.stringify(quedan));
   } catch (_) {}
-  let d = null;
-  try { d = await recApi(''); } catch (_) {}
-  ponerRecortes(d ? d.recortes : []);
-  $('rec-nota').textContent = (subidos ? `Pasé a tu usuario ${plural(subidos, 'recorte que estaba guardado', 'recortes que estaban guardados')} en esta compu.` : '')
-    + (sinMat ? ` ${plural(sinMat, 'no dice', 'no dicen')} de qué material es: elegíselo con "Material".` : '')
-    + (quedan.length ? ` ${plural(quedan.length, 'quedó', 'quedaron')} en esta compu por un error: se ${verbo(quedan.length, 'pasa solo', 'pasan solos')} la próxima vez.` : '');
+  el.hidden = true; el.innerHTML = '';
+  if (dueno === REC.de) { const ya = new Set(S.recortes.map((r) => r.id)); ponerRecortes(S.recortes.concat(subidos.filter((r) => r && !ya.has(r.id)))); }
+  else { const x = REC.duenos.find((y) => y.dueno === dueno); if (x) x.n += subidos.length; else REC.duenos.push({ dueno, n: subidos.length }); pintarRecortes(); }
+  $('rec-nota').textContent = (subidos.length ? `Pasé ${plural(subidos.length, 'recorte', 'recortes')} de esta compu a ${dueno === REC.yo ? 'tus recortes' : 'los de ' + nomUsuario(dueno)}.` : '')
+    + (sinMat ? ` ${plural(sinMat, 'no dice', 'no dicen')} bien de qué material es: elegíselo con "Material".` : '')
+    + (quedan.length ? ` ${plural(quedan.length, 'quedó', 'quedaron')} en esta compu por un error de conexión: se vuelve a ofrecer la próxima vez.` : '')
+    + (noPasaron ? ` ${plural(noPasaron, 'no se pudo pasar', 'no se pudieron pasar')} (el contorno es demasiado grande o raro): cargalo de nuevo.` : '');
 }
 const idNuevo = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 const hoyCorto = () => new Date().toLocaleDateString('es-AR', { day: 'numeric', month: 'numeric' });
@@ -1891,7 +1932,11 @@ async function agregarRecorte(rec) {
   S.recortes.push(rec); pintarRecortes();
   if (REC.modo === 'servidor') {
     try { const d = await recApi('/guardar', rec); const i = S.recortes.indexOf(rec); if (i >= 0) S.recortes[i] = d.recorte; pintarRecortes(); }
-    catch (e) { S.recortes = S.recortes.filter((x) => x !== rec); pintarRecortes(); $('rec-nota').textContent = 'No se guardó el recorte: ' + e.message; return false; }
+    catch (e) {
+      if (!fallaDeRed(e)) { S.recortes = S.recortes.filter((x) => x !== rec); pintarRecortes(); $('rec-nota').textContent = 'No se guardó el recorte: ' + e.message; return false; }
+      rec._local = true; pendientesLocales((v) => v.concat([{ ...rec }]));
+      $('rec-nota').textContent = 'No se pudo guardar en tu usuario (' + e.message + '): quedó en esta compu y la próxima vez que abras el nesting te ofrece pasarlo.';
+    }
   } else guardarRecortes();
   if (usaRecorte(rec, matDelCorte()) && (S.mejor || S.corriendo)) invalidarResultado('Cambiaron los recortes: volvé a acomodar.');
   return true;
@@ -1900,7 +1945,8 @@ async function agregarRecorte(rec) {
 async function editarRecorte(r, cambios) {
   const sel = matDelCorte(), antes = { ...r }, usabaAntes = usaRecorte(r, sel);
   Object.assign(r, cambios); pintarRecortes();
-  if (REC.modo === 'servidor') {
+  if (r._local) pendientesLocales((v) => v.map((x) => (x.id === r.id ? { ...x, ...cambios } : x)));
+  else if (REC.modo === 'servidor') {
     try { const d = await recApi('/editar', { id: r.id, ...cambios }); Object.assign(r, d.recorte); }
     catch (e) { Object.assign(r, antes); $('rec-nota').textContent = 'No se guardó el cambio: ' + e.message; }
     pintarRecortes();
@@ -1908,7 +1954,8 @@ async function editarRecorte(r, cambios) {
   if (usaRecorte(r, sel) !== usabaAntes && (S.mejor || S.corriendo)) invalidarResultado('Cambiaron los recortes: volvé a acomodar.');
 }
 async function borrarRecorte(r) {
-  if (REC.modo === 'servidor') {
+  if (r._local) pendientesLocales((v) => v.filter((x) => x.id !== r.id));
+  else if (REC.modo === 'servidor') {
     try { await recApi('/borrar', { id: r.id }); } catch (e) { $('rec-nota').textContent = 'No se borró: ' + e.message; return; }
   }
   S.recortes = S.recortes.filter((x) => x !== r); guardarRecortes(); pintarRecortes();
@@ -2340,8 +2387,11 @@ $('r-cancelar').addEventListener('click', () => { $('form-rec').hidden = true; }
 $('r-guardar').addEventListener('click', () => {
   const f = leerFormRecorte();
   if (f.error) { $('r-error').textContent = f.error; return; }
-  $('form-rec').hidden = true; $('rec-nota').textContent = '';
-  agregarRecorte({ id: idNuevo(), nombre: f.nombre || `Recorte ${S.recortes.length + 1}`, ...normalizarRings([f.ring]), origen: 'medidas', usar: true, mat: f.mat });
+  const b = $('r-guardar'); b.disabled = true; $('rec-nota').textContent = '';
+  agregarRecorte({ id: idNuevo(), nombre: f.nombre || `Recorte ${S.recortes.length + 1}`, ...normalizarRings([f.ring]), origen: 'medidas', usar: true, mat: f.mat }).then((ok) => {
+    b.disabled = false;
+    if (ok) $('form-rec').hidden = true; else $('r-error').textContent = $('rec-nota').textContent;
+  });
 });
 $('b-rec-archivo').addEventListener('click', () => $('inp-rec').click());
 $('inp-rec').addEventListener('change', async () => {
@@ -2377,6 +2427,11 @@ $('rec-mat').addEventListener('change', (e) => {
   const antes = S.recortes.filter((r) => usaRecorte(r, matDelCorte())).map((r) => r.id).join();
   S.recMatSel = (S.recCombos && S.recCombos.get(e.target.value)) || null; guardarMatSel(); pintarRecortes();
   if ((S.mejor || S.corriendo) && S.recortes.filter((r) => usaRecorte(r, matDelCorte())).map((r) => r.id).join() !== antes) invalidarResultado('Cambiaron los recortes: volvé a acomodar.');
+});
+$('rec-pasar').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-pasar]');
+  if (b) { subirLocales(b.getAttribute('data-pasar')); return; }
+  if (e.target.closest('[data-pasar-no]')) { $('rec-pasar').hidden = true; $('rec-nota').textContent = 'Los recortes de esta compu quedan sin pasar: se vuelve a preguntar la próxima vez.'; }
 });
 $('rec-quien').addEventListener('change', async (e) => {
   if (e.target.id !== 'rec-de' || REC.modo !== 'servidor') return;
