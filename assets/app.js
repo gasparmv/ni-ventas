@@ -17360,7 +17360,7 @@ function renderContactoCell(p, withFup) {
 // mano (saliente, lightbox, otro), una imagen por ítem, condiciones por trabajo. Se guarda en D1 (tabla proformas,
 // número único) y el PDF lo arma la impresión del navegador en una ventana nueva ("Guardar como PDF"), con el mismo
 // diseño que el generador local. Beta: solo admin. El estado vive en STATE.pf y cada input escribe ahí al tipear
-// (sin re-render) → sobrevive a los render() de fondo (polls de 75 s).
+// (sin re-render) → sobrevive a los render() de fondo (polls de 75 s). Desde el 29-oct se guarda sola (pfTick).
 const PF_EMPRESA = { nombre: 'Neon Infinito', bajada: 'Carteles de neón LED y corpóreos', whatsapp: '+54 9 11 4436-6573', instagram: '@neon.infinito' };
 const PF_TIPOS = {
   neon: { label: 'Neón', titulo: 'Cartel de neón LED', chip: 'Interior', detalle: '**Medida:** ancho × alto cm, con N m de neón LED flexible.\nMontado sobre base de acrílico transparente con corte al contorno.' },
@@ -17501,70 +17501,185 @@ async function pfImportarBrief(id) {
 }
 
 // ---- Abrir / cerrar / guardar / recientes ----
+// Autoguardado (Gaspar 29-oct: "hacé que las proformas se guarden, creé varias que no quedaron guardadas"): antes solo se
+// guardaba con 💾 o con "Generar PDF", y lo que se cerraba o se recargaba (el aviso de "versión nueva") sin eso se perdía.
+// Ahora pfTick mira cada 1,5 s si cambió algo y, cuando se deja de tipear, la guarda sola (con cliente y al menos un ítem).
+// Mientras no esté guardada queda una copia en este navegador (pfLsKey) que vuelve al abrir el editor aunque se haya
+// recargado la página o vencido la sesión. Los guardados van de a uno (pf._enVuelo): una nueva nunca se inserta dos veces.
+let _pfTimer = null;
+function pfSnap(d) { return JSON.stringify(d, (k, v) => (k === '_subiendo' ? undefined : v)); }
+function pfFalta(d) {
+  if (!String(d.cliente || '').trim()) return 'Poné el nombre del cliente';
+  if (!(d.items || []).length) return 'Agregá al menos un ítem';
+  if (d.items.some(x => x._subiendo)) return 'Esperá que termine de subir la imagen';
+  return '';
+}
+function pfNormalizar(data) {
+  const d = Object.assign(pfNuevo(), data);
+  d.items = (Array.isArray(d.items) ? d.items : []).map(x => Object.assign(pfItemNuevo(x.tipo), x, { uid: x.uid || pfUid() }));
+  return d;
+}
+// Pone una proforma en el editor. guardada=true: así como está ya es la del servidor (o una en blanco); false: falta guardarla.
+function pfCargar(data, id, numero, guardada) {
+  const pf = STATE.pf;
+  Object.assign(pf, { data, id: id || null, numero: numero || null, q: '', _error: '', _errHasta: 0, _sucioDesde: 0 });
+  pf._saved = guardada ? pfSnap(data) : '';
+}
+function pfLsKey() { return 'ni_pf_borrador:' + String(STATE.user || '').toLowerCase(); }
+function pfEstado() {
+  const pf = STATE.pf;
+  if (pf.saving) return { t: 'Guardando…', c: 'var(--fg-subtle)' };
+  if (pfSnap(pf.data) === pf._saved) return pf.id ? { t: '✓ Guardada', c: '#3ddc84' } : { t: '', c: '' };
+  const falta = pfFalta(pf.data);
+  if (falta) return { t: 'Sin guardar · ' + falta, c: '#f5b14c' };
+  if (pf._error) return { t: '⚠ No se pudo guardar (' + pf._error + '). Reintenta sola', c: '#f5b14c' };
+  return { t: 'Sin guardar…', c: 'var(--fg-subtle)' };
+}
+function pfPintarEstado() {
+  const pf = STATE.pf, el = document.getElementById('pf-estado'); if (!pf || !el) return;
+  const e = pfEstado(); if (el.textContent !== e.t) { el.textContent = e.t; el.style.color = e.c; }
+  const n = document.getElementById('pf-nro'), nt = 'N° ' + pfNumeroTxt(pf.numero, pf.data.fecha);
+  if (n && n.textContent !== nt) n.textContent = nt;
+}
+function pfTick() {
+  const pf = STATE.pf; if (!pf || !pf.data) return;
+  const snap = pfSnap(pf.data), sucio = snap !== pf._saved;
+  // La copia local existe solo mientras haya algo sin guardar (al guardar se borra).
+  const ls = sucio ? snap : '';
+  if (ls !== pf._ls) {
+    try { if (ls) localStorage.setItem(pfLsKey(), JSON.stringify({ id: pf.id, numero: pf.numero, data: JSON.parse(ls), at: Date.now() })); else localStorage.removeItem(pfLsKey()); pf._ls = ls; } catch (_) {}
+  }
+  if (!sucio) pf._sucioDesde = 0; else if (!pf._sucioDesde) pf._sucioDesde = Date.now();
+  // Guarda cuando dejó de tipear (nada cambió desde el tick anterior) o si lleva 15 s sin guardar; tras un error, a los 20 s.
+  if (sucio && !pf.saving && !pfFalta(pf.data) && Date.now() >= (pf._errHasta || 0) && (snap === pf._tickSnap || Date.now() - pf._sucioDesde > 15000)) pfGuardar('auto');
+  pf._tickSnap = snap;
+  pfPintarEstado();
+}
 function openProforma() {
-  if (!STATE.pf) STATE.pf = { data: pfNuevo(), id: null, numero: null, q: '', briefs: null, lista: null };
-  STATE.pf.open = true; STATE.pf.saving = false;
+  if (!STATE.pf) {
+    STATE.pf = { data: null, id: null, numero: null, q: '', briefs: null, lista: null };
+    pfCargar(pfNuevo(), null, null, true);
+    // Lo que quedó sin guardar en este navegador (se recargó la página, se cerró la sesión…) vuelve solo y se guarda.
+    let b = null; try { b = JSON.parse(localStorage.getItem(pfLsKey()) || 'null'); } catch (_) {}
+    if (b && b.data && typeof b.data === 'object') {
+      pfCargar(pfNormalizar(b.data), b.id, b.numero, false);
+      toast('Recuperé la proforma que no se había guardado' + (b.data.cliente ? ' (' + b.data.cliente + ')' : ''));
+    }
+  } else if (STATE.pf.id && pfSnap(STATE.pf.data) === STATE.pf._saved) {
+    // La anterior ya está guardada: arranca una en blanco (antes volvía a aparecer y, si se escribía otra encima, se pisaba).
+    pfCargar(pfNuevo(), null, null, true);
+  }
+  STATE.pf.open = true;
+  if (!_pfTimer) _pfTimer = setInterval(pfTick, 1500);
   render();
   pfEnsureBriefs().then(() => { if (STATE.pf && STATE.pf.open && STATE.pf.q) render(); });
   pfCargarLista();
 }
-function closeProforma() { if (STATE.pf) STATE.pf.open = false; render(); }
-function pfNueva() {
-  if (!STATE.pf) return;
-  STATE.pf.data = pfNuevo(); STATE.pf.id = null; STATE.pf.numero = null; STATE.pf.q = '';
+function closeProforma() {
+  const pf = STATE.pf; if (pf) pf.open = false;
   render();
+  if (pf && pfSnap(pf.data) !== pf._saved && !pfFalta(pf.data)) pfGuardar('auto'); // lo pendiente se guarda ya (si falla, sigue el tick)
+}
+// Antes de pasar a otra (Nueva / Abrir / Duplicar) se guarda lo pendiente; si no se puede, se pregunta antes de tirarlo.
+async function pfAntesDeCambiar() {
+  const pf = STATE.pf; if (!pf) return true;
+  if (pfSnap(pf.data) === pf._saved) return true;
+  if (await pfGuardar('auto')) return true;
+  const falta = pfFalta(pf.data);
+  return confirm('Esta proforma no se pudo guardar' + (falta ? ' (' + falta.toLowerCase() + ')' : (pf._error ? ' (' + pf._error + ')' : '')) + '. ¿Seguís igual? Lo que no se guardó se pierde.');
+}
+async function pfNueva() {
+  if (!STATE.pf || !(await pfAntesDeCambiar())) return;
+  pfCargar(pfNuevo(), null, null, true);
+  render();
+}
+// Duplicar: la misma proforma como una NUEVA (otro N°, fecha de hoy) para usarla de base sin pisar la original.
+// Se guarda recién cuando se le cambia algo (o con 💾 / PDF).
+async function pfDuplicar() {
+  const pf = STATE.pf; if (!pf || !(await pfAntesDeCambiar())) return;
+  const copia = pfNormalizar(JSON.parse(pfSnap(pf.data)));
+  copia.fecha = pfHoyISO();
+  copia.items.forEach(x => { x.uid = pfUid(); });
+  pfCargar(copia, null, null, true);
+  toast('Copia lista: es una proforma nueva, la original queda como estaba');
+  render();
+}
+function pfOpcionesRecientes() {
+  const pf = STATE.pf;
+  return '<option value="">Abrir una guardada…</option>' + (pf.lista || []).map(x => `<option value="${x.id}" ${pf.id === x.id ? 'selected' : ''}>${escapeHtml(pfNumeroTxt(x.numero, x.created_at))} · ${escapeHtml(x.cliente || '')} · ${pfPesos(x.total)}</option>`).join('');
 }
 async function pfCargarLista() {
   try {
     const r = await fetch(CONFIG.trackerUrl + '/admin/proformas', { headers: authHeaders() });
     const j = await r.json().catch(() => ({}));
-    if (STATE.pf && Array.isArray(j.proformas)) { STATE.pf.lista = j.proformas; if (STATE.pf.open) render(); }
+    if (STATE.pf && Array.isArray(j.proformas)) {
+      STATE.pf.lista = j.proformas;
+      // Solo el desplegable (sin render: el autoguardado no le mueve el cursor a quien está escribiendo).
+      const sel = document.getElementById('pf-abrir');
+      if (sel && document.activeElement !== sel) sel.innerHTML = pfOpcionesRecientes();
+    }
   } catch (_) {}
 }
 async function pfAbrir(id) {
+  if (!STATE.pf) return;
+  if (!(await pfAntesDeCambiar())) { render(); return; }
   try {
     const r = await fetch(CONFIG.trackerUrl + '/admin/proformas/' + id, { headers: authHeaders() });
     const j = await r.json().catch(() => ({}));
-    if (!r.ok || !j.proforma || !j.proforma.data) { toast(j.error || 'No se pudo abrir'); return; }
-    const d = Object.assign(pfNuevo(), j.proforma.data);
-    d.items = (Array.isArray(d.items) ? d.items : []).map(x => Object.assign(pfItemNuevo(x.tipo), x, { uid: x.uid || pfUid() }));
-    STATE.pf.data = d; STATE.pf.id = j.proforma.id; STATE.pf.numero = j.proforma.numero; STATE.pf.q = '';
+    if (!r.ok || !j.proforma || !j.proforma.data) { toast(j.error || 'No se pudo abrir'); render(); return; }
+    pfCargar(pfNormalizar(j.proforma.data), j.proforma.id, j.proforma.numero, true);
+    toast('Abriste la ' + pfNumeroTxt(j.proforma.numero, STATE.pf.data.fecha) + ': lo que cambies se guarda solo (para usarla con otro cliente, tocá Duplicar)');
     render();
-  } catch (_) { toast('Error de red al abrir la proforma'); }
+  } catch (_) { toast('Error de red al abrir la proforma'); render(); }
 }
-async function pfGuardar(silencioso) {
-  const pf = STATE.pf; if (!pf || pf.saving) return false;
-  if (!String(pf.data.cliente || '').trim()) { toast('Poné el nombre del cliente'); return false; }
-  if (!pf.data.items.length) { toast('Agregá al menos un ítem'); return false; }
-  if (pf.data.items.some(x => x._subiendo)) { toast('Esperá que termine de subir la imagen'); return false; }
-  const datos = pf.data; // si mientras guarda se abre otra / "Nueva", el id/N° NO se le asigna a esa
-  pf.saving = true; render();
+// modo: 'auto' (el tick, sin avisos), 'pdf' (avisa solo si no se pudo) o nada (💾: avisa siempre).
+async function pfGuardar(modo) {
+  const pf = STATE.pf; if (!pf) return false;
+  while (pf._enVuelo) await pf._enVuelo; // de a uno
+  const falta = pfFalta(pf.data);
+  if (falta) { if (modo !== 'auto') toast(falta); pfPintarEstado(); return false; }
+  const datos = pf.data, snap = pfSnap(datos);
+  if (pf.id && snap === pf._saved) { if (!modo) toast('Proforma ' + pfNumeroTxt(pf.numero, datos.fecha) + ' guardada ✓'); return true; }
+  let listo; pf._enVuelo = new Promise(r => { listo = r; });
+  pf.saving = true; pfPintarEstado();
   try {
-    const data = JSON.parse(JSON.stringify(pf.data));
-    data.items.forEach(x => { delete x._subiendo; });
-    const r = await fetch(CONFIG.trackerUrl + '/admin/proformas', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ id: pf.id, data }) });
+    const r = await fetch(CONFIG.trackerUrl + '/admin/proformas', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ id: pf.id, data: JSON.parse(snap) }) });
     const j = await r.json().catch(() => ({}));
-    if (!r.ok || !j.ok) { toast(j.error || ('No se pudo guardar (HTTP ' + r.status + ')')); return false; }
-    if (pf.data !== datos) return false;
-    pf.id = j.id; pf.numero = j.numero;
-    if (!silencioso) toast('Proforma ' + pfNumeroTxt(pf.numero, pf.data.fecha) + ' guardada ✓');
+    if (!r.ok || !j.ok) {
+      // 404 = ese id ya no está (copia local vieja): el próximo intento la guarda como nueva.
+      if (r.status === 404 && pf.data === datos) { pf.id = null; pf.numero = null; }
+      pf._error = r.status === 401 ? 'se cerró la sesión: volvé a entrar, la copia queda en esta compu' : (j.error || 'HTTP ' + r.status);
+      pf._errHasta = r.status === 404 ? 0 : Date.now() + 20000;
+      if (modo !== 'auto') toast('No se pudo guardar: ' + pf._error);
+      return false;
+    }
+    if (pf.data !== datos) return false; // mientras guardaba se abrió otra / "Nueva": el id/N° NO se le asigna a esa
+    Object.assign(pf, { id: j.id, numero: j.numero, _saved: snap, _error: '', _errHasta: 0 });
+    if (!modo) toast('Proforma ' + pfNumeroTxt(pf.numero, pf.data.fecha) + ' guardada ✓');
     pfCargarLista();
     return true;
-  } catch (_) { toast('Error de red al guardar'); return false; }
-  finally { pf.saving = false; render(); }
+  } catch (_) {
+    pf._error = 'sin conexión'; pf._errHasta = Date.now() + 20000;
+    if (modo !== 'auto') toast('Error de red al guardar');
+    return false;
+  } finally { pf.saving = false; pf._enVuelo = null; listo(); pfPintarEstado(); }
 }
 // Generar PDF: la ventana se abre ANTES del await (si no, el navegador la bloquea como popup).
 async function pfGenerarPdf() {
-  const pf = STATE.pf; if (!pf) return;
+  const pf = STATE.pf; if (!pf || pf._pdf) return;
   const w = window.open('', '_blank');
-  if (!w) { toast('El navegador bloqueó la ventana: permití ventanas emergentes para este sitio'); return; }
-  w.document.write('<!doctype html><title>Preparando…</title><body style="font-family:system-ui;background:#0b0b10;color:#ddd;padding:40px">Preparando la proforma…</body>');
-  const ok = await pfGuardar(true);
-  if (!ok) { try { w.close(); } catch (_) {} return; }
-  w.document.open();
-  w.document.write(pfHtmlDoc(pf.data, pf.numero));
-  w.document.close();
+  if (!w) { toast('El navegador bloqueó la ventana: permití ventanas emergentes para este sitio'); pfGuardar('auto'); return; }
+  pf._pdf = true;
+  try {
+    w.document.write('<!doctype html><title>Preparando…</title><body style="font-family:system-ui;background:#0b0b10;color:#ddd;padding:40px">Preparando la proforma…</body>');
+    const ok = await pfGuardar('pdf');
+    if (!ok) { try { w.close(); } catch (_) {} return; }
+    w.document.open();
+    w.document.write(pfHtmlDoc(pf.data, pf.numero));
+    w.document.close();
+  } finally { pf._pdf = false; }
 }
+
 
 // ---- Documento para imprimir (A4, flujo continuo: muchos ítems pasan solos a otra hoja) ----
 function pfHtmlDoc(d, numero) {
@@ -17793,17 +17908,19 @@ function renderProformaModal() {
       </div>
     </div>`;
   }).join('');
-  const recientes = (pf.lista || []).map(x => `<option value="${x.id}" ${pf.id === x.id ? 'selected' : ''}>${escapeHtml(pfNumeroTxt(x.numero, x.created_at))} · ${escapeHtml(x.cliente || '')} · ${pfPesos(x.total)}</option>`).join('');
+  const est = pfEstado();
   return `
   <div id="pf-backdrop" role="dialog" aria-modal="true" style="position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:290;display:flex;align-items:flex-start;justify-content:center;padding:18px;overflow-y:auto;backdrop-filter:blur(4px)">
     <div style="background:var(--bg,#0A0A0F);border:1px solid var(--accent-cyan,#8FD4DE);border-radius:14px;max-width:920px;width:100%;margin:auto;padding:var(--s-4)">
       <style>@media(max-width:700px){.pf-g3,.pf-g2{grid-template-columns:1fr!important}.pf-span2{grid-column:auto!important}}</style>
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <h2 style="margin:0;font-size:17px">📄 Proforma <span style="font-size:10px;font-weight:700;letter-spacing:.06em;color:#0b0b10;background:#f5b14c;border-radius:6px;padding:2px 7px;vertical-align:3px">BETA</span></h2>
-        <span style="font-family:var(--font-mono);font-size:12px;color:var(--fg-subtle)">N° ${escapeHtml(pfNumeroTxt(pf.numero, d.fecha))}</span>
+        <span id="pf-nro" style="font-family:var(--font-mono);font-size:12px;color:var(--fg-subtle)">N° ${escapeHtml(pfNumeroTxt(pf.numero, d.fecha))}</span>
+        <span id="pf-estado" style="font-size:11.5px;color:${est.c}">${escapeHtml(est.t)}</span>
         <div style="margin-left:auto;display:flex;gap:6px;align-items:center;flex-wrap:wrap;max-width:100%">
-          <select data-pf-act-change="abrir" style="${inp};width:auto;flex:1 1 150px;min-width:0;max-width:260px;padding:6px 8px"><option value="">Abrir una guardada…</option>${recientes}</select>
+          <select id="pf-abrir" data-pf-act-change="abrir" style="${inp};width:auto;flex:1 1 150px;min-width:0;max-width:260px;padding:6px 8px">${pfOpcionesRecientes()}</select>
           <button type="button" class="btn btn-ghost" data-pf-act="nueva" style="font-size:12px">Nueva</button>
+          ${pf.id ? '<button type="button" class="btn btn-ghost" data-pf-act="duplicar" style="font-size:12px" title="Copiarla como una proforma nueva (otro número) para usarla de base, sin tocar esta">Duplicar</button>' : ''}
           <button type="button" class="btn btn-ghost btn-icon" data-pf-act="cerrar" title="Cerrar">✕</button>
         </div>
       </div>
@@ -17832,8 +17949,8 @@ function renderProformaModal() {
         <div style="font-size:13px;color:var(--fg-subtle)">Total <b id="pf-total" style="font-size:18px;color:var(--fg);font-family:var(--font-mono)">${pfPesos(total)}</b> + IVA</div>
         <div style="margin-left:auto;display:flex;gap:8px">
           <button type="button" class="btn btn-ghost" data-pf-act="cerrar">Cerrar</button>
-          <button type="button" class="btn btn-ghost" data-pf-act="guardar" ${pf.saving ? 'disabled' : ''}>${pf.saving ? 'Guardando…' : '💾 Guardar'}</button>
-          <button type="button" class="btn btn-cyan" data-pf-act="pdf" ${pf.saving ? 'disabled' : ''}>📄 Generar PDF</button>
+          <button type="button" class="btn btn-ghost" data-pf-act="guardar">💾 Guardar</button>
+          <button type="button" class="btn btn-cyan" data-pf-act="pdf">📄 Generar PDF</button>
         </div>
       </div>
     </div>
@@ -17903,7 +18020,7 @@ function bindProformaModal() {
       if (!it.detalle || it.detalle === prev.detalle) it.detalle = t.detalle;
       it.tipo = el.value; render(); return;
     }
-    if (el.getAttribute('data-pf-act-change') === 'abrir' && el.value) { if (pf.saving) { toast('Esperá que termine de guardar'); render(); return; } pfAbrir(parseInt(el.value, 10)); return; }
+    if (el.getAttribute('data-pf-act-change') === 'abrir' && el.value) { pfAbrir(parseInt(el.value, 10)); return; }
     if (el.hasAttribute('data-pf-file')) {
       const it = pf.data.items.find(x => x.uid === el.getAttribute('data-pf-file')); const f = el.files && el.files[0];
       if (!it || !f) return;
@@ -17919,8 +18036,8 @@ function bindProformaModal() {
     const act = b.getAttribute('data-pf-act'), uid = b.getAttribute('data-uid');
     const idx = uid ? pf.data.items.findIndex(x => x.uid === uid) : -1;
     if (act === 'cerrar') return closeProforma();
-    if (pf.saving && (act === 'nueva' || act === 'pdf' || act === 'guardar')) return;
-    if (act === 'nueva') { if (pf.data.items.length && !confirm('¿Empezar una proforma nueva? Lo que no guardaste se pierde.')) return; return pfNueva(); }
+    if (act === 'nueva') return pfNueva();
+    if (act === 'duplicar') return pfDuplicar();
     if (act === 'guardar') return pfGuardar(false);
     if (act === 'pdf') return pfGenerarPdf();
     if (act === 'importar') return pfImportarBrief(parseInt(b.getAttribute('data-id'), 10));
