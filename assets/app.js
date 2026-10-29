@@ -4977,7 +4977,9 @@ function corteNeonAdminHtml(pedidos) {
       <span class="corte-hide-sm" style="font-size:11px;color:var(--fg-mute);flex:0 0 auto;min-width:70px;text-align:right">${escapeHtml(p.ped_productor || p.vendedor || '')}</span>
       ${corteChip(M[e] ? M[e].l : e, M[e] ? M[e].c : 'var(--fg-subtle)')}
     </div>`; }).join('');
+  // La regla del celular va acá también: en la pestaña "Neón nuestro" no se dibuja corteHybridBoard (que la trae).
   return `
+    <style>@media(max-width:560px){.corte-hide-sm{display:none!important}}</style>
     <div style="margin-top:22px">
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
         <span style="font-size:15px;font-weight:800;color:#ef4444">🔴 Neón Infinito — producción propia</span>
@@ -9615,7 +9617,7 @@ function sfcListaHtml() {
   // Cancelados) muestra solo esa combinación. Antes, el de cliente (29-oct, solo Gaspar y Fran: sfcbClientesHtml): las
   // combinaciones son las de ese cliente.
   const todos0 = D.cortes || [], fc = sfcbCliente(), todos = fc ? todos0.filter(c => sfcCliTipo(c) === fc) : todos0;
-  const combos = sfcCombos(todos), f = sfcbFiltro(combos);
+  const combos = sfcCombos(todos), f = sfcbFiltro(fc ? sfcCombos(todos0) : combos, combos);
   const cs = f ? todos.filter(c => sfcComboKey(c) === f) : todos, cel = sfcbEtapaCel(cs), drag = adm && sfkFino();
   return `<div class="lb-tit sfc-tit">${adm ? 'Pedidos de corte' : 'Tus pedidos de corte'}</div>`
     + sfcbClientesHtml(todos0, fc) + sfcbFiltrosHtml(combos, f) + sfcbTabsHtml(cs, cel) + sfcbBoardHtml(cs, cel, drag) + sfcbCanceladosHtml(cs, drag)
@@ -9902,11 +9904,13 @@ function sfcCombos(cs) {
   });
   return [...M.values()].sort((a, b) => b.porCortar - a.porCortar || b.total - a.total || sfcComboTxt(a).localeCompare(sfcComboTxt(b), 'es'));
 }
-function sfcbFiltro(combos) {
+// combos = las de TODOS los clientes: solo se borra lo guardado si esa combinación ya no está en los datos. vis = las del cliente
+// elegido en el filtro de cliente: si no la tiene, se muestra Todos sin tocar lo guardado (al volver a Todos los clientes, sigue).
+function sfcbFiltro(combos, vis) {
   let f = STATE.sfcbFiltro;
   if (f == null) { try { f = localStorage.getItem(SFCB_FILTRO_KEY) || ''; } catch (_) { f = ''; } STATE.sfcbFiltro = f; }
   if (f && !combos.some(x => x.key === f)) { f = STATE.sfcbFiltro = ''; try { localStorage.removeItem(SFCB_FILTRO_KEY); } catch (_) {} }
-  return f;
+  return f && vis && !vis.some(x => x.key === f) ? '' : f;
 }
 function sfcbElegirFiltro(k) {
   k = String(k || '');
@@ -10026,8 +10030,8 @@ function sfcbArmar() {
   if (!(isAdmin() || isFranOnly()) || document.querySelector('.sfcb-armar-bg')) return;
   const D = STATE.sfCortes; if (!D || D.error) return;
   // Mezcla clientes en la misma placa (cada pieza lleva su número); con un cliente elegido en el filtro, solo los de ese cliente.
-  const fc = sfcbCliente(), todos = (D.cortes || []).filter(c => !fc || sfcCliTipo(c) === fc);
-  const combos = sfcCombos(todos), f = sfcbFiltro(combos), x = combos.find(y => y.key === f); if (!x) return;
+  const fc = sfcbCliente(), todos0 = D.cortes || [], todos = todos0.filter(c => !fc || sfcCliTipo(c) === fc);
+  const combos = sfcCombos(todos), f = sfcbFiltro(fc ? sfcCombos(todos0) : combos, combos), x = combos.find(y => y.key === f); if (!x) return;
   const orden = { pedido: 0, en_corte: 1 }, et = c => orden[sfcEstado(c.estado)[0]];
   const peds = todos.filter(c => sfcComboKey(c) === f && et(c) != null)
     .sort((a, b) => et(a) - et(b) || String(a.fecha || '9999').localeCompare(String(b.fecha || '9999')) || a.id - b.id);
