@@ -4699,13 +4699,15 @@ async function processPrecotizPilot(env) {
     // de 20:51 a 12:10). Cada 10 min: los leads cuya última evaluación de las últimas 24 h fue un error de la IA (hace 10 min o
     // más), sin entrar al piloto, se vuelven a evaluar. Si la IA sigue caída fallan de nuevo y esperan otros 10 min. El freno
     // anti-pisón de abajo igual los saltea si ya les respondió una persona.
-    if (new Date().getUTCMinutes() % 10 === 0) {
+    // Con cola (la vuelta anterior llenó las 15), la próxima corre al minuto siguiente: el atraso se vacía en pocos minutos.
+    if ((await kvGet(env, 'precotiz_reint_pend', '0')) === '1' || new Date().getUTCMinutes() % 10 === 0) {
       const rs4 = await env.DB.prepare(
         "SELECT l.phone, (SELECT MAX(m.ts) FROM wa_messages m WHERE m.phone = l.phone AND m.direction = 'inbound' AND m.msg_type != 'status') AS last_ts " +
         "FROM (SELECT phone, MAX(ts) AS ts FROM precotiz_eval_log WHERE ts > ? GROUP BY phone) l " +
         "WHERE l.ts < ? AND (SELECT x.resultado FROM precotiz_eval_log x WHERE x.phone = l.phone AND x.ts = l.ts LIMIT 1) = 'error_ia' " +
         "AND l.phone NOT IN (SELECT phone FROM precotiz_pilot) ORDER BY l.ts ASC LIMIT 15"
       ).bind(new Date(Date.now() - 24 * 3600e3).toISOString(), new Date(Date.now() - 10 * 60e3).toISOString()).all();
+      try { await kvSet(env, 'precotiz_reint_pend', (rs4.results || []).length >= 15 ? '1' : '0'); } catch (_) {}
       const vistos4 = new Set(cands.map(c => c.phone));
       // Cada reintento queda anotado ('reintento'): si después se saltea (ya le respondió una persona, pasó a cursos…) no vuelve a
       // ocupar lugar; si la IA falla otra vez, el 'error_ia' nuevo lo vuelve a poner en la cola dentro de 10 min.
