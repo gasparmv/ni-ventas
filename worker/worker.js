@@ -3717,6 +3717,8 @@ async function estadoCuotaVendedor(env, c) {
 // Qué parte de las consultas del día ya entró a esta hora AR (precotiz_pilot 8 al 27-oct: a las 8 el bot larga de golpe lo que
 // entró a la noche, ~30 % del día; después parejo hasta las 22). Lo usa el reparto para ir al ritmo del día.
 const REPARTO_AVANCE = [[0, 0], [8, 0.05], [8.5, 0.30], [22, 0.97], [24, 1]];
+// Hora AR desde la que el 1 de cada 4 de Joaco ya no corre para las consultas que ENTRAN desde ahí (ver maybeRepartirANadia).
+const REPARTO_PISO_HASTA = 18;
 function repartoAvanceDia(ms) {
   const ar = new Date((ms || Date.now()) - 3 * 3600000), t = ar.getUTCHours() + ar.getUTCMinutes() / 60;
   for (let i = 1; i < REPARTO_AVANCE.length; i++) if (t <= REPARTO_AVANCE[i][0]) { const [t0, p0] = REPARTO_AVANCE[i - 1], [t1, p1] = REPARTO_AVANCE[i]; return p0 + (p1 - p0) * (t - t0) / (t1 - t0); }
@@ -3779,7 +3781,14 @@ async function maybeRepartirANadia(env, phone) {
     // Ahora cada uno va al ritmo del día (cuota × repartoAvanceDia): si está atrasado, la consulta es para él (el más atrasado
     // en proporción; empate: la rotación por teléfono); si todos van al día, es de Joaco. Además Joaco recibe siempre 1 de cada 4
     // (por el teléfono), así le llegan desde temprano aunque el día venga flojo.
-    if (_h % 4 === 0) return;
+    // Desde las 18 h (Gaspar 29-oct: "así los vendedores llegan a las consultas que pidieron a lo largo de los días") ese 1 de cada 4
+    // no corre para las consultas cuyo primer mensaje del día entra desde esa hora: si a alguno todavía le falta, la noche es para
+    // él. Las que Joaco ya tenía de antes no se mueven. Simulado sobre 15-28/10: les faltaban 54, ahora 31; la mañana de Joaco igual.
+    if (_h % 4 === 0) {
+      if (new Date(Date.now() - 3 * 3600000).getUTCHours() < REPARTO_PISO_HASTA) return;
+      const _p = await env.DB.prepare("SELECT MIN(ts) AS t FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type != 'status' AND ts >= ?").bind(phone, hoyAR + 'T03:00:00Z').first();
+      if (!_p || !_p.t || new Date(Date.parse(_p.t) - 3 * 3600000).getUTCHours() < REPARTO_PISO_HASTA) return;
+    }
     const avance = repartoAvanceDia();
     const libres = [];
     for (const c of orden) {

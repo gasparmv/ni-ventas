@@ -536,7 +536,7 @@ function renderRepartoPanel() {
       <tbody>${repartoState.data.map(s => `<tr style="border-top:1px solid var(--border)"><td style="padding:8px 6px;vertical-align:top"><b>${escapeHtml(s.nombre)}</b><div class="muted" style="font-size:11px">por defecto ${s.cuota_default}</div></td>${celda(s, 'hoy')}${celda(s, 'manana')}</tr>`).join('')}
         <tr style="border-top:1px solid var(--border)"><td style="padding:8px 6px"><b>Joaco</b></td><td colspan="2" class="muted" style="padding:8px 6px;font-size:12px">Sin tope: recibe todo lo que no toman los demás.</td></tr>
       </tbody></table>
-    <div class="muted" style="font-size:11px;margin-top:6px">Les van llegando a lo largo del día hasta completar su número; Joaco recibe el resto desde temprano, al menos 1 de cada 4 (los días flojos puede que no lleguen). Si la fijás vos, ellos no la pueden cambiar ese día (tocá "liberar" para que vuelvan a decidir).</div>`;
+    <div class="muted" style="font-size:11px;margin-top:6px">Les van llegando a lo largo del día hasta completar su número; Joaco recibe el resto desde temprano, al menos 1 de cada 4 hasta las 18 h; desde ahí, si a alguno le falta, las que entran son para ellos (los días flojos puede que igual no lleguen). Si la fijás vos, ellos no la pueden cambiar ese día (tocá "liberar" para que vuelvan a decidir).</div>`;
   // Cada acción manda la FECHA que se ve en pantalla (el server rechaza si ya cambió el día).
   const fechaDe = (slug, dia) => { const s0 = (repartoState.data || []).find(r => r.slug === slug); return (s0 && s0[dia] && s0[dia].fecha) || ''; };
   const cuotaDe = (slug, dia) => { const s0 = (repartoState.data || []).find(r => r.slug === slug); return s0 && s0[dia] ? s0[dia].cuota : 0; };
