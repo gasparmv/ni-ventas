@@ -1641,7 +1641,8 @@ function isLogisticaUser(s) { return _userKey(s) === 'logistica'; }
 // Sin Frontera (usuario EXTERNO: fabrican los corpóreos y nos compran neón): solo Producción y Mis pedidos. El backend le niega
 // todo lo demás. Vale "Sin Frontera" o "sinfrontera".
 function isSinFronteraUser(s) { return _userKey(s).replace(/[\s._-]+/g, '') === 'sinfrontera'; }
-// Fran (router y láser, 22-oct): solo los pedidos de corte que encarga Sin Frontera (lista, archivos y estado).
+// Fran (router y láser, 22-oct): solo los pedidos de corte (lista, archivos y estado; desde el 29-oct de todos los clientes) y,
+// desde el 29-oct, el tablero de Producción corpóreos (lo mueve como Sin Frontera).
 function isFranUser(s) { return _userKey(s) === 'fran'; }
 // Lautaro (publicista): solo ve el Funnel Ads (métricas, sin datos de clientes ni acciones).
 function isLautaroUser(s) { return _userKey(s) === 'lautaro'; }
@@ -1746,7 +1747,7 @@ async function switchUser(name) {
         return;
       }
       if (r.status === 404 && isFranUser(name)) {
-        if (!isGasparUser(STATE.user)) { await showAlert('Fran todavía no tiene usuario. Volvé a Administrador y creáselo en Sin Frontera → Cortes que encargan → Usuario de Fran.', { title: 'Usuario de Fran', variant: 'warn' }); return; }
+        if (!isGasparUser(STATE.user)) { await showAlert('Fran todavía no tiene usuario. Volvé a Administrador y creáselo en Corte → Pedidos de corte → Usuario de Fran.', { title: 'Usuario de Fran', variant: 'warn' }); return; }
         if (await showConfirm('Fran todavía no tiene usuario. ¿Se lo creás ahora? Le ponés la contraseña y, si querés, su WhatsApp para avisarle de cada pedido.', { title: 'Usuario de Fran', confirmLabel: 'Crear usuario', cancelLabel: 'Ahora no' }).catch(() => false)) sfcFranUI();
         return;
       }
@@ -1782,7 +1783,7 @@ function afterUserSwitch() {
   render();
   if (isProductorOnly()) { STATE.prod = null; return; }   // productor de neón: solo su pantalla (nada de ventas, cotizador ni chats)
   if (isSinFronteraOnly()) return;   // Sin Frontera: solo sus dos pantallas (nada de ventas, cotizador ni chats)
-  if (isFranOnly()) return;   // Fran: solo los pedidos de corte de Sin Frontera
+  if (isFranOnly()) return;   // Fran: solo los pedidos de corte y Producción corpóreos
   if (isMarketingOnly()) return;   // Lautaro: solo el Funnel Ads (lo carga su vista)
   try { fetchOcUrgenteStatus(); } catch (_) {}
   loadCotizadorParams();   // /cotizador/* pide sesión: recién ahora hay token (y si el nuevo no cotiza, borra el cache)
@@ -2927,7 +2928,7 @@ function setView(v) {
   else if (isProduccionOnly()) v = (v === 'mis-carteles' && isAnibalUser(STATE.user)) ? 'mis-carteles' : ((v === 'neon' && isNeyenUser(STATE.user)) ? 'neon' : 'corte');
   else if (isLogisticaOnly()) v = v === 'neon' ? 'neon' : 'logistica';
   else if (isSinFronteraOnly()) v = (v === 'sf-pedidos' || v === 'sf-cortes') ? v : 'sf-produccion';
-  else if (isFranOnly()) v = 'sf-cortes';
+  else if (isFranOnly()) v = v === 'sf-produccion' ? v : 'sf-cortes';   // Fran: Pedidos de corte y Producción corpóreos (29-oct)
   else if (isMarketingOnly()) v = 'funnel-ads';
   else if (isDisenadorOnly() && v !== 'corte') v = 'cotizacion';
   if (v === 'funnel-ads' && !isAdmin() && !isMarketingOnly()) v = 'dashboard';
@@ -2958,7 +2959,7 @@ window.addEventListener('hashchange', () => {
   else if (isProduccionOnly()) h = (h === 'mis-carteles' && isAnibalUser(STATE.user)) ? 'mis-carteles' : (h === 'neon' ? 'neon' : 'corte');
   else if (isLogisticaOnly()) h = h === 'neon' ? 'neon' : 'logistica';
   else if (isSinFronteraOnly()) h = (h === 'sf-pedidos' || h === 'sf-cortes') ? h : 'sf-produccion';
-  else if (isFranOnly()) h = 'sf-cortes';
+  else if (isFranOnly()) h = h === 'sf-produccion' ? h : 'sf-cortes';
   else if (isMarketingOnly()) h = 'funnel-ads';
   else if (isDisenadorOnly() && h !== 'corte') h = 'cotizacion';
   if (h === 'funnel-ads' && !isAdmin() && !isMarketingOnly()) h = 'dashboard';
@@ -3262,7 +3263,7 @@ function render() {
   } else if (isSinFronteraOnly() && !['sf-produccion', 'sf-pedidos', 'sf-cortes'].includes(STATE.view)) {
     STATE.view = 'sf-produccion';
     if (location.hash !== '#sf-produccion') location.hash = 'sf-produccion';
-  } else if (isFranOnly() && STATE.view !== 'sf-cortes') {
+  } else if (isFranOnly() && STATE.view !== 'sf-cortes' && STATE.view !== 'sf-produccion') {
     STATE.view = 'sf-cortes';
     if (location.hash !== '#sf-cortes') location.hash = 'sf-cortes';
   } else if (isMarketingOnly() && STATE.view !== 'funnel-ads') {
@@ -5094,6 +5095,30 @@ function corteHybridBoard(pedidos) {
     ${list.length ? `<div style="border:1px solid var(--border);border-radius:var(--r-sm);overflow:hidden;background:var(--ink-100)">${selallHead}${rows}</div>` : `<div style="padding:24px;text-align:center;color:var(--fg-mute);border:1px dashed var(--border);border-radius:var(--r-sm)">${vacio}</div>`}
     ${barra}`;
 }
+// Corte de Gaspar en tres pestañas (Gaspar 29-oct: "mover funciones de una página a otra"): Alumnos (el servicio de corte, todo
+// lo de siempre menos el neón), Neón nuestro (las matrices de los carteles vendidos, corteNeonAdminHtml) y Pedidos de corte (el
+// tablero de Fran, que sigue siendo la vista 'sf-cortes': adentro de 'corte' el refresco de 60 s redibujaría #main y le rompería
+// un arrastre o una edición). La pestaña elegida queda en STATE y en esta compu (como la de Neyen); el refresco no la toca. Solo
+// isAdmin(): un comercial que cae en la rama del admin de renderCorte (Joaco por #corte) la sigue viendo como antes.
+const CORTE_ADMIN_TAB_KEY = 'corte_admin_tab';
+function corteAdminTab() {
+  let t = STATE.corteAdminTab;
+  if (!t) { try { t = localStorage.getItem(CORTE_ADMIN_TAB_KEY) || ''; } catch (_) { t = ''; } }
+  return (STATE.corteAdminTab = t === 'neon' ? 'neon' : 'alumnos');
+}
+// act: 'alumnos' | 'neon' | 'cortes' (la que está a la vista).
+function corteAdminTabsHtml(act) {
+  if (!isAdmin()) return '';
+  const b = (id, txt) => `<button type="button" class="btn ${act === id ? 'btn-cyan' : 'ghost'}" data-corte-admin-tab="${id}" style="font-size:13px;padding:7px 14px">${txt}</button>`;
+  return `<div style="display:flex;gap:8px;flex-wrap:wrap;margin:0 0 14px">${b('alumnos', 'Alumnos')}${b('neon', 'Neón nuestro')}${b('cortes', 'Pedidos de corte')}</div>`;
+}
+// Lo engancha bindCorte (y bindSinFrontera desde Pedidos de corte): las dos primeras son 'corte', la tercera es 'sf-cortes'.
+function corteAdminTabIr(t) {
+  if (t === 'cortes') { if (STATE.view !== 'sf-cortes') setView('sf-cortes'); return; }
+  STATE.corteAdminTab = t === 'neon' ? 'neon' : 'alumnos';
+  try { localStorage.setItem(CORTE_ADMIN_TAB_KEY, STATE.corteAdminTab); } catch (_) {}
+  if (STATE.view === 'corte') render(); else setView('corte');
+}
 function renderCorte() {
   const pedidos = STATE.cortePedidos || [];
   const info = corteRolInfo();
@@ -5364,6 +5389,15 @@ function renderCorte() {
       </div>`;
   }
   // --- Vista ADMIN (Gaspar): board completo + detalle + alumnos ---
+  // En pestañas (corteAdminTabsHtml): Alumnos = todo menos el neón; Neón nuestro = el neón y el detalle de la pieza elegida.
+  const tabAdm = isAdmin() ? corteAdminTab() : '';
+  if (tabAdm === 'neon') return `
+    <div style="padding:var(--s-4);max-width:1100px">
+      ${corteAdminTabsHtml('neon')}
+      ${sel ? corteDetalleHtml(sel) : ''}
+      ${STATE.cortePedidos === undefined ? '<div style="padding:22px;text-align:center;color:var(--fg-mute)">Cargando…</div>'
+        : (corteNeonAdminHtml(pedidos) || '<div style="padding:16px;text-align:center;color:var(--fg-mute);border:1px dashed var(--border);border-radius:var(--r-sm);font-size:13px">Nada de neón en el corte ✨</div>')}
+    </div>`;
   const all = STATE.corteAlumnos;
   const q = (STATE.corteQuery || '').trim().toLowerCase();
   // Sin acentos ("algañaraz" encuentra "Alganaraz"). El teléfono solo se compara si la búsqueda tiene dígitos:
@@ -5403,6 +5437,7 @@ function renderCorte() {
     </div>` : '';
   return `
     <div style="padding:var(--s-4);max-width:1100px">
+      ${tabAdm ? corteAdminTabsHtml('alumnos') : ''}
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:2px">
         <h1 style="margin:0;font-size:20px">✂ Servicio de corte</h1>
         <span style="font-size:11px;background:rgba(124,58,237,.14);color:#7c3aed;padding:2px 8px;border-radius:10px;font-weight:700">Etapa 1 · operativo</span>
@@ -5417,7 +5452,7 @@ function renderCorte() {
       ${corteWebPanelHtml(pedidosWeb)}
       ${navWeek}
       ${corteHybridBoard(boardPedidos)}
-      ${corteNeonAdminHtml(pedidos)}
+      ${tabAdm ? '' : corteNeonAdminHtml(pedidos)}
       <div style="height:22px"></div>
       ${corteAprendizajeHtml()}
 
@@ -7383,8 +7418,9 @@ async function logiPasswordUI() {
 // ============ SIN FRONTERA (usuario externo) ============
 // Fabrican nuestros corpóreos y nos compran neón (Gaspar, 15-oct). Ven SOLO dos pantallas: Producción (los corpóreos con
 // ticket, sin precio ni datos del cliente, y les cambian el estado) y Mis pedidos (sus compras, como las ve Gaspar pero sin
-// lo interno). Gaspar entra por el menú "Sin Frontera": ve lo mismo + la contraseña del usuario + sus números y los pedidos
-// vinculados a mano. El backend (/admin/sinfrontera/*) es la barrera: acá solo se dibuja.
+// lo interno). Gaspar entra por el menú "Producción corpóreos" (29-oct; antes "Sin Frontera"): ve lo mismo + la contraseña del
+// usuario + sus números y los pedidos vinculados a mano. Fran (29-oct) también ve y mueve el tablero de Producción, con los "No lo
+// hace Sin Frontera" mezclados (chip "Neon Infinito"). El backend (/admin/sinfrontera/*) es la barrera: acá solo se dibuja.
 const SF_ESTADOS = [['en_diseno', 'En diseño'], ['en_impresion', 'En impresión'], ['en_ensamble', 'En ensamble'], ['listo', 'Listo para entregar'], ['entregado', 'Entregado']];
 const SF_ESTADO_COLOR = { '': '#94a3b8', en_diseno: '#c4a0ff', en_impresion: '#38bdf8', en_ensamble: '#f59e0b', listo: '#22c55e', entregado: '#64748b' };
 const SF_OP_KEY = 'niventas.sfOperador';
@@ -7445,20 +7481,24 @@ function sfFecha(iso) { const d = iso ? new Date(String(iso).length === 10 ? iso
 function sfFechaHora(iso) { const d = iso ? new Date(iso) : null; return d && !isNaN(d) ? d.toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit' }) + ' ' + d.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' }) : ''; }
 // Días que faltan hasta la fecha de compromiso (negativo = vencida). NaN si no hay fecha.
 function sfDias(ymd) { const d = ymd ? new Date(ymd + 'T23:59:59') : null; return d && !isNaN(d) ? Math.floor((d - Date.now()) / 86400000) : NaN; }
+// Pastilla de un color cualquiera (las de .logi-pill son rojo, ámbar, verde y gris, que acá ya dicen plazo o urgencia).
+function sfPill(txt, col, tit) { return `<span class="logi-pill" style="color:${col};background:color-mix(in srgb, ${col} 16%, transparent)"${tit ? ` title="${escapeHtml(tit)}"` : ''}>${escapeHtml(txt)}</span>`; }
+// Lo nuestro (corpóreos de Neon Infinito): el chip de Fran en el tablero y el cliente "Corpóreos nuestros" de los cortes.
+const SF_COLOR_NI = '#c4a0ff';
 function sfAdminBarra() {
   if (!isAdmin()) return '';
   return `<button class="btn btn-ghost" data-sf-password title="Crear o cambiar la contraseña del usuario de Sin Frontera">Contraseña de Sin Frontera</button>`
     + `<button class="btn btn-ghost" data-sf-config title="Con qué números te compran y qué pedidos ven en 'Mis pedidos'">Sus números y pedidos</button>`;
 }
 function sfTabs() {
-  // Gaspar no tiene estas pestañas en el menú (entra por "Sin Frontera"): se las damos arriba.
+  // Gaspar entra por "Producción corpóreos" (29-oct): arriba, el tablero y lo de Sin Frontera como cliente (el neón que le
+  // vendemos, "Sus pedidos"). Los pedidos de corte pasaron a Corte > Pedidos de corte (corteAdminTabsHtml).
   if (!isAdmin()) return '';
   const v = STATE.view;
   return `<div class="logi-chips" style="margin-bottom:2px">`
-    + `<button type="button" class="btn ${v === 'sf-produccion' ? '' : 'ghost'}" data-sf-vista="sf-produccion" style="padding:6px 12px;font-size:12px">Producción</button>`
-    + `<button type="button" class="btn ${v === 'sf-pedidos' ? '' : 'ghost'}" data-sf-vista="sf-pedidos" style="padding:6px 12px;font-size:12px">Sus pedidos</button>`
-    + `<button type="button" class="btn ${v === 'sf-cortes' ? '' : 'ghost'}" data-sf-vista="sf-cortes" style="padding:6px 12px;font-size:12px">Cortes que encargan</button>`
-    + (v === 'sf-cortes' ? '' : `<span class="muted" style="font-size:12px;align-self:center;margin-left:6px">Así lo ve Sin Frontera</span>`) + `</div>`;
+    + `<button type="button" class="btn ${v === 'sf-produccion' ? '' : 'ghost'}" data-sf-vista="sf-produccion" style="padding:6px 12px;font-size:12px">Tablero</button>`
+    + `<button type="button" class="btn ${v === 'sf-pedidos' ? '' : 'ghost'}" data-sf-vista="sf-pedidos" style="padding:6px 12px;font-size:12px">Sin Frontera</button>`
+    + `<span class="muted" style="font-size:12px;align-self:center;margin-left:6px">Así lo ve Sin Frontera</span></div>`;
 }
 
 // ---------- Producción: tablero por etapa (kanban) ----------
@@ -7552,9 +7592,12 @@ function sfkImgError(img) {
   if (b) b.remove();
 }
 // Firma de lo que se ve en la tarjeta: el refresco de fondo solo repinta si algo cambió (incluye el día, por el "hace N d").
-function sfkCardSig(t) { return JSON.stringify([t.estado, t.estado_at, t.empresa, t.fotos, t.diseno, t.campos, t.pedido && t.pedido.cantidad, (t.historial || [])[0] || null]); }
+function sfkCardSig(t) { return JSON.stringify([t.estado, t.estado_at, t.empresa, t.fotos, t.diseno, t.campos, t.pedido && t.pedido.cantidad, (t.historial || [])[0] || null, !!t.excluido]); }
+// Fran (29-oct) ve también los "No lo hace Sin Frontera", mezclados en el tablero: el worker se los marca (excluido: true, solo a
+// él) y llevan este chip. Gaspar los sigue viendo aparte (sfkExcluidosHtml) y Sin Frontera nunca.
+function sfkNiChip(t) { return t.excluido ? [sfPill('Neon Infinito', SF_COLOR_NI, 'No lo hace Sin Frontera: es de Neon Infinito')] : []; }
 function sfkCardHtml(t) {
-  const u = sfkUrg(t), sig = sfkSig(t.estado), desde = sfkDesde(t);
+  const u = sfkUrg(t), sig = sfkSig(t.estado), desde = sfkDesde(t), chips = sfkNiChip(t).concat(u.chips);
   const dias = desde ? (sfkDiasCal(desde) || 0) : 0, ult = (t.historial || [])[0];
   const tit = t.estado ? 'En esta etapa desde ' + sfFechaHora(t.estado_at) + (ult && ult.por ? ' · lo movió ' + ult.por : '') : (t.creado ? 'Ticket armado el ' + sfFecha(t.creado) : '');
   const med = (t.campos && t.campos.medidas) || (t.pedido && t.pedido.medidas) || '', tipo = sfkTipoCorto(t);
@@ -7563,7 +7606,7 @@ function sfkCardHtml(t) {
     + `<div class="sfk-body">`
     + `<div class="sfk-top"><span class="sfk-num">#${t.ticket}</span><span class="sfk-etq" style="--c:${sfkCol(t.estado)}">${escapeHtml(SF_CORTO[t.estado || ''])}</span><span class="sfk-hace${dias >= 5 ? ' viejo' : ''}" title="${escapeHtml(tit)}">${escapeHtml(sfkHaceTxt(desde))}</span></div>`
     + `<div class="sfk-nom">${escapeHtml(t.empresa || 'Sin nombre')}</div>`
-    + (u.chips.length ? `<div class="sfk-chips">${u.chips.join('')}</div>` : '')
+    + (chips.length ? `<div class="sfk-chips">${chips.join('')}</div>` : '')
     + (med ? `<div class="sfk-med">${escapeHtml(med)}</div>` : '')
     + (tipo ? `<div class="sfk-tipo">${escapeHtml(tipo)}</div>` : '')
     + `<div class="sfk-extra" data-sfk-extra></div>`
@@ -7792,7 +7835,7 @@ function sfkTicketHtml(t) {
   const val = x => { const v = c[x.k]; return x.t === 'date' && /^\d{4}-\d{2}-\d{2}$/.test(v || '') ? v.split('-').reverse().join('/') : v; };
   const SN = v => /^s/i.test(String(v || '')) ? 'Sí' : (v ? 'No' : '');
   // Avisos
-  const avisos = u.chips.slice();
+  const avisos = sfkNiChip(t).concat(u.chips);
   if (/^s/i.test(c.precisa_instalacion || '') || /^s/i.test(p.instalacion || '')) avisos.push('<span class="logi-pill a">Lleva instalación</span>');
   if (/exterior|ambas/i.test(c.carteleria || '')) avisos.push('<span class="logi-pill g">Exterior</span>');
   if (/^s/i.test(c.requiere_estructura || '')) avisos.push('<span class="logi-pill g">Con bastidor</span>');
@@ -9173,8 +9216,16 @@ async function sfConfigUI() {
 // ---------- Pedidos de corte (Gaspar 21-oct-2026) ----------
 // "Que los chicos de Sin Frontera me puedan encargar cortes de acrílico": el archivo en cualquier formato, material, color,
 // espesor, para cuándo y aclaraciones; "que sea bien rápido". Los archivos se suben apenas se eligen (con progreso) y el pedido
-// sale con un toque. Gaspar los ve en Sin Frontera > Cortes y les cambia el estado. Sin precios (cuenta corriente aparte).
+// sale con un toque. Gaspar los ve en Corte > Pedidos de corte (hasta el 29-oct, Sin Frontera > Cortes; Fran, en "Pedidos de
+// corte") y les cambia el estado. Sin precios (cuenta corriente aparte). Desde el 29-oct cada pedido tiene su cliente (SFC_CLIENTES).
 const SFC_MATERIALES = [['acrilico', 'Acrílico'], ['pvc', 'PVC']];
+// Cliente de cada pedido (Gaspar 29-oct): lo eligen Gaspar y Fran al cargar (no viene marcado) o al editar; "Otro cliente" lleva
+// el nombre. Sin Frontera nunca lo ve ni lo elige: el worker le deja solo los suyos y lo que carga es suyo sí o sí.
+const SFC_CLIENTES = [['sinfrontera', 'Sin Frontera', '#38bdf8'], ['ni_corporeo', 'Corpóreos nuestros', SF_COLOR_NI], ['otro', 'Otro cliente', '#2dd4bf']];
+function sfcGestor() { return isAdmin() || isFranOnly(); }   // Gaspar y Fran: el cliente, el filtro por cliente y su chip
+function sfcCliTipo(c) { return (c && c.cliente_tipo) || 'sinfrontera'; }   // sin el campo (la lista de antes): de Sin Frontera
+function sfcCliTxt(c) { const t = sfcCliTipo(c); return t === 'otro' ? (String(c.cliente_nombre || '').trim() || 'Otro cliente') : sfcLbl(SFC_CLIENTES, t); }
+function sfcCliChip(c) { const x = SFC_CLIENTES.find(y => y[0] === sfcCliTipo(c)) || SFC_CLIENTES[0]; return sfPill(sfcCliTxt(c), x[2], 'Cliente: ' + sfcCliTxt(c)); }
 const SFC_COLORES = [['blanco_opalino', 'Blanco opalino'], ['transparente', 'Transparente'], ['negro', 'Negro']];
 // Muestra de cada color ("con colorcito", Gaspar 22-oct). Transparente va cuadriculado; un color propio, con el que eligieron
 // en el selector.
@@ -9247,7 +9298,8 @@ function sfcTitulo(c) {
   return { txt: txt || 'Pedido #' + ((c && c.id) || ''), sinNombre: true };
 }
 // El formulario vive en STATE (sobrevive a los redibujos y a cambiar de pantalla).
-function sfcFormVacio() { return { nombre: '', material: '', color: '', colorHex: '', creandoColor: false, nuevoHex: '#e11d48', nuevoNom: '', espesor: '', fecha: '', acl: '', archivos: [] }; }
+// cliTipo/cliNombre: el cliente (solo Gaspar y Fran; al cargar, vacío: se elige sí o sí).
+function sfcFormVacio() { return { cliTipo: '', cliNombre: '', nombre: '', material: '', color: '', colorHex: '', creandoColor: false, nuevoHex: '#e11d48', nuevoNom: '', espesor: '', fecha: '', acl: '', archivos: [] }; }
 function sfcForm() {
   if (STATE.sfcEditId) return STATE.sfcEditForm || (STATE.sfcEditForm = sfcFormVacio());
   return STATE.sfcForm || (STATE.sfcForm = sfcFormVacio());
@@ -9292,15 +9344,17 @@ async function sfcCargarYa(silent) {
 function renderSfCortes() {
   const D = STATE.sfCortes, op = sfOperador(), adm = isAdmin(), gestiona = adm || isFranOnly();
   if (!D && !STATE._sfcCargando) setTimeout(() => sfcCargar(), 0);
+  // Gaspar: arriba, las pestañas de Corte (Alumnos · Neón nuestro · Pedidos de corte); lo de Sin Frontera (contraseña, sus números)
+  // quedó en Producción corpóreos.
   return `<div class="logi-wrap sf-wrap sfc-wrap">
-    ${sfTabs()}
-    <div class="logi-head"><h1>${adm ? 'Cortes que encarga Sin Frontera' : gestiona ? 'Cortes de Sin Frontera' : 'Pedir corte'}</h1></div>
+    ${corteAdminTabsHtml('cortes')}
+    <div class="logi-head"><h1>${gestiona ? 'Pedidos de corte' : 'Pedir corte'}</h1></div>
     <div class="logi-bar">
       <span data-sfc-upd>${escapeHtml(D && !D.error ? sfHace(D.at) : '')}</span>
       ${isSinFronteraOnly() ? `<span>· Estás como <b>${escapeHtml(op || 'sin nombre')}</b> <button type="button" class="logi-link" data-sf-op>${op ? 'cambiar' : 'poner nombre'}</button></span>` : ''}
       <span style="flex:1"></span>
       <button class="btn btn-ghost" data-sfc-refresh>Actualizar</button>
-      ${sfAdminBarra()}${adm ? '<button class="btn btn-ghost" data-sfc-fran title="El usuario de Fran, que hace estos cortes, y su WhatsApp para los avisos">Usuario de Fran</button>' : ''}
+      ${adm ? '<button class="btn btn-ghost" data-sfc-fran title="El usuario de Fran, que hace estos cortes, y su WhatsApp para los avisos">Usuario de Fran</button>' : ''}
     </div>
     ${STATE.sfcEditId ? sfcEditarHtml() : gestiona ? sfcCargarHtml() : sfcFormHtml()}
     <div data-sfc-lista>${sfcListaHtml()}</div>
@@ -9308,6 +9362,17 @@ function renderSfCortes() {
 }
 function sfcChips(attr, lista, sel) {
   return lista.map(([v, t]) => `<button type="button" class="sfc-chip${sel === v ? ' on' : ''}" data-${attr}="${escapeHtml(v)}" aria-pressed="${sel === v ? 'true' : 'false'}">${escapeHtml(t)}</button>`).join('');
+}
+// ¿Para qué cliente es? (Gaspar y Fran). Con "Otro cliente", su nombre (obligatorio). Se repinta solo (sfcPintarCliente).
+function sfcClienteHtml() {
+  const F = sfcForm();
+  return `<span class="sfc-lbl">¿Para qué cliente es?</span><div class="sfc-chips">${sfcChips('sfc-cli', SFC_CLIENTES, F.cliTipo)}</div>`
+    + (F.cliTipo === 'otro' ? `<input class="nc-input" data-sfc-cli-nom maxlength="80" autocomplete="off" placeholder="Nombre del cliente" aria-label="Nombre del cliente" value="${escapeHtml(F.cliNombre || '')}">` : '');
+}
+function sfcPintarCliente(foco) {
+  const el = document.querySelector('.sfc-wrap [data-sfc-cli-box]'); if (!el) return;
+  el.innerHTML = sfcClienteHtml();
+  const n = foco && el.querySelector('[data-sfc-cli-nom]'); if (n) n.focus();
 }
 function sfcFormHtml() {
   const F = sfcForm(), espChip = SFC_ESPESORES.includes(F.espesor) ? F.espesor : '';
@@ -9323,6 +9388,7 @@ function sfcFormHtml() {
   </form>`;
   }
   return `<form class="sfc-form" data-sfc-form novalidate>
+    ${sfcGestor() ? `<div class="sfc-campo" data-sfc-cli-box>${sfcClienteHtml()}</div>` : ''}
     ${nombre}
     <input type="file" multiple data-sfc-file hidden>
     <div class="sfc-drop" data-sfc-drop tabindex="0" role="button" aria-label="Elegir los archivos del corte">
@@ -9348,12 +9414,13 @@ function sfcEditar(id, foco, base) {
   const c = sfcCorte(id); if (!c || !sfcPuedeEditar(c)) return false;
   STATE.sfcEditId = id;
   const F = STATE.sfcEditForm = Object.assign(sfcFormVacio(), {
+    cliTipo: sfcCliTipo(c), cliNombre: c.cliente_nombre || '',
     nombre: c.nombre || '', material: c.material, color: c.color, colorHex: c.color_hex || '', espesor: String(c.espesor || ''), fecha: c.fecha || '', fechaOrig: c.fecha || '',
     acl: c.aclaraciones || '', archivos: (c.archivos || []).map((a, i) => ({ id: 'e' + i, idx: i, nombre: a.nombre, bytes: a.bytes, estado: 'ok' })),
     editadoAt: c.editado_at || '',   // la versión que se está editando (el worker rechaza si alguien lo editó en el medio)
   });
   // Cómo estaba al abrirlo: con esto, si el guardado choca con el cambio de otro, se sabe qué había tocado cada uno.
-  F.orig = { nombre: F.nombre, material: F.material, color: F.color, colorHex: F.colorHex, espesor: F.espesor, fecha: F.fecha, acl: F.acl, nArch: F.archivos.length };
+  F.orig = { cliTipo: F.cliTipo, cliNombre: F.cliNombre, nombre: F.nombre, material: F.material, color: F.color, colorHex: F.colorHex, espesor: F.espesor, fecha: F.fecha, acl: F.acl, nArch: F.archivos.length };
   const quedaron = base ? sfcEditarMezclar(F, base, sfcSoloNombre(c)) : false;
   STATE.sfcFormAbierto = true;
   const m = document.getElementById('main'); if (m && STATE.view === 'sf-cortes') { m.innerHTML = renderSinFrontera(); bindSinFrontera(); }
@@ -9369,7 +9436,7 @@ function sfcEditar(id, foco, base) {
 function sfcEditarMezclar(N, base, soloNombre) {
   const O = base.orig || {}, val = (o, g) => g.map(k => String(o[k] == null ? '' : o[k])).join('\u0001');
   let quedaron = false;
-  [['nombre'], ['material'], ['color', 'colorHex'], ['espesor'], ['fecha'], ['acl']].forEach(g => {
+  [['cliTipo', 'cliNombre'], ['nombre'], ['material'], ['color', 'colorHex'], ['espesor'], ['fecha'], ['acl']].forEach(g => {
     if (val(base, g) === val(O, g)) return;                                                          // eso no lo había tocado
     if ((g[0] === 'nombre' || !soloNombre) && val(N, g) === val(O, g)) g.forEach(k => { N[k] = base[k]; });   // el otro no: va lo suyo
     else quedaron = true;
@@ -9405,10 +9472,11 @@ function sfcEditarHtml() {
   const nota = isSinFronteraOnly() && !sfcSoloNombre(c) ? '<div class="sfc-cargar-nota">A Gaspar y a Fran les llega un aviso con lo que cambies (si cambiás solo el nombre, no).</div>' : '';
   return '<div class="sfc-cargar"><div class="sfc-cargar-h"><b>Editar el pedido #' + STATE.sfcEditId + (t.sinNombre ? '' : ' · ' + escapeHtml(t.txt)) + '</b><button type="button" class="logi-link" data-sfc-cancelar-edit>cancelar</button></div>' + nota + sfcFormHtml() + '</div>';
 }
-// Fran (y Gaspar) también cargan pedidos, por si Sin Frontera no lo hizo (Gaspar 22-oct): el formulario va plegado.
+// Fran (y Gaspar) también cargan pedidos, por si Sin Frontera no lo hizo (Gaspar 22-oct; desde el 29-oct, de cualquier cliente):
+// el formulario va plegado.
 function sfcCargarHtml() {
-  if (!STATE.sfcFormAbierto) return '<div><button type="button" class="btn btn-ghost sfc-abrir" data-sfc-abrir-form>＋ Cargar un pedido (si Sin Frontera no lo cargó)</button></div>';
-  return '<div class="sfc-cargar"><div class="sfc-cargar-h"><b>Cargar un pedido de Sin Frontera</b><button type="button" class="logi-link" data-sfc-cerrar-form>cerrar</button></div>' + sfcFormHtml() + '</div>';
+  if (!STATE.sfcFormAbierto) return '<div><button type="button" class="btn btn-ghost sfc-abrir" data-sfc-abrir-form>＋ Cargar un pedido de corte</button></div>';
+  return '<div class="sfc-cargar"><div class="sfc-cargar-h"><b>Cargar un pedido de corte</b><button type="button" class="logi-link" data-sfc-cerrar-form>cerrar</button></div>' + sfcFormHtml() + '</div>';
 }
 function sfcBotonTxt() { const ed = !!STATE.sfcEditId; return STATE._sfcEnviando ? (ed ? 'Guardando…' : 'Enviando…') : sfcForm().archivos.some(a => a.estado === 'subiendo') ? 'Subiendo archivos…' : (ed ? 'Guardar cambios' : 'Enviar pedido'); }
 function sfcArchivosHtml() {
@@ -9466,6 +9534,15 @@ async function sfcEnviar() {
   const F = sfcForm();
   const err = m => { const e = document.querySelector('.sfc-wrap [data-sfc-err]'); if (e) e.textContent = m; if (m) niToast(m, { error: true }); };
   if (STATE._sfcEnviando) return;
+  // Cliente (Gaspar y Fran): obligatorio; "Otro cliente", con el nombre. Va siempre (sin cliente_tipo el worker lo toma como la
+  // app vieja: Sin Frontera al cargar, el que tenía al editar). Sin Frontera no lo manda: lo suyo es suyo.
+  const gestor = sfcGestor(), cliNombre = String(F.cliNombre || '').replace(/\s+/g, ' ').trim();
+  if (gestor && !SFC_CLIENTES.some(x => x[0] === F.cliTipo)) return err('Elegí para qué cliente es: Sin Frontera, corpóreos nuestros u otro cliente.');
+  if (gestor && F.cliTipo === 'otro' && !sfcNombreOk(cliNombre)) {
+    const n = document.querySelector('.sfc-wrap [data-sfc-cli-nom]'); if (n) n.focus();
+    return err('Poné el nombre del cliente.');
+  }
+  const cli = gestor ? { cliente_tipo: F.cliTipo, cliente_nombre: F.cliTipo === 'otro' ? cliNombre : '' } : {};
   const nombre = String(F.nombre || '').replace(/\s+/g, ' ').trim();
   if (!sfcNombreOk(nombre)) {
     const n = document.querySelector('.sfc-wrap [data-sfc-nombre]'); if (n) n.focus();
@@ -9494,7 +9571,7 @@ async function sfcEnviar() {
     try {
       const j = await sfFetch('/admin/sinfrontera/corte/editar', { id, nombre, material: F.material, color: F.color, color_hex: F.colorHex || '', espesor: esp, fecha: F.fecha, aclaraciones: F.acl,
         archivos: F.archivos.filter(a => a.estado === 'ok').map(a => a.idx != null ? { idx: a.idx } : { key: a.key, nombre: a.nombre }),
-        editado_at: F.editadoAt || '', quien });
+        editado_at: F.editadoAt || '', quien, ...cli });
       const Dc = STATE.sfCortes;
       sfcCambioGuardado();
       if (Dc && !Dc.error && j.corte) Dc.cortes = (Dc.cortes || []).map(c => c.id === id ? j.corte : c);
@@ -9514,7 +9591,7 @@ async function sfcEnviar() {
   STATE._sfcEnviando = true; sfcPintarArchivos();
   try {
     const j = await sfFetch('/admin/sinfrontera/corte', { nombre, material: F.material, color: F.color, color_hex: F.colorHex || '', espesor: esp, fecha: F.fecha, aclaraciones: F.acl,
-      archivos: F.archivos.filter(a => a.estado === 'ok').map(a => ({ key: a.key, nombre: a.nombre })), quien });
+      archivos: F.archivos.filter(a => a.estado === 'ok').map(a => ({ key: a.key, nombre: a.nombre })), quien, ...cli });
     STATE.sfcForm = null; STATE.sfcFormAbierto = false;
     const D = STATE.sfCortes;
     sfcCambioGuardado();
@@ -9535,11 +9612,13 @@ function sfcListaHtml() {
   if (D.error) return `<div class="lb-tit sfc-tit">Pedidos de corte</div><div class="lb-list"><div class="lb-vacio"><div style="color:#ef4444;margin-bottom:8px">${escapeHtml(D.error)}</div><button type="button" class="btn" data-sfc-refresh>Reintentar</button></div></div>`;
   // Tablero por estado (Gaspar 26-oct: "hacé esto en un kanban con estados de producción"): ver sfcb* más abajo.
   // Filtro por material + color + espesor (27-oct, sfcbFiltrosHtml): todo lo de abajo (columnas, pestañas, Entregado y
-  // Cancelados) muestra solo esa combinación.
-  const todos = D.cortes || [], combos = sfcCombos(todos), f = sfcbFiltro(combos);
+  // Cancelados) muestra solo esa combinación. Antes, el de cliente (29-oct, solo Gaspar y Fran: sfcbClientesHtml): las
+  // combinaciones son las de ese cliente.
+  const todos0 = D.cortes || [], fc = sfcbCliente(), todos = fc ? todos0.filter(c => sfcCliTipo(c) === fc) : todos0;
+  const combos = sfcCombos(todos), f = sfcbFiltro(combos);
   const cs = f ? todos.filter(c => sfcComboKey(c) === f) : todos, cel = sfcbEtapaCel(cs), drag = adm && sfkFino();
   return `<div class="lb-tit sfc-tit">${adm ? 'Pedidos de corte' : 'Tus pedidos de corte'}</div>`
-    + sfcbFiltrosHtml(combos, f) + sfcbTabsHtml(cs, cel) + sfcbBoardHtml(cs, cel, drag) + sfcbCanceladosHtml(cs, drag)
+    + sfcbClientesHtml(todos0, fc) + sfcbFiltrosHtml(combos, f) + sfcbTabsHtml(cs, cel) + sfcbBoardHtml(cs, cel, drag) + sfcbCanceladosHtml(cs, drag)
     + (adm ? `<div class="logi-ayuda sfcb-ayuda">Cambiá el estado con el selector de cada tarjeta${drag ? ' o arrastrala a otra columna' : ''} · Arriba de cada columna, los vencidos y los que son para hoy · El número de cada material es lo que falta cortar (Pedido y En corte)</div>` : '');
 }
 function sfcFilaHtml(c) {
@@ -9560,6 +9639,7 @@ function sfcFilaHtml(c) {
     : '<span class="sfc-sinnom">sin nombre</span>';
   const cambio = (c.estado !== 'pedido' && c.estado_at ? ' · ' + E[1].toLowerCase() + ' ' + sfFechaHora(c.estado_at) + (c.estado_por ? ' (' + nkbNom(c.estado_por) + ')' : '') : '')
     + (c.editado_at ? ' · editado ' + sfFechaHora(c.editado_at) + (c.editado_por ? ' (' + nkbNom(c.editado_por) + ')' : '') : '');
+  // El cliente (29-oct): Gaspar y Fran, abajo del nombre en la tarjeta (order, como el resto). Sin Frontera no: todo es suyo.
   return `<div class="lb-row sfc-row${cerrado ? ' r-enviado' : ''}" data-sfc-row="${c.id}">
     <div class="lb-head sfc-head">
       <span class="ln-num">#${c.id}</span>
@@ -9567,6 +9647,7 @@ function sfcFilaHtml(c) {
       <span class="sfc-acc">${acc}</span>
     </div>
     <div class="sfc-det">
+      ${sfcGestor() ? `<div class="sfc-cli" style="order:45;flex:1 1 100%;min-width:0">${sfcCliChip(c)}</div>` : ''}
       <div class="sfc-mat">${escapeHtml(sfcLbl(SFC_MATERIALES, c.material))} ${sfcMuestra(c.color, c.color_hex)}${escapeHtml(sfcLbl(SFC_COLORES, c.color).toLowerCase() + ' · ' + sfcEspTxt(c.espesor) + ' mm')}</div>
       <div class="sfc-archs">${arch || '<span class="muted">Sin archivos</span>'}</div>
       ${c.aclaraciones ? `<div class="sfc-acl-txt">${escapeHtml(c.aclaraciones)}</div>` : ''}
@@ -9627,7 +9708,7 @@ async function sfcBorrar(id) {
   let c = sfcCorte(id);
   if (!sfcPuedeBorrar(c) || (STATE._sfcBorr && STATE._sfcBorr[id])) return;
   const t = sfcTitulo(c);
-  const ok = await showConfirm('¿Borrar el pedido #' + id + (t.sinNombre ? '' : ' "' + t.txt + '"') + '?\nSe borra para vos, para Fran y para Sin Frontera.'
+  const ok = await showConfirm('¿Borrar el pedido #' + id + (t.sinNombre ? '' : ' "' + t.txt + '"') + '?\nSe borra para vos' + (sfcCliTipo(c) === 'sinfrontera' ? ', para Fran y para Sin Frontera.' : ' y para Fran.')
     + (c.estado === 'pedido' ? ' A Fran le llega un aviso.' : ''), { title: 'Borrar pedido', confirmLabel: 'Sí, borrar', cancelLabel: 'No', variant: 'warn' }).catch(() => false);
   if (!ok) return;
   c = sfcCorte(id);   // la lista se pudo actualizar mientras se confirmaba
@@ -9681,7 +9762,7 @@ async function sfcFranUI() {
     : (u.activo && u.con_clave ? 'Ya tiene usuario. Si le ponés otra contraseña, se le cierra la sesión.' : 'El usuario está desactivado: con una contraseña nueva se activa.');
   const bg = document.createElement('div'); bg.className = 'modal-bg';
   bg.innerHTML = `<div class="modal modal--login"><div class="modal-h"><h3>Usuario de Fran</h3></div><div class="modal-body"><form class="login-form" novalidate>
-      <div style="font-size:13px;color:var(--fg-mute);margin-bottom:10px">Entra con el usuario <b>Fran</b> y ve solo los pedidos de corte de Sin Frontera: los archivos y el estado. ${escapeHtml(estado)}</div>
+      <div style="font-size:13px;color:var(--fg-mute);margin-bottom:10px">Entra con el usuario <b>Fran</b> y ve solo los pedidos de corte (los archivos y el estado) y el tablero de Producción corpóreos. ${escapeHtml(estado)}</div>
       <label class="nc-field"><span class="nc-label">Contraseña nueva${u.existe ? ' (vacía = no se cambia)' : ''}</span><input type="password" class="nc-input" data-p1 autocomplete="new-password"></label>
       <label class="nc-field" style="margin-top:10px"><span class="nc-label">Repetila</span><input type="password" class="nc-input" data-p2 autocomplete="new-password"></label>
       <label class="nc-field" style="margin-top:10px"><span class="nc-label">WhatsApp de Fran (le avisa cada pedido nuevo)</span><input class="nc-input" data-tel inputmode="tel" autocomplete="off" placeholder="11 2345 6789" value="${escapeHtml(telAntes)}"></label>
@@ -9846,6 +9927,32 @@ function sfcbFiltrosHtml(combos, f) {
     ? `<button type="button" class="btn btn-cyan sfcb-armar" data-sfcb-armar title="Abre el nesting con los archivos de lo que falta cortar en ${escapeHtml(sfcComboTxt(sel))}">🧩 Armar placas</button>` : '';
   return `<div class="sfcb-filtros"><div class="sfcb-fchips" data-sfcb-filtros role="group" aria-label="Filtrar por material, color y espesor">${chips}</div>${armar}</div>`;
 }
+// Filtro por cliente (Gaspar 29-oct; solo Gaspar y Fran): Todos · Sin Frontera · Corpóreos nuestros · Otros clientes, con lo que
+// falta cortar de cada uno. Queda en STATE y en esta compu (clave propia). Al usuario de Sin Frontera NUNCA se le aplica: un valor
+// viejo de esta compu (Gaspar entrando como él) le dejaría el tablero vacío.
+const SFCB_CLIENTE_KEY = 'niventas.sfcbCliente';
+function sfcbCliente() {
+  if (!sfcGestor()) return '';
+  let f = STATE.sfcbCliente;
+  if (f == null) { try { f = localStorage.getItem(SFCB_CLIENTE_KEY) || ''; } catch (_) { f = ''; } }
+  return (STATE.sfcbCliente = SFC_CLIENTES.some(x => x[0] === f) ? f : '');
+}
+function sfcbElegirCliente(k) {
+  k = SFC_CLIENTES.some(x => x[0] === k) ? k : '';
+  if (k === sfcbCliente()) return;
+  STATE.sfcbCliente = k;
+  try { if (k) localStorage.setItem(SFCB_CLIENTE_KEY, k); else localStorage.removeItem(SFCB_CLIENTE_KEY); } catch (_) {}
+  const l = document.querySelector('.sfc-wrap [data-sfc-lista]'); if (!l) return;
+  l.querySelectorAll('[data-sfcb-list]').forEach(x => { x.scrollTop = 0; });   // otro cliente: cada columna desde arriba
+  sfcbPintar(l, true);
+}
+function sfcbClientesHtml(todos, fc) {
+  if (!sfcGestor() || !todos.length) return '';
+  const por = k => todos.filter(c => (!k || sfcCliTipo(c) === k) && ['pedido', 'en_corte'].includes(sfcEstado(c.estado)[0])).length;
+  const chip = (k, txt) => { const n = por(k); return `<button type="button" class="sfcb-fchip${k === fc ? ' on' : ''}${n ? '' : ' cero'}" data-sfcb-cli="${escapeHtml(k)}" aria-pressed="${k === fc ? 'true' : 'false'}" title="${escapeHtml(txt + ': ' + n + ' por cortar')}"><span class="t">${escapeHtml(txt)}</span><b>${n}</b></button>`; };
+  const chips = chip('', 'Todos') + chip('sinfrontera', 'Sin Frontera') + chip('ni_corporeo', 'Corpóreos nuestros') + chip('otro', 'Otros clientes');
+  return `<div class="sfcb-filtros"><div class="sfcb-fchips" data-sfcb-clis role="group" aria-label="Filtrar por cliente">${chips}</div></div>`;
+}
 // "🧩 Armar placas" (Gaspar y Fran; Sin Frontera no): los pedidos de la combinación elegida que faltan cortar, tildados, con sus
 // archivos. "Abrir en el nesting" abre la pestaña en el mismo toque (si no, el navegador la bloquea), baja los archivos con el
 // link de siempre (sfUrl, que ya lleva el token: el nesting no toca tokens) y se los pasa por postMessage, de pestaña a pestaña
@@ -9918,9 +10025,11 @@ function sfcbPasarAlNesting(w, lote, meta, lista, onProg) {
 function sfcbArmar() {
   if (!(isAdmin() || isFranOnly()) || document.querySelector('.sfcb-armar-bg')) return;
   const D = STATE.sfCortes; if (!D || D.error) return;
-  const combos = sfcCombos(D.cortes || []), f = sfcbFiltro(combos), x = combos.find(y => y.key === f); if (!x) return;
+  // Mezcla clientes en la misma placa (cada pieza lleva su número); con un cliente elegido en el filtro, solo los de ese cliente.
+  const fc = sfcbCliente(), todos = (D.cortes || []).filter(c => !fc || sfcCliTipo(c) === fc);
+  const combos = sfcCombos(todos), f = sfcbFiltro(combos), x = combos.find(y => y.key === f); if (!x) return;
   const orden = { pedido: 0, en_corte: 1 }, et = c => orden[sfcEstado(c.estado)[0]];
-  const peds = (D.cortes || []).filter(c => sfcComboKey(c) === f && et(c) != null)
+  const peds = todos.filter(c => sfcComboKey(c) === f && et(c) != null)
     .sort((a, b) => et(a) - et(b) || String(a.fecha || '9999').localeCompare(String(b.fecha || '9999')) || a.id - b.id);
   // Un pedido sin ningún archivo que el nesting lea (un .f3d, fotos) queda a la vista pero sin tildar: no suma nada a las placas
   // y no tiene que aparecer en "Pasar a En corte".
@@ -9938,7 +10047,7 @@ function sfcbArmar() {
     const c = sfcCorte(it.c.id) || it.c, E = sfcEstado(c.estado), t = sfcTitulo(c), sirven = it.arch.some(y => y.ok);
     const archs = it.arch.map(y => `<li class="${y.ok ? 'ok' : 'no'}${y.st ? ' ' + y.st : ''}"><span class="an">${/^image\//.test(y.a.tipo || '') ? '🖼' : '📄'} ${escapeHtml(y.a.nombre)}</span><span class="as">${archivoTxt(y)}</span></li>`).join('');
     return `<div class="sfcb-ap${it.on ? ' on' : ''}${sirven ? '' : ' nada'}" data-ap-item="${c.id}">
-      <label class="sfcb-ap-h"><input type="checkbox" data-ap="${c.id}"${it.on ? ' checked' : ''}${sirven && !P.busy ? '' : ' disabled'}><span class="ln-num">#${c.id}</span><span class="n${t.sinNombre ? ' sin-nombre' : ''}">${escapeHtml(t.txt)}</span><span class="sfc-est-pill" style="--c:${E[2]}">${E[1]}</span></label>
+      <label class="sfcb-ap-h"><input type="checkbox" data-ap="${c.id}"${it.on ? ' checked' : ''}${sirven && !P.busy ? '' : ' disabled'}><span class="ln-num">#${c.id}</span><span class="n${t.sinNombre ? ' sin-nombre' : ''}">${escapeHtml(t.txt)}</span>${sfcCliChip(c)}<span class="sfc-est-pill" style="--c:${E[2]}">${E[1]}</span></label>
       <ul class="sfcb-ap-archs">${archs || '<li class="no"><span class="as">Sin archivos</span></li>'}</ul></div>`;
   };
   const bajando = () => !!P.lista && P.lista.some(z => !z.y.st || z.y.st === 'bajando');
@@ -9952,7 +10061,7 @@ function sfcbArmar() {
   const pinta = () => {
     // Mientras se pasa: bajando, o ya bajado y esperando que la pestaña del nesting avise.
     const msg = P.busy ? (bajando() ? 'Bajando los archivos para el nesting…' : 'Esperando la pestaña del nesting…') : P.msg;
-    cuerpo.innerHTML = `<div class="sfcb-ap-combo">${sfcMuestra(x.colorKey, x.hex)}<b>${escapeHtml(sfcComboTxt(x))}</b></div>
+    cuerpo.innerHTML = `<div class="sfcb-ap-combo">${sfcMuestra(x.colorKey, x.hex)}<b>${escapeHtml(sfcComboTxt(x))}</b>${fc ? `<span class="muted" style="margin-left:6px">· ${escapeHtml(fc === 'otro' ? 'Otros clientes' : sfcLbl(SFC_CLIENTES, fc))}</span>` : ''}</div>
       <div class="sfcb-ap-ayuda">Tildá los pedidos que van en estas placas: el nesting se abre en otra pestaña con sus archivos.</div>
       <div class="sfcb-ap-lista">${P.items.length ? P.items.map(itemHtml).join('') : '<div class="sfk-vacio">No queda nada por cortar en este material.</div>'}</div>
       <div class="sfcb-ap-estado" role="status" aria-live="polite">${msg ? `<span>${escapeHtml(msg)}</span>` : ''}${P.err ? `<span class="err">${escapeHtml(P.err)}</span>` : ''}</div>`;
@@ -10027,7 +10136,7 @@ function sfcbArmar() {
 function sfcbSig() {
   const D = STATE.sfCortes;
   return JSON.stringify([D ? (D.error || '') : null, D && D.cortes ? D.cortes : null, sfcbEtapaCel((D && D.cortes) || []), !!STATE.sfcbEntTodos,
-    new Date().toDateString(), isAdmin(), isFranOnly(), sfkFino(), STATE.sfcbFiltro || '']);
+    new Date().toDateString(), isAdmin(), isFranOnly(), sfkFino(), STATE.sfcbFiltro || '', sfcbCliente()]);
 }
 // Scroll del tablero (cada columna, el tablero de costado y las pestañas del celular): se anota cuando se mueve (sfcbBind lo
 // escucha en captura) y se devuelve después de cada redibujo: el del tablero solo (sfcbPintar) y el de la pantalla entera
@@ -10040,6 +10149,7 @@ function sfcbScrollAnotar(x) {
   else if (x.hasAttribute('data-sfcb-board')) S.board = x.scrollLeft;
   else if (x.hasAttribute('data-sfcb-tabs')) S.tabs = x.scrollLeft;
   else if (x.hasAttribute('data-sfcb-filtros')) S.filtros = x.scrollLeft;
+  else if (x.hasAttribute('data-sfcb-clis')) S.clis = x.scrollLeft;
 }
 function sfcbScrollPoner(l) {
   if (!l) return;
@@ -10052,6 +10162,7 @@ function sfcbScrollPoner(l) {
   if (tb && S.tabs) tb.scrollLeft = S.tabs;
   if (bd && S.board) bd.scrollLeft = S.board;
   if (fi && S.filtros) fi.scrollLeft = S.filtros;
+  const cl = l.querySelector('[data-sfcb-clis]'); if (cl && S.clis) cl.scrollLeft = S.clis;
 }
 // Quién y cuándo va en un renglón (cortado con "…" si no entra): el texto entero, al pasar el mouse.
 function sfcbTitulos(l) { if (l) l.querySelectorAll('.sfcb-card .sfc-meta').forEach(m => { m.title = m.textContent; }); }
@@ -10069,7 +10180,7 @@ function sfcbPintar(l, forzar) {
   const sig = sfcbSig();
   if (forzar || l.getAttribute('data-sig') !== sig) {
     if (!forzar && sfcbEligiendo(l)) { STATE._sfcbPend = true; return; }
-    l.querySelectorAll('[data-sfcb-list], [data-sfcb-board], [data-sfcb-tabs], [data-sfcb-filtros]').forEach(x => sfcbScrollAnotar(x));
+    l.querySelectorAll('[data-sfcb-list], [data-sfcb-board], [data-sfcb-tabs], [data-sfcb-filtros], [data-sfcb-clis]').forEach(x => sfcbScrollAnotar(x));
     l.setAttribute('data-sig', sig);
     l.innerHTML = sfcListaHtml();
     sfcbScrollPoner(l);
@@ -10100,6 +10211,7 @@ function sfcbBind(root) {
   root.addEventListener('click', e => {
     const tab = e.target.closest('[data-sfcb-tab]'); if (tab) { sfcbElegirTab(tab.getAttribute('data-sfcb-tab')); return; }
     const fch = e.target.closest('[data-sfcb-filtro]'); if (fch) { sfcbElegirFiltro(fch.getAttribute('data-sfcb-filtro')); return; }
+    const fcl = e.target.closest('[data-sfcb-cli]'); if (fcl) { sfcbElegirCliente(fcl.getAttribute('data-sfcb-cli')); return; }
     if (e.target.closest('[data-sfcb-armar]')) { sfcbArmar(); return; }
     if (e.target.closest('[data-sfcb-ent-todos]')) {
       STATE.sfcbEntTodos = !STATE.sfcbEntTodos;
@@ -10122,7 +10234,7 @@ function sfcbBind(root) {
     const v = d.querySelector('.sfcb-canc-ver'); if (v) v.textContent = d.open ? 'ocultar' : 'ver';
   }, true);
   // Scroll de las columnas: 'scroll' tampoco burbujea. Se anota para devolverlo después de un redibujo (sfcbScrollPoner).
-  root.addEventListener('scroll', e => { const t = e.target; if (t && t.nodeType === 1 && t.matches('[data-sfcb-list], [data-sfcb-board], [data-sfcb-tabs], [data-sfcb-filtros]')) sfcbScrollAnotar(t); }, true);
+  root.addEventListener('scroll', e => { const t = e.target; if (t && t.nodeType === 1 && t.matches('[data-sfcb-list], [data-sfcb-board], [data-sfcb-tabs], [data-sfcb-filtros], [data-sfcb-clis]')) sfcbScrollAnotar(t); }, true);
   // Lo que llegó mientras se elegía un estado en otra tarjeta (sfcbPintar esperó): se pinta cuando ese selector suelta el foco o
   // cambia (si cambió, sfcCambiarEstado ya lo deshabilitó y la tarjeta se repinta atenuada en su lugar hasta que guarde).
   const pendiente = e => {
@@ -10196,7 +10308,8 @@ function sfcBind(root) {
     }
     form.addEventListener('click', e => {
       const b = e.target.closest && e.target.closest('button'); if (!b || !form.contains(b)) return;
-      if (b.hasAttribute('data-sfc-material')) { F.material = b.getAttribute('data-sfc-material'); sfcMarcar(form, 'data-sfc-material', F.material); }
+      if (b.hasAttribute('data-sfc-cli')) { F.cliTipo = b.getAttribute('data-sfc-cli'); sfcPintarCliente(F.cliTipo === 'otro'); }
+      else if (b.hasAttribute('data-sfc-material')) { F.material = b.getAttribute('data-sfc-material'); sfcMarcar(form, 'data-sfc-material', F.material); }
       else if (b.hasAttribute('data-sfc-color')) { F.color = b.getAttribute('data-sfc-color'); F.colorHex = b.getAttribute('data-hex') || ''; F.creandoColor = false; sfcPintarColores(); }
       else if (b.hasAttribute('data-sfc-color-nuevo')) { F.creandoColor = !F.creandoColor; sfcPintarColores(); if (F.creandoColor) { const n = form.querySelector('[data-sfc-nuevo-nom]'); if (n) n.focus(); } }
       else if (b.hasAttribute('data-sfc-nuevo-ok')) sfcUsarColorNuevo();
@@ -10226,8 +10339,11 @@ function sfcBind(root) {
       const t = e.target;
       if (t.matches && t.matches('[data-sfc-nuevo-hex]')) F.nuevoHex = t.value;
       else if (t.matches && t.matches('[data-sfc-nuevo-nom]')) F.nuevoNom = t.value;
+      else if (t.matches && t.matches('[data-sfc-cli-nom]')) F.cliNombre = t.value;   // nombre del "Otro cliente" (se repinta: delegado)
     }));
     form.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.matches && e.target.matches('[data-sfc-nuevo-nom]')) { e.preventDefault(); sfcUsarColorNuevo(); } });
+    // Nombre del "Otro cliente": Enter pasa al nombre del pedido (no lo manda).
+    form.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.matches && e.target.matches('[data-sfc-cli-nom]')) { e.preventDefault(); if (nom) nom.focus(); } });
     const limpiar = () => { const er = form.querySelector('[data-sfc-err]'); if (er && er.textContent) er.textContent = ''; };
     form.addEventListener('input', limpiar);
     form.addEventListener('click', e => { if (e.target.closest && e.target.closest('.sfc-chip')) limpiar(); });
@@ -10258,6 +10374,7 @@ function bindSinFrontera() {
     const el = e.target;
     if (el.closest('[data-sf-refresh]')) { if (STATE.view === 'sf-pedidos') STATE.sfPed = null; else STATE.sf = null; redibujar(); return; }
     const vista = el.closest('[data-sf-vista]'); if (vista) { setView(vista.dataset.sfVista); return; }
+    const ctab = el.closest('[data-corte-admin-tab]'); if (ctab) { corteAdminTabIr(ctab.getAttribute('data-corte-admin-tab')); return; }   // Gaspar en Pedidos de corte
     if (el.closest('[data-sf-password]')) { sfPasswordUI(); return; }
     if (el.closest('[data-sf-config]')) { sfConfigUI(); return; }
     if (el.closest('[data-sf-op]')) { await sfPedirOperador(); redibujar(); return; }
@@ -11282,6 +11399,8 @@ function corteStartPolling() {
 }
 async function bindCorte() {
   corteStartPolling();
+  // Gaspar: pestañas Alumnos / Neón nuestro / Pedidos de corte (corteAdminTabsHtml). Antes de la primera carga: andan mientras carga.
+  document.querySelectorAll('[data-corte-admin-tab]').forEach(b => { b.onclick = () => corteAdminTabIr(b.getAttribute('data-corte-admin-tab')); });
   // "Sin pagar" después del martes 16 h: el botón rojo de la derecha (solo admin).
   if (isAdmin()) { corteSinPagarFetch(false); const spb = document.querySelector('[data-corte-sinpagar]'); if (spb) spb.onclick = corteSinPagarModal; }
   if (isAdmin()) corteSenasBind(); // señas de pedidos web
@@ -11783,7 +11902,8 @@ function renderShell() {
           <button class="nav-item ${v==='sf-pedidos'?'active':''}" data-view="sf-pedidos"><span class="icon">▦</span> Mis pedidos</button>
           <button class="nav-item ${v==='sf-cortes'?'active':''}" data-view="sf-cortes"><span class="icon">✂</span> Pedir corte</button>
         ` : isFranOnly() ? `
-          <button class="nav-item active" data-view="sf-cortes"><span class="icon">✂</span> Cortes de Sin Frontera</button>
+          <button class="nav-item ${v==='sf-produccion'?'active':''}" data-view="sf-produccion"><span class="icon">🏭</span> Producción corpóreos</button>
+          <button class="nav-item ${v==='sf-cortes'?'active':''}" data-view="sf-cortes"><span class="icon">✂</span> Pedidos de corte</button>
         ` : isMarketingOnly() ? `
           <button class="nav-item active" data-view="funnel-ads"><span class="icon">▽</span> Funnel Ads</button>
         ` : isDisenadorOnly() ? `
@@ -11793,14 +11913,14 @@ function renderShell() {
         <button class="nav-item ${v==='dashboard'?'active':''}" data-view="dashboard"><span class="icon">◊</span> Dashboard</button>
         <button class="nav-item ${v==='pedidos'?'active':''}" data-view="pedidos"><span class="icon">▦</span> Pedidos</button>
         ${nkbPuedeVer() ? `<button class="nav-item ${v==='neon'?'active':''}" data-view="neon"><span class="icon">🔴</span> Producción neón</button>` : ''}
+        ${isAdmin() ? `<button class="nav-item ${v==='sf-produccion'||v==='sf-pedidos'?'active':''}" data-view="sf-produccion"><span class="icon">🏭</span> Producción corpóreos</button>` : ''}
         <button class="nav-item ${v==='presupuestos'?'active':''}" data-view="presupuestos"><span class="icon">∑</span> Presupuestos</button>
         <button class="nav-item ${v==='cotizacion'?'active':''}" data-view="cotizacion"><span class="icon">◆</span> Cotización</button>
         ${isAdmin() ? `<button class="nav-item ${v==='agenda'?'active':''}" data-view="agenda"><span class="icon">◷</span> Agenda</button>` : ''}
         ${(isJoaquinUser(STATE.user) || isGasparUser(STATE.user) || (isSecundario(STATE.user) && !isSoloNeonUser(STATE.user))) ? `<button class="nav-item ${v==='corporeas'?'active':''}" data-view="corporeas"><span class="icon">▣</span> Corpóreas</button>` : ''}
         ${rdPuedeVer() ? `<button class="nav-item ${v==='rendimiento'?'active':''}" data-view="rendimiento"><span class="icon">↗</span> ${isAdmin() ? 'Rendimiento' : 'Mi rendimiento'}</button>` : ''}
-        ${isAdmin() ? `<button class="nav-item ${v==='corte'?'active':''}" data-view="corte"><span class="icon">✂</span> Corte</button>` : ''}
+        ${isAdmin() ? `<button class="nav-item ${v==='corte'||v==='sf-cortes'?'active':''}" data-view="corte"><span class="icon">✂</span> Corte</button>` : ''}
         ${isAdmin() ? `<button class="nav-item ${v==='logistica'?'active':''}" data-view="logistica"><span class="icon">📦</span> Logística</button>` : ''}
-        ${isAdmin() ? `<button class="nav-item ${/^sf-/.test(v)?'active':''}" data-view="sf-produccion"><span class="icon">🏭</span> Sin Frontera</button>` : ''}
         ${!isSecundario(STATE.user) ? `<button class="nav-item ${v==='seguimientos'?'active':''}" data-view="seguimientos"><span class="icon">↻</span> Seguimientos
           ${sgts.length ? `<span class="badge">${sgts.length}</span>` : ''}
         </button>` : ''}
@@ -28527,7 +28647,7 @@ function getUserRole() {
   if (u === 'emma' || u === 'emmanuel' || u === 'disenador') return 'disenador';
   if (u === 'logistica') return 'logistica'; // externo: ningún permiso de "comercial" (cotizar, OC, chats…)
   if (u.replace(/[\s._-]+/g, '') === 'sinfrontera') return 'sinfrontera'; // externo: idem
-  if (u === 'fran') return 'fran'; // solo los pedidos de corte de Sin Frontera
+  if (u === 'fran') return 'fran'; // solo los pedidos de corte y Producción corpóreos
   if (u === 'lautaro') return 'marketing'; // publicista: solo el Funnel Ads
   return 'comercial'; // joaco, joaquin, default
 }
