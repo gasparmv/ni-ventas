@@ -4657,6 +4657,7 @@ async function processPrecotizPilot(env) {
   let _lastOk = ''; try { _lastOk = String((await kvGet(env, 'precotiz_tick_ok', '')) || ''); } catch (_) {}
   const _recupDesde = (!catchup && _lastOk && Date.now() - Date.parse(_lastOk) > 20 * 60 * 1000)
     ? new Date(Math.max(Date.parse(_lastOk) - 60 * 1000, Date.now() - 3 * 3600e3)).toISOString() : '';
+  const reintentoIa = new Set();   // leads que se vuelven a evaluar porque la IA falló (ver REINTENTO abajo)
   let cands = [];
   try {
     // SIEMPRE: leads frescos (últimos 20 min) — el flujo normal, no se toca.
@@ -4694,6 +4695,22 @@ async function processPrecotizPilot(env) {
       const vistos3 = new Set(cands.map(c => c.phone));
       for (const c of (rs3.results || [])) { if (!vistos3.has(c.phone)) cands.push(c); }
     }
+    // REINTENTO TRAS UN ERROR DE LA IA (Gaspar 29-oct: la cuenta de Anthropic llegó a su límite y 41 consultas quedaron sin bot
+    // de 20:51 a 12:10). Cada 10 min: los leads cuya última evaluación de las últimas 24 h fue un error de la IA (hace 10 min o
+    // más), sin entrar al piloto, se vuelven a evaluar. Si la IA sigue caída fallan de nuevo y esperan otros 10 min. El freno
+    // anti-pisón de abajo igual los saltea si ya les respondió una persona.
+    if (new Date().getUTCMinutes() % 10 === 0) {
+      const rs4 = await env.DB.prepare(
+        "SELECT l.phone, (SELECT MAX(m.ts) FROM wa_messages m WHERE m.phone = l.phone AND m.direction = 'inbound' AND m.msg_type != 'status') AS last_ts " +
+        "FROM (SELECT phone, MAX(ts) AS ts FROM precotiz_eval_log WHERE ts > ? GROUP BY phone) l " +
+        "WHERE l.ts < ? AND (SELECT x.resultado FROM precotiz_eval_log x WHERE x.phone = l.phone AND x.ts = l.ts LIMIT 1) = 'error_ia' " +
+        "AND l.phone NOT IN (SELECT phone FROM precotiz_pilot) ORDER BY l.ts ASC LIMIT 15"
+      ).bind(new Date(Date.now() - 24 * 3600e3).toISOString(), new Date(Date.now() - 10 * 60e3).toISOString()).all();
+      const vistos4 = new Set(cands.map(c => c.phone));
+      // Cada reintento queda anotado ('reintento'): si después se saltea (ya le respondió una persona, pasó a cursos…) no vuelve a
+      // ocupar lugar; si la IA falla otra vez, el 'error_ia' nuevo lo vuelve a poner en la cola dentro de 10 min.
+      for (const c of (rs4.results || [])) { if (!c.last_ts) continue; try { await precotizLog(env, c.phone, 'reintento', { motivo: 'la IA había fallado' }); } catch (_) {} reintentoIa.add(c.phone); if (!vistos4.has(c.phone)) cands.push({ phone: c.phone, last_ts: c.last_ts }); }
+    }
   } catch (e) { console.log('[precotiz] error candidatos', String((e && e.message) || e)); return; }
   console.log('[precotiz] candidatos', cands.length, Date.now() - _tS, 'ms');
 
@@ -4708,7 +4725,7 @@ async function processPrecotizPilot(env) {
     if (await precotizFrozen(env, phone)) continue;                        // freno de mano MANUAL: el bot no habla más en este chat
     if (!precotizPicks(phone, esIgLead ? igSample : samplePct)) continue;  // fuera de la muestra (IG usa su propia muestra)
     if (await precotizGet(env, phone)) continue;                           // ya en el piloto
-    if ((await kvGet(env, 'precotiz_seen:' + phone)) === '1') continue;     // ya evaluado
+    if (!reintentoIa.has(phone) && (await kvGet(env, 'precotiz_seen:' + phone)) === '1') continue;     // ya evaluado (salvo reintento tras un error de la IA)
     // Debounce: esperar a que el lead nuevo pare de escribir (manda hola + foto +
     // medidas en ráfaga) antes de captarlo. NO marcamos seen todavía → se re-evalúa
     // en los próximos ticks hasta que pase el silencio.
@@ -4758,7 +4775,7 @@ async function processPrecotizPilot(env) {
     let first;
     try { first = await env.DB.prepare("SELECT MIN(ts) AS t FROM wa_messages WHERE phone = ? AND direction='inbound' AND msg_type!='status'").bind(phone).first(); } catch (_) { continue; }
     const firstTs = first?.t || '';
-    if (!firstTs || firstTs < new Date(Date.now() - (catchup ? 14 : 3) * 60 * 60 * 1000).toISOString()) continue; // primer contacto reciente (<3h normal; <14h en el barrido matutino de las 8)
+    if (!firstTs || firstTs < new Date(Date.now() - (catchup ? 14 : (reintentoIa.has(phone) ? 24 : 3)) * 60 * 60 * 1000).toISOString()) continue; // primer contacto reciente (<3h normal; <14h en el barrido matutino de las 8)
 
     const ctx = await buildChatContext(env, phone, 40);
     if (!ctx) continue;
