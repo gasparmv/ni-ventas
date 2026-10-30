@@ -173,12 +173,12 @@
   <div class="lote" id="lote" role="status" aria-live="polite" hidden></div>
 
   <section class="card" id="sec-archivos">
-    <div class="titulo"><span class="paso">Paso 1</span><h2>Archivos</h2><span class="sutil">.ai, .pdf o .dxf, todos del mismo material</span></div>
+    <div class="titulo"><span class="paso">Paso 1</span><h2>Archivos</h2><span class="sutil">.ai, .pdf, .svg o .dxf, todos del mismo material</span></div>
     <div class="drop" id="drop" tabindex="0" role="button" aria-label="Elegir archivos">
       <b>Arrastrá acá los archivos de Emma</b>
-      <span class="mute">o un DXF (Fusion 360, AutoCAD), o tocá para elegirlos</span>
+      <span class="mute">o un DXF (Fusion 360, AutoCAD) o un SVG, o tocá para elegirlos</span>
     </div>
-    <input type="file" id="inp" accept=".ai,.pdf,.dxf,application/pdf,application/illustrator,application/postscript,application/dxf,image/vnd.dxf" multiple hidden>
+    <input type="file" id="inp" accept=".ai,.pdf,.dxf,.svg,application/pdf,application/illustrator,application/postscript,application/dxf,image/vnd.dxf,image/svg+xml" multiple hidden>
     <div class="archivos" id="lista-archivos"></div>
     <div id="revision"></div>
     <details class="ayuda">
@@ -190,6 +190,7 @@
         <li>Escala 1:1 en milímetros. Si hay textos, pasados a contornos (Texto › Crear contornos).</li>
         <li>Un archivo por material (por ejemplo, "transparentes 47").</li>
         <li>Un DXF (por ejemplo de Fusion 360) también sirve. Una capa que se llama corte, calado o agujeros va a lo suyo. Si ninguna se llama corte, lo demás va a corte si viene todo de un color, o si es blanco o negro y no hay nada rojo; si no, los colores van como en el punto 1. Si viene con los trazos sueltos, abajo de los archivos aparece para unirlos.</li>
+        <li>Un SVG (Illustrator, Inkscape, CorelDRAW) se lee como el PDF: los colores van como en el punto 1. La medida sale del ancho y alto del archivo en mm, cm o pulgadas; si viene en px, se toma a 96 por pulgada (72 si es de Illustrator), así que conviene fijarse que las medidas den. Los textos, pasados a contornos (en Inkscape: Trayecto › Objeto a trayecto).</li>
       </ol>
     </details>
   </section>
@@ -231,8 +232,8 @@
       <div id="lista-recortes"></div>
       <div class="acciones" style="margin-top:10px">
         <button id="b-rec-medidas">+ Recorte por medidas</button>
-        <button id="b-rec-archivo">+ Recorte dibujado (PDF, .ai o DXF)</button>
-        <input type="file" id="inp-rec" accept=".ai,.pdf,.dxf,application/pdf,application/illustrator,application/dxf,image/vnd.dxf" hidden>
+        <button id="b-rec-archivo">+ Recorte dibujado (PDF, .ai, SVG o DXF)</button>
+        <input type="file" id="inp-rec" accept=".ai,.pdf,.dxf,.svg,application/pdf,application/illustrator,application/dxf,image/vnd.dxf,image/svg+xml" hidden>
       </div>
       <div class="form-rec" id="form-rec" hidden>
         <div class="filas">
@@ -322,6 +323,7 @@
 <script src="clipper.js?v=1"></script>
 <script src="gcode.js?v=5"></script>
 <script src="dxf.js?v=4"></script>
+<script src="svg.js?v=1"></script>
 <script src="arcos.js?v=2"></script>
 <script>
 'use strict';
@@ -331,6 +333,8 @@
 // AGUJEROS. Todo corre en el navegador.
 // También lee DXF (dxf.js, 26-oct). Fusion 360 exporta cada línea, arco y curva por separado: el paso 1 marca los trazos
 // sueltos y, si Gaspar quiere, los une en figuras cerradas.
+// Y SVG (svg.js, 30-oct): se lee como un PDF de una página (los mismos colores y la tabla del paso 2), en mm según el ancho y
+// alto del archivo; los trazos abiertos van al paso 1 como los sueltos del DXF. El SVG nunca se mete en la página.
 const PT = 25.4 / 72;        // 1 punto de PDF en mm
 const TOL_CURVA = 0.05;      // mm: error máximo al pasar las curvas a tramos rectos
 const TOL_ARCO = TOL_CURVA;  // mm: desvío máximo de las rectas y arcos del DXF contra esos tramos (arcos.js); contra el dibujo se suma TOL_CURVA
@@ -419,6 +423,22 @@ function sinRepetidos(pts) {
   for (const p of pts) { const u = out[out.length - 1]; if (!u || Math.abs(u[0] - p[0]) > 1e-4 || Math.abs(u[1] - p[1]) > 1e-4) out.push(p); }
   return out;
 }
+// Los subtrazos de un dibujo del PDF o del SVG, listos: sin puntos repetidos seguidos; uno que termina a menos de 0,5 mm de
+// donde empezó, o que se rellena, queda cerrado. lw: el ancho del trazo en mm (0 si no tiene).
+function subsLimpios(l, relleno, lw) {
+  const subs = [];
+  for (const q of l) {
+    const pts = sinRepetidos(q.pts);
+    if (pts.length < 2) continue;
+    let cerrado = q.cerrado || relleno;
+    if (pts.length > 2 && dist(pts[0], pts[pts.length - 1]) < 0.5) { pts.pop(); cerrado = true; }
+    if (pts.length < 3) cerrado = false;
+    const s = { pts, cerrado, lw };
+    if (q.curva != null) s.curva = q.curva; // para unir los trazos sueltos (dxf.js unir)
+    subs.push(s);
+  }
+  return subs;
+}
 // Recorre la lista de operaciones de una página y devuelve los dibujos visibles: { subs: [{pts, cerrado, lw}], trazo, relleno, sc, fc }.
 function interpretar(ol, oc, k) {
   const O = pdfjsLib.OPS, fn = ol.fnArray, args = ol.argsArray;
@@ -434,15 +454,7 @@ function interpretar(ol, oc, k) {
     if (!l || !l.length || !visible()) return;
     if (cerrarUlt) l[l.length - 1].cerrado = true;
     const escala = Math.sqrt(Math.abs(st.m[0] * st.m[3] - st.m[1] * st.m[2])) * k;
-    const subs = [];
-    for (const q of l) {
-      const pts = sinRepetidos(q.pts);
-      if (pts.length < 2) continue;
-      let cerrado = q.cerrado || relleno;
-      if (pts.length > 2 && dist(pts[0], pts[pts.length - 1]) < 0.5) { pts.pop(); cerrado = true; }
-      if (pts.length < 3) cerrado = false;
-      subs.push({ pts, cerrado, lw: trazo ? st.lw * escala : 0 });
-    }
+    const subs = subsLimpios(l, relleno, trazo ? st.lw * escala : 0);
     if (subs.length) els.push({ subs, trazo, relleno, sc: st.sc, fc: st.fc });
   };
   for (let i = 0; i < fn.length; i++) {
@@ -478,8 +490,9 @@ async function leerArchivo(file, a) {
   const buf = new Uint8Array(await file.arrayBuffer());
   const cab = new TextDecoder('latin1').decode(buf.subarray(0, 1024));
   if (/\.dxf$/i.test(file.name) || /^\s*(0\s*\r?\n\s*SECTION|999\s*\r?\n)/.test(cab)) return leerDxf(buf, a);
+  if (/\.svg$/i.test(file.name) || (!cab.includes('%PDF') && /<svg[\s>]/i.test(cab))) return leerSvg(buf, a);
   if (!window.pdfjsLib) throw new Error('No se pudo cargar el lector de PDF. Revisá la conexión y recargá la página.');
-  if (!cab.includes('%PDF')) throw new Error('No es un PDF, ni un .ai compatible con PDF, ni un DXF. Que Emma lo guarde como PDF, o como .ai con "Crear archivo compatible con PDF" tildado.');
+  if (!cab.includes('%PDF')) throw new Error('No es un PDF, ni un .ai compatible con PDF, ni un SVG, ni un DXF. Que Emma lo guarde como PDF, o como .ai con "Crear archivo compatible con PDF" tildado.');
   const doc = await pdfjsLib.getDocument({ data: buf, isEvalSupported: false, disableFontFace: true, verbosity: 0 }).promise;
   try {
     let oc = null; try { oc = await doc.getOptionalContentConfig(); } catch (_) {}
@@ -513,6 +526,16 @@ function leerDxf(buf, a) {
   const neutro = (c) => claseDefecto(c) === 'calado' || Math.max(...c) < 40; // blanco o negro
   for (const el of els) el.def = claseCapa(el.capa) || (!corteNombrado && (colores.size === 1 || (!hayRojo && neutro(el.sc))) ? 'corte' : claseDefecto(el.sc));
   a.tipo = 'dxf'; a.textos += r.textos; a.dxf = { unidades: r.unidades, conocida: r.unidadConocida, otros: r.otros, avisos: r.avisos };
+  a.paginas.push({ n: 1, els });
+}
+// SVG (svg.js): una sola "página", por color como los PDF de Emma (paso 2). Los trazos abiertos de corte y agujeros van a la
+// revisión del paso 1, como los sueltos del DXF.
+function leerSvg(buf, a) {
+  if (!window.NestSvg) throw new Error('No se pudo cargar el lector de SVG. Recargá la página.');
+  const r = NestSvg.leer(new TextDecoder('utf-8').decode(buf), TOL_CURVA), els = [];
+  for (const el of r.els) { const subs = subsLimpios(el.subs, el.relleno, el.lw); if (subs.length) els.push({ subs, trazo: el.trazo, relleno: el.relleno, sc: el.sc, fc: el.fc }); }
+  if (!els.length) throw new Error(r.textos ? 'El SVG solo tiene textos sin pasar a contornos, y así no se cortan. En Illustrator: Texto › Crear contornos; en Inkscape: Trayecto › Objeto a trayecto.' : 'El SVG no tiene nada dibujado que se pueda cortar: ni trazos ni rellenos.');
+  a.tipo = 'svg'; a.textos += r.textos; a.imagenes += r.imagenes; a.svg = { unidad: r.unidad, avisos: r.avisos };
   a.paginas.push({ n: 1, els });
 }
 
@@ -1162,7 +1185,7 @@ function pintarArchivos() {
   $('lista-archivos').innerHTML = S.archivos.map((a) => {
     const r = a.res || {};
     const sueltos = a.rev && a.rev.pide && a.union.estado !== 'unido' ? ` · <span style="color:var(--suelto)">${plural(a.rev.trazos, 'trazo suelto', 'trazos sueltos')} sin unir</span>` : '';
-    const det = a.estado === 'leyendo' ? 'leyendo…' : a.estado === 'error' ? '' : `${a.tipo === 'dxf' ? 'DXF · ' : ''}${plural(r.piezas || 0, 'pieza', 'piezas')} · ${plural(r.calados || 0, 'calado', 'calados')} · ${plural(r.agujeros || 0, 'agujero', 'agujeros')}${a.paginas.length > 1 ? ' · ' + a.paginas.length + ' mesas de trabajo' : ''}${sueltos}`;
+    const det = a.estado === 'leyendo' ? 'leyendo…' : a.estado === 'error' ? '' : `${a.tipo === 'dxf' ? 'DXF · ' : a.tipo === 'svg' ? 'SVG · ' : ''}${plural(r.piezas || 0, 'pieza', 'piezas')} · ${plural(r.calados || 0, 'calado', 'calados')} · ${plural(r.agujeros || 0, 'agujero', 'agujeros')}${a.paginas.length > 1 ? ' · ' + a.paginas.length + ' mesas de trabajo' : ''}${sueltos}`;
     return `<div class="archivo"><span class="nom">${esc(a.nombre)}</span><span class="det">${det}</span><button class="chico" data-quitar="${a.id}">Quitar</button>${a.error ? `<div class="err">${esc(a.error)}</div>` : ''}</div>`;
   }).join('');
 }
@@ -1279,6 +1302,13 @@ function avisosArchivos() {
       if (av.splineAjuste) out.push({ t: `${n}: ${p(av.splineAjuste, 'curva venía', 'curvas venían')} solo con puntos de paso; se ${av.splineAjuste === 1 ? 'trazó' : 'trazaron'} como lo hace el AutoCAD, con una curva suave por esos puntos. Fijate que ${av.splineAjuste === 1 ? 'dé' : 'den'} como en el dibujo.` });
       if (av.profundo) out.push({ grave: true, t: `${n}: tiene bloques metidos uno adentro de otro en más de 8 niveles; ${p(av.profundo, 'bloque', 'bloques')} de más adentro no se ${av.profundo === 1 ? 'leyó' : 'leyeron'} y no se ${av.profundo === 1 ? 'corta' : 'cortan'}. Descomponelos (Explode) antes de exportar.` });
     }
+    if (a.svg) {
+      const u = a.svg.unidad, av = a.svg.avisos;
+      if (u.de === 'px') out.push({ t: `${n}: el SVG no dice la medida en milímetros; se tomó a ${u.ppp} px por pulgada${u.ppp === 72 ? ', como lo guarda Illustrator' : ', como Inkscape y los navegadores'}. Fijate que las medidas den.` });
+      if (av.recortes) out.push({ t: `${n}: tiene ${p(av.recortes, 'máscara', 'máscaras')} de recorte o de opacidad; no se ${av.recortes === 1 ? 'aplica' : 'aplican'}: se lee todo el dibujo, también lo que quedaba tapado.` });
+      if (av.degradados) out.push({ t: `${n}: ${p(av.degradados, 'trazo o relleno viene', 'trazos o rellenos vienen')} con degradado o motivo; se tomó el primer color del degradado (el motivo, en gris).` });
+      if (av.externos) out.push({ t: `${n}: ${p(av.externos, 'parte apunta', 'partes apuntan')} a otro archivo; no se ${av.externos === 1 ? 'lee' : 'leen'}.` });
+    }
     if (r.cerrados && !sinUnir) out.push({ t: `${n}: ${p(r.cerrados, `contorno ${dxf ? 'de corte' : 'rojo'} no cerraba`, `contornos ${dxf ? 'de corte' : 'rojos'} no cerraban`)} por ${fmt(CIERRE_SOLO)} mm o menos; se ${r.cerrados === 1 ? 'cerró' : 'cerraron'}.` });
     // trazos alineados (anillos): qué borde se tomó y, si no se pudo saber, cómo evitarlo
     const aDiez = `el que queda a ${fmt(CALADO_AL_BORDE)} mm del calado (3 del surco + 7 de acrílico)`, lineas = (k) => p(k, 'línea de corte venía', 'líneas de corte venían');
@@ -1291,7 +1321,7 @@ function avisosArchivos() {
     }
     if (r.caladoAnillo) out.push({ t: `${n}: ${p(r.caladoAnillo, 'calado venía', 'calados venían')} como trazo alineado por dentro o por fuera: se tomó la línea del medio.` });
     if (r.repetidos) out.push({ t: `${n}: ${p(r.repetidos, 'contorno estaba repetido', 'contornos estaban repetidos')} uno encima del otro; se ${r.repetidos === 1 ? 'tomó' : 'tomaron'} una sola vez.` });
-    if (a.textos) out.push({ grave: true, t: `${n}: tiene textos sin pasar a contornos; no se cortan. ${dxf ? 'Hay que pasarlos a contornos antes de exportar el DXF.' : 'En Illustrator: Texto › Crear contornos.'}` });
+    if (a.textos) out.push({ grave: true, t: `${n}: tiene textos sin pasar a contornos; no se cortan. ${dxf ? 'Hay que pasarlos a contornos antes de exportar el DXF.' : a.tipo === 'svg' ? 'En Illustrator: Texto › Crear contornos; en Inkscape: Trayecto › Objeto a trayecto.' : 'En Illustrator: Texto › Crear contornos.'}` });
     if (a.imagenes) out.push({ t: `${n}: tiene ${p(a.imagenes, 'imagen', 'imágenes')}; se ${a.imagenes === 1 ? 'ignora' : 'ignoran'}.` });
     if (r.ignorados) out.push({ t: `${n}: ${p(r.ignorados, 'trazo', 'trazos')} de otros colores se ${r.ignorados === 1 ? 'ignora' : 'ignoran'} (en gris). Si alguno se tenía que cortar, cambiá su color en el paso 2.` });
   }
