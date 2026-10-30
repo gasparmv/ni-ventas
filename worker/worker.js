@@ -2082,7 +2082,8 @@ async function pedidoBorrarDePlanilla(env, p) {
 // Pedido de NEÓN borrado del CRM → se VACÍA su fila de la hoja "2026" del Excel de Ventas, sin borrarla (Gaspar 30-oct: el
 // DXN que se borró para volver a cargarlo quedó dos veces, con la seña y la comisión; hasta acá solo se avisaba "vaciala a
 // mano"). La fila no se borra: la col O (productor) es una fórmula por posición y Pedidos_Directo la trae por IMPORTRANGE con
-// columnas propias al lado. Se vacía A:N y P:AB; la O nunca se toca (escribir ahí rompe la fórmula de toda la columna). En
+// columnas propias al lado. Se vacía A:N y P:AB con el Apps Script (la hoja tiene celdas protegidas para la cuenta de
+// servicio); la O nunca se toca (escribir ahí rompe la fórmula de toda la columna). En
 // Pedidos_Directo se vacía lo que escribe el CRM en esa fila: VENDEDOR (C), Caja, MO y PRODUCTOR (solo valores: una fórmula no
 // se toca). La fila se ubica por el id (col AB, id_sync) o, si no tiene id, por la pista sheet_row; siempre se verifica N° +
 // cartel antes de tocar nada. p = { id, numero, cartel, sheet_row }. Devuelve { vaciada: fila, directo? } o { aviso }.
@@ -2140,7 +2141,20 @@ async function pedidoVaciarFilaNeon(env, p) {
         }
       }
     } catch (e) { directo.aviso = ' No pude revisar Pedidos_Directo (' + String((e && e.message) || e).slice(0, 100) + '): revisá a mano el vendedor y la caja de ese pedido.'; }
-    await limpiar(VENTAS_SHEET_ID, [`'2026'!A${fila}:N${fila}`, `'2026'!P${fila}:AB${fila}`]);
+    // La hoja 2026 tiene celdas protegidas que la cuenta de servicio no puede editar: se vacía con el Apps Script (corre como
+    // el dueño), con set_ad_bulk, una columna por llamada y solo las que tienen algo. Si falla alguna, Pedidos_Directo no se toca.
+    const [fv] = await leer(VENTAS_SHEET_ID, [`'2026'!A${fila}:AB${fila}`]);
+    const llenas = [];
+    ((fv[0]) || []).forEach((v, i) => { if (i !== 14 && txt(v) !== '') llenas.push(i + 1); });
+    const fallas = [];
+    for (let i = 0; i < llenas.length; i += 7) {
+      await Promise.all(llenas.slice(i, i + 7).map(async (c) => {
+        try { const j = await appsScriptPost(env, { action: 'set_ad_bulk', col: c, items: [{ row: fila, ad: '' }] }); if (!(j && j.ok && j.written === 1)) fallas.push(c); }
+        catch (_) { fallas.push(c); }
+      }));
+    }
+    if (llenas.length && fallas.length === llenas.length) throw new Error('el Apps Script no pudo escribir');
+    if (fallas.length) return { aviso: `Vacié casi toda la fila ${fila} del Excel de Ventas; faltaron las columnas ${fallas.sort((a, b) => a - b).map(colLetra).join(', ')}: vaciá esas a mano (sin borrar la fila) y en Pedidos_Directo el vendedor y la caja de la fila ${directo.fila || fila}.` };
     if (directo.fila && directo.celdas.length) {
       try { await limpiar(CORTE_SHEET_ID, directo.celdas.map(c => `Pedidos_Directo!${colLetra(c)}${directo.fila}`)); }
       catch (e) { directo.aviso = ` No pude vaciar el vendedor y la caja en Pedidos_Directo (fila ${directo.fila}): hacelo a mano.`; }
