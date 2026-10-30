@@ -4997,3 +4997,14 @@ table.t.t-pedidos .prod-celda-linea { white-space: normal; line-height: 1.35; }
 .user-chip.off:hover { border-color: var(--border); color: var(--fg-muted); }
 .prod-ver-como { padding: 8px 14px 10px; font-size: 12px; color: var(--fg-muted); background: rgba(0, 229, 255, .06); border-bottom: 1px solid var(--border); }
 .prod-ver-como .user-pick-chips { margin-top: 4px; }
+/* Encargos de neón de Sin Frontera (30-oct) */
+.sfe-card { border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; background: var(--ink-100); margin: 0 0 8px; max-width: 760px; }
+.sfe-card-h { display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.sfe-card-d { font-size: 13px; color: var(--fg-mute); margin-top: 4px; overflow-wrap: anywhere; }
+.sfe-card-d a { color: var(--neon-cyan); }
+.sfe-fila { display: grid; grid-template-columns: 1fr 110px 1fr; gap: 12px; }
+@media (max-width: 640px) { .sfe-fila { grid-template-columns: 1fr 1fr; } .sfe-fila .sfc-campo:last-child { grid-column: 1 / -1; } }
+.sfe-banner { margin: 0 0 12px; padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--neon-cyan) 50%, var(--border)); border-radius: 12px; background: color-mix(in srgb, var(--neon-cyan) 6%, transparent); }
+.sfe-banner-h { font-weight: 700; margin: 0 0 8px; }
+.sfe-modal-box { font-size: 12.5px; margin-top: 8px; padding: 8px 10px; border-radius: 8px; background: color-mix(in srgb, var(--neon-cyan) 8%, transparent); border: 1px solid color-mix(in srgb, var(--neon-cyan) 35%, var(--border)); overflow-wrap: anywhere; }
+.sfe-modal-box a { color: var(--neon-cyan); }

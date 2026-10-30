@@ -9069,10 +9069,225 @@ function sfProdNeonHtml(p) {
   const col = PROD_ESTADO_COLOR[p.prod_estado] || '#9aa0b4';
   return ` <span class="prod-mini" title="Estado de producción del cartel" style="color:${col};border-color:${col}66">${escapeHtml(PROD_ESTADO_LBL[p.prod_estado] || p.prod_estado)}</span>`;
 }
+// ===================== ENCARGOS DE NEÓN DE SIN FRONTERA (Gaspar 30-oct) =====================
+// "Que Sin Frontera desde su usuario pueda encargarme ventas de neones con lo mínimo de info, ninguna información de pago
+// (va a la cuenta corriente). Ellos cargan diseño, para cuándo lo necesitan y medidas aproximadas; a mí me aparece en Pedidos
+// (solo admin), lo verifico y completo lo que falte. Que la carga sea sencilla." Sin Frontera: botón "＋ Encargar un neón" en
+// Mis pedidos (nombre, diseño, medida aprox., cantidad, para cuándo, aclaración) y la lista de sus encargos. Gaspar: aviso
+// arriba de Pedidos con "Cargar pedido" (abre el formulario de siempre con Cliente: Sin Frontera y lo del encargo) y
+// "Descartar". El encargo no es un pedido hasta que Gaspar lo guarda (worker: sf_encargos).
+function sfeFormVacio() { return { nombre: '', medida: '', cantidad: '1', fecha: '', acl: '', archivos: [] }; }
+function sfeForm() { return STATE.sfeForm || (STATE.sfeForm = sfeFormVacio()); }
+const SFE_ESTADO = { nuevo: ['Enviado · Gaspar lo está revisando', '#f5b942'], cargado: ['Cargado', '#34d399'], cancelado: ['Cancelado', '#8b93a7'], descartado: ['Gaspar lo descartó', '#8b93a7'] };
+async function sfeCargar(opts) {
+  if (STATE._sfeCargando) return STATE._sfeCargando;
+  const user = STATE.user;
+  STATE._sfeCargando = (async () => {
+    try {
+      const j = await sfFetch('/admin/sinfrontera/encargos');
+      if (STATE.user !== user) return;
+      STATE.sfEnc = { encargos: j.encargos || [], tel: j.sf_tel || '', at: Date.now() };
+    } catch (e) { if (STATE.user === user && !(opts && opts.silent)) STATE.sfEnc = { error: e.message || 'No se pudieron cargar los encargos', encargos: [], at: Date.now() }; }
+    finally { STATE._sfeCargando = null; }
+  })();
+  return STATE._sfeCargando;
+}
+function sfeArchivosHtml() {
+  return sfeForm().archivos.map(a => `<div class="sfc-file ${a.estado}">
+      <span class="sfc-file-n" title="${escapeHtml(a.nombre)}">${escapeHtml(a.nombre)}</span>
+      <span class="sfc-file-s">${a.estado === 'subiendo' ? 'subiendo ' + Math.round(a.pct || 0) + ' %' : a.estado === 'error' ? escapeHtml(a.err || 'no se subió') : sfcPeso(a.bytes) + ' ✓'}</span>
+      ${a.estado === 'subiendo' ? `<span class="sfc-bar"><i style="width:${Math.round(a.pct || 0)}%"></i></span>` : ''}
+      ${a.estado === 'error' && a.file ? `<button type="button" class="logi-link" data-sfe-reintentar="${a.id}">reintentar</button>` : ''}
+      <button type="button" class="sfc-x" data-sfe-quitar="${a.id}" aria-label="Quitar ${escapeHtml(a.nombre)}" title="Quitar">✕</button>
+    </div>`).join('');
+}
+function sfePintarArchivos() {
+  const el = document.querySelector('.sf-wrap [data-sfe-files]'); if (el) el.innerHTML = sfeArchivosHtml();
+  const b = document.querySelector('.sf-wrap [data-sfe-enviar]'); if (b) { b.disabled = !!STATE._sfeEnviando; b.textContent = STATE._sfeEnviando ? 'Enviando…' : 'Enviar el encargo'; }
+}
+function sfeSubir(a) {
+  a.estado = 'subiendo'; a.pct = 0; a.err = '';
+  const xhr = new XMLHttpRequest(); a.xhr = xhr;
+  xhr.open('PUT', CONFIG.trackerUrl + '/admin/sinfrontera/encargo/archivo?name=' + encodeURIComponent(a.nombre));
+  const h = authHeaders(); Object.keys(h).forEach(k => xhr.setRequestHeader(k, h[k]));
+  xhr.setRequestHeader('Content-Type', (a.file && a.file.type) || 'application/octet-stream');
+  let t = 0;
+  xhr.upload.onprogress = e => { if (!e.lengthComputable) return; a.pct = e.loaded / e.total * 100; const n = Date.now(); if (n - t > 250) { t = n; sfePintarArchivos(); } };
+  xhr.onload = () => {
+    let j = {}; try { j = JSON.parse(xhr.responseText || '{}'); } catch (_) {}
+    if (xhr.status >= 200 && xhr.status < 300 && j.ok && j.key) { a.estado = 'ok'; a.key = j.key; a.pct = 100; a.file = null; }
+    else { a.estado = 'error'; a.err = j.motivo || (xhr.status === 413 ? 'pesa demasiado' : 'no se subió (error ' + xhr.status + ')'); }
+    a.xhr = null; sfePintarArchivos();
+  };
+  xhr.onerror = () => { a.estado = 'error'; a.err = 'se cortó la conexión'; a.xhr = null; sfePintarArchivos(); };
+  xhr.send(a.file);
+}
+function sfeAgregar(files) {
+  const F = sfeForm();
+  for (const f of Array.from(files || [])) {
+    if (F.archivos.length >= 20) { niToast('Hasta 20 archivos por encargo', { error: true }); break; }
+    const a = { id: 'e' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7), nombre: f.name || 'archivo', bytes: f.size || 0, file: f, estado: 'subiendo', pct: 0 };
+    F.archivos.push(a);
+    if (!f.size) { a.estado = 'error'; a.err = 'el archivo está vacío'; a.file = null; continue; }
+    if (f.size > SFC_MAX_BYTES) { a.estado = 'error'; a.err = 'pesa más de 95 MB: comprimilo'; a.file = null; continue; }
+    sfeSubir(a);
+  }
+  const e = document.querySelector('.sf-wrap [data-sfe-err]'); if (e) e.textContent = '';
+  sfePintarArchivos();
+}
+// Sin Frontera, arriba de "Mis pedidos": el botón, el formulario (plegado) y sus encargos.
+function sfeBloqueHtml() {
+  const D = STATE.sfEnc;
+  if (!D && !STATE._sfeCargando) setTimeout(() => sfeCargar().then(() => { if (STATE.view === 'sf-pedidos') { const m = document.getElementById('main'); if (m) { m.innerHTML = renderSinFrontera(); bindSinFrontera(); } } }), 0);
+  const F = sfeForm(), abierto = !!STATE.sfeAbierto;
+  const lista = (D && D.encargos) || [];
+  const vivos = lista.filter(x => x.estado === 'nuevo'), otros = lista.filter(x => x.estado !== 'nuevo').slice(0, 6);
+  const card = x => {
+    const E = SFE_ESTADO[x.estado] || [x.estado, '#8b93a7'];
+    const est = x.estado === 'cargado' && x.pedido_numero ? 'Cargado como pedido #' + x.pedido_numero : E[0];
+    return `<div class="sfe-card">
+      <div class="sfe-card-h"><b>${escapeHtml(x.nombre)}${x.cantidad > 1 ? ' ×' + x.cantidad : ''}</b>${sfPill(est, E[1])}</div>
+      <div class="sfe-card-d">Medida aprox. ${escapeHtml(x.medida)} · para el ${escapeHtml(sfFecha(x.fecha))} · ${x.archivos.length} archivo${x.archivos.length === 1 ? '' : 's'}${x.aclaraciones ? ' · ' + escapeHtml(x.aclaraciones.slice(0, 120)) : ''}</div>
+      ${x.estado === 'nuevo' ? `<div><button type="button" class="logi-link" data-sfe-cancelar="${x.id}">cancelar el encargo</button></div>` : ''}
+    </div>`;
+  };
+  const hoy = sfcHoyYmd();
+  const form = !abierto ? '' : `<form class="sfc-form sfe-form" data-sfe-form novalidate>
+      <label class="sfc-campo"><span class="sfc-lbl">Nombre del cartel</span><input class="nc-input" data-sfe-f="nombre" maxlength="80" autocomplete="off" placeholder="Por ejemplo: Molino, cartel de la barbería" value="${escapeHtml(F.nombre)}"></label>
+      <input type="file" multiple data-sfe-file hidden>
+      <div class="sfc-drop" data-sfe-drop tabindex="0" role="button" aria-label="Elegir el diseño">
+        <div class="sfc-drop-t">📎 Arrastrá el diseño acá o tocá para elegirlo</div>
+        <div class="sfc-drop-s">Foto, render, PDF, AI… lo que tengan · podés subir varios</div>
+      </div>
+      <div class="sfc-files" data-sfe-files>${sfeArchivosHtml()}</div>
+      <div class="sfe-fila">
+        <label class="sfc-campo"><span class="sfc-lbl">Medida aproximada</span><input class="nc-input" data-sfe-f="medida" maxlength="80" autocomplete="off" placeholder="60 x 40 cm" value="${escapeHtml(F.medida)}"></label>
+        <label class="sfc-campo sfe-cant"><span class="sfc-lbl">Cantidad</span><input class="nc-input" data-sfe-f="cantidad" type="number" min="1" max="50" inputmode="numeric" value="${escapeHtml(F.cantidad)}"></label>
+        <label class="sfc-campo"><span class="sfc-lbl">¿Para cuándo lo necesitan?</span><input class="nc-input" data-sfe-f="fecha" type="date" min="${hoy}" value="${escapeHtml(F.fecha)}"></label>
+      </div>
+      <label class="sfc-campo"><span class="sfc-lbl">Aclaraciones <span style="opacity:.6">(opcional: colores, base, lo que sepan)</span></span><textarea class="nc-input" data-sfe-f="acl" rows="2" maxlength="2000">${escapeHtml(F.acl)}</textarea></label>
+      <div class="sfc-err" data-sfe-err role="alert"></div>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><button type="submit" class="btn btn-cyan" data-sfe-enviar${STATE._sfeEnviando ? ' disabled' : ''}>${STATE._sfeEnviando ? 'Enviando…' : 'Enviar el encargo'}</button><button type="button" class="logi-link" data-sfe-cerrar>cerrar</button></div>
+      <div class="logi-ayuda" style="margin:0">No hace falta poner precio ni pago: Gaspar lo revisa, lo completa y lo ven acá abajo en sus pedidos.</div>
+    </form>`;
+  return `<div class="sfe-bloque">
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:6px 0 10px">
+      ${abierto ? '' : '<button type="button" class="btn btn-cyan" data-sfe-abrir>＋ Encargar un neón</button>'}
+      ${D && D.error ? `<span style="color:#ef4444;font-size:13px">${escapeHtml(D.error)}</span>` : ''}
+    </div>
+    ${form}
+    ${vivos.length || otros.length ? `<div class="sfe-lista"><div class="sfc-lbl" style="margin:12px 0 6px">Tus encargos</div>${vivos.map(card).join('')}${otros.map(card).join('')}</div>` : ''}
+  </div>`;
+}
+async function sfeEnviar() {
+  const F = sfeForm();
+  const err = m => { const e = document.querySelector('.sf-wrap [data-sfe-err]'); if (e) e.textContent = m; if (m) niToast(m, { error: true }); };
+  if (STATE._sfeEnviando) return;
+  const nombre = String(F.nombre || '').replace(/\s+/g, ' ').trim(), medida = String(F.medida || '').trim();
+  if (!sfcNombreOk(nombre)) return err('Poné el nombre del cartel (por ejemplo: Molino).');
+  if (!F.archivos.length) return err('Subí el diseño.');
+  if (F.archivos.some(a => a.estado === 'subiendo')) return err('Esperá a que termine de subir el diseño.');
+  if (F.archivos.some(a => a.estado === 'error')) return err('Hay un archivo que no se subió: reintentalo o quitalo.');
+  if (!/\d/.test(medida)) return err('Poné la medida aproximada (por ejemplo 60 x 40 cm).');
+  if (!F.fecha) return err('Poné para cuándo lo necesitan.');
+  if (F.fecha < sfcHoyYmd()) return err('Esa fecha ya pasó.');
+  err('');
+  let quien = sfOperador();
+  if (!quien && !STATE._sfOpPreguntado) { STATE._sfOpPreguntado = true; quien = await sfPedirOperador(); }
+  STATE._sfeEnviando = true; sfePintarArchivos();
+  try {
+    const j = await sfFetch('/admin/sinfrontera/encargo', { nombre, medida, cantidad: parseInt(F.cantidad, 10) || 1, fecha: F.fecha, aclaraciones: F.acl,
+      archivos: F.archivos.filter(a => a.estado === 'ok').map(a => ({ key: a.key, nombre: a.nombre })), quien });
+    STATE.sfeForm = null; STATE.sfeAbierto = false;
+    if (STATE.sfEnc && j.encargo) STATE.sfEnc.encargos = [j.encargo, ...(STATE.sfEnc.encargos || [])];
+    niToast('Listo, le llegó el encargo a Gaspar.');
+  } catch (e) { err(String((e && e.message) || 'No se pudo enviar. Probá de nuevo.')); STATE._sfeEnviando = false; sfePintarArchivos(); return; }
+  STATE._sfeEnviando = false;
+  const m = document.getElementById('main'); if (m && STATE.view === 'sf-pedidos') { m.innerHTML = renderSinFrontera(); bindSinFrontera(); }
+  sfeCargar({ silent: true });
+}
+function sfeBind(root) {
+  const redibujar = () => { const m = document.getElementById('main'); if (m) { m.innerHTML = renderSinFrontera(); bindSinFrontera(); } };
+  root.addEventListener('click', async e => {
+    const el = e.target;
+    if (el.closest('[data-sfe-abrir]')) { STATE.sfeAbierto = true; redibujar(); const n = document.querySelector('.sf-wrap [data-sfe-f="nombre"]'); if (n) n.focus(); return; }
+    if (el.closest('[data-sfe-cerrar]')) { STATE.sfeAbierto = false; redibujar(); return; }
+    if (el.closest('[data-sfe-drop]')) { const i = root.querySelector('[data-sfe-file]'); if (i) i.click(); return; }
+    const q = el.closest('[data-sfe-quitar]');
+    if (q) { const F = sfeForm(), a = F.archivos.find(x => x.id === q.getAttribute('data-sfe-quitar')); if (a && a.xhr) { try { a.xhr.abort(); } catch (_) {} } F.archivos = F.archivos.filter(x => x !== a); sfePintarArchivos(); return; }
+    const re = el.closest('[data-sfe-reintentar]');
+    if (re) { const a = sfeForm().archivos.find(x => x.id === re.getAttribute('data-sfe-reintentar')); if (a && a.file) { sfeSubir(a); sfePintarArchivos(); } return; }
+    const c = el.closest('[data-sfe-cancelar]');
+    if (c) {
+      const id = +c.getAttribute('data-sfe-cancelar'), x = ((STATE.sfEnc && STATE.sfEnc.encargos) || []).find(y => y.id === id);
+      if (!(await showConfirm('¿Cancelar el encargo "' + (x ? x.nombre : '#' + id) + '"? A Gaspar le llega el aviso.', { title: 'Cancelar encargo', confirmLabel: 'Sí, cancelar', cancelLabel: 'No' }).catch(() => false))) return;
+      try { const j = await sfFetch('/admin/sinfrontera/encargo/cancelar', { id, quien: sfOperador() }); if (STATE.sfEnc && j.encargo) STATE.sfEnc.encargos = STATE.sfEnc.encargos.map(y => y.id === id ? j.encargo : y); niToast('Encargo cancelado.'); }
+      catch (er) { niToast(er.message || 'No se pudo cancelar', { error: true }); await sfeCargar({ silent: true }); }
+      redibujar();
+    }
+  });
+  root.addEventListener('input', e => { const f = e.target.closest && e.target.closest('[data-sfe-f]'); if (f) sfeForm()[f.getAttribute('data-sfe-f')] = f.value; });
+  root.addEventListener('change', e => {
+    if (e.target.matches && e.target.matches('[data-sfe-file]')) { sfeAgregar(e.target.files); e.target.value = ''; return; }
+    const f = e.target.closest && e.target.closest('[data-sfe-f]'); if (f) sfeForm()[f.getAttribute('data-sfe-f')] = f.value;
+  });
+  root.addEventListener('submit', e => { if (e.target.matches && e.target.matches('[data-sfe-form]')) { e.preventDefault(); sfeEnviar(); } });
+  const drop = root.querySelector('[data-sfe-drop]');
+  if (drop) {
+    drop.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); const i = root.querySelector('[data-sfe-file]'); if (i) i.click(); } });
+    ['dragenter', 'dragover'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.add('sobre'); }));
+    ['dragleave', 'drop'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.remove('sobre'); }));
+    drop.addEventListener('drop', e => { if (e.dataTransfer && e.dataTransfer.files) sfeAgregar(e.dataTransfer.files); });
+  }
+}
+// Gaspar, arriba de Pedidos: los encargos nuevos con "Cargar pedido" y "Descartar".
+async function sfeBanner(forzar) {
+  const el = document.getElementById('sf-enc-banner'); if (!el) return;
+  if (forzar || !STATE.sfEnc || Date.now() - (STATE.sfEnc.at || 0) > 60000) await sfeCargar({ silent: true });
+  const box = document.getElementById('sf-enc-banner'); if (!box) return;
+  const vivos = ((STATE.sfEnc && STATE.sfEnc.encargos) || []).filter(x => x.estado === 'nuevo');
+  if (!vivos.length) { box.innerHTML = ''; return; }
+  box.innerHTML = `<div class="sfe-banner">
+    <div class="sfe-banner-h">📥 Sin Frontera te encargó ${vivos.length === 1 ? 'un neón' : vivos.length + ' neones'}</div>
+    ${vivos.map(x => `<div class="sfe-card">
+      <div class="sfe-card-h"><b>${escapeHtml(x.nombre)}${x.cantidad > 1 ? ' ×' + x.cantidad : ''}</b><span class="muted" style="font-size:12px">${escapeHtml(sfFechaHora(x.created_at))}${x.creado_por ? ' · ' + escapeHtml(x.creado_por) : ''}</span></div>
+      <div class="sfe-card-d">Medida aprox. <b>${escapeHtml(x.medida)}</b> · para el <b>${escapeHtml(sfFecha(x.fecha))}</b>${x.aclaraciones ? ' · ' + escapeHtml(x.aclaraciones) : ''}</div>
+      <div class="sfe-card-d">Diseño: ${x.archivos.map((a, i) => `<a href="${escapeHtml(sfUrl('e=' + x.id + '&i=' + i))}" target="_blank" rel="noopener">${escapeHtml(a.nombre)}</a>`).join(' · ') || '—'}</div>
+      <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap"><button type="button" class="btn btn-cyan" data-sfe-cargar="${x.id}">Cargar pedido</button><button type="button" class="btn btn-ghost" data-sfe-descartar="${x.id}">Descartar</button></div>
+    </div>`).join('')}
+  </div>`;
+  box.querySelectorAll('[data-sfe-cargar]').forEach(b => b.onclick = () => sfeAbrirPedido(+b.getAttribute('data-sfe-cargar')));
+  box.querySelectorAll('[data-sfe-descartar]').forEach(b => b.onclick = async () => {
+    const id = +b.getAttribute('data-sfe-descartar'), x = vivos.find(y => y.id === id);
+    if (!(await showConfirm('¿Descartar el encargo "' + (x ? x.nombre : '#' + id) + '" de Sin Frontera? No se carga ningún pedido (a ellos les aparece como descartado).', { title: 'Descartar encargo', confirmLabel: 'Descartar', cancelLabel: 'No' }).catch(() => false))) return;
+    try { await sfFetch('/admin/sinfrontera/encargo/cancelar', { id }); toast('Encargo descartado'); } catch (e) { toast(e.message || 'No se pudo descartar'); }
+    sfeBanner(true);
+  });
+}
+// "Cargar pedido" de un encargo: el formulario de siempre, con Cliente: Sin Frontera (cuenta corriente) y lo que mandaron.
+function sfeAbrirPedido(id) {
+  const x = ((STATE.sfEnc && STATE.sfEnc.encargos) || []).find(y => y.id === id); if (!x) return;
+  openCargarPedidoModal();
+  const m = STATE.pedidoModal; if (!m) return;
+  m.clienteSF = true;
+  if (STATE.sfEnc.tel) m.telefono = STATE.sfEnc.tel;
+  m._sfEnc = { id: x.id, nombre: x.nombre, medida: x.medida, fecha: x.fecha, aclaraciones: x.aclaraciones, archivos: x.archivos };
+  const c = m.carteles[0];
+  c.cartel = x.nombre; c.cantidad = x.cantidad || 1;
+  // "60 x 40" → ancho x alto (como se pide en la web); si no se entiende, queda en la aclaración del encargo.
+  const mm = String(x.medida).replace(/,/g, '.').match(/(\d+(?:\.\d+)?)\s*(?:cm)?\s*[x×*]\s*(\d+(?:\.\d+)?)/i);
+  if (mm) { c.ancho = mm[1]; c.alto = mm[2]; }
+  c.aclaracion = [x.aclaraciones, 'para el ' + sfFecha(x.fecha)].filter(Boolean).join(' · ').slice(0, 300);
+  render();
+}
+function sfeModalHtml(m) {
+  const x = m && m._sfEnc; if (!x) return '';
+  return `<div class="sfe-modal-box"><b>Encargo de Sin Frontera:</b> medida aprox. ${escapeHtml(x.medida)} · para el ${escapeHtml(sfFecha(x.fecha))}${x.aclaraciones ? ' · ' + escapeHtml(x.aclaraciones) : ''}<br>Diseño: ${(x.archivos || []).map((a, i) => `<a href="${escapeHtml(sfUrl('e=' + x.id + '&i=' + i))}" target="_blank" rel="noopener">${escapeHtml(a.nombre)}</a>`).join(' · ')}<br><span style="opacity:.75">Completá lo que falte (medidas, colores, precio) y guardá: el encargo queda cargado como este pedido.</span></div>`;
+}
 function renderSfPedidos() {
   const D = STATE.sfPed;
   if (!D) { setTimeout(() => sfCargar(), 0); return `<div class="sf-wrap" style="padding:24px;color:var(--fg-mute)">Cargando pedidos…</div>`; }
-  if (D.error) return `<div class="sf-wrap" style="padding:24px"><div style="color:#ef4444;margin-bottom:10px">${escapeHtml(D.error)}</div><button class="btn" data-sf-refresh>Reintentar</button></div>`;
+  if (D.error) return `<div class="sf-wrap" style="padding:24px">${isSinFronteraOnly() ? sfeBloqueHtml() : ''}<div style="color:#ef4444;margin-bottom:10px">${escapeHtml(D.error)}</div><button class="btn" data-sf-refresh>Reintentar</button></div>`;
   const ps = D.pedidos || [];
   const grupos = [...new Set(ps.map(sfPedGrupoKey))].map(k => ps.filter(x => sfPedGrupoKey(x) === k));
   const total = ps.reduce((s, p) => s + (+p.precio || 0) + (+p.precio_dimmer || 0), 0);
@@ -9098,6 +9313,7 @@ function renderSfPedidos() {
       <button class="btn btn-ghost" data-sf-refresh>Actualizar</button>
       ${sfAdminBarra()}
     </div>
+    ${isSinFronteraOnly() ? sfeBloqueHtml() : ''}
     ${D.planillaError ? `<div class="logi-ayuda" style="color:#ffc97a">No se pudo leer la planilla: puede faltar algún pedido. Tocá Actualizar en un rato.</div>` : ''}
     ${isAdmin() && (D.repetidos || []).length ? `<div class="logi-ayuda" style="color:#ffc97a">Cargados en el CRM y también en Pedidos_Distris: ${D.repetidos.map(r => escapeHtml(r.cartel) + ' (ID ' + escapeHtml(String(r.id_planilla)) + ' → #' + escapeHtml(String(r.numero_crm)) + ')').join(', ')}. Acá se muestran una sola vez, pero en el PnL suman dos veces: borralos de Pedidos_Distris.</div>` : ''}
     ${ps.length ? `<div class="table-wrap sf-tabla"><table class="t">
@@ -10381,6 +10597,7 @@ function sfcBind(root) {
 function bindSinFrontera() {
   const root = document.querySelector('.sf-wrap');
   if (!root) return;
+  if (STATE.view === 'sf-pedidos' && isSinFronteraOnly()) sfeBind(root);   // encargos de neón
   const redibujar = () => { const m = document.getElementById('main'); if (m) { m.innerHTML = renderSinFrontera(); bindSinFrontera(); } };
   root.addEventListener('click', async e => {
     const el = e.target;
@@ -14082,6 +14299,7 @@ function bindPedidos() {
   if (nuevoBtn) nuevoBtn.onclick = openCargarPedidoModal;
   const traceBtn = document.getElementById('pedido-trace-ads');
   if (traceBtn) traceBtn.onclick = trazarAdsFaltantes;
+  if (isAdmin()) sfeBanner();   // encargos de neón de Sin Frontera
   bindPedidoModal();
   bindTicketCorporeoModal();
   bindTicketsList();
@@ -14118,6 +14336,7 @@ function renderPedidos() {
       return `<div style="margin:0 0 12px;padding:10px 14px;background:rgba(255,90,90,.12);border:1px solid var(--neon-red,#ff5a5a);border-radius:8px;color:var(--fg);font-size:13px">⚠ <strong>${fallos.length} pedido${fallos.length>1?'s':''}</strong> no se sincronizó al Excel (un valor fue rechazado por la validación de la planilla). Revisá: ${fallos.slice(0,6).map(p=>'#'+p.numero+' '+escapeHtml(p.cartel)).join(', ')}${fallos.length>6?'…':''}</div>`;
     })()}
     ${isAdmin() ? '<div id="origen-banner"></div>' : ''}
+    ${isAdmin() ? '<div id="sf-enc-banner"></div>' : ''}
     <div class="table-wrap">
       <div class="table-toolbar">
         <input type="text" placeholder="Buscar (cliente, tel, número, canal, productor…)" data-pf="search" value="${escapeHtml(pedidoFilter.search)}">
@@ -15200,6 +15419,7 @@ function renderPedidoModal() {
             <button type="button" data-pm-sf="0" style="flex:1;padding:9px;border:1px solid;border-radius:var(--r-sm);cursor:pointer;font-size:13px;font-weight:600;${oBtn(!m.clienteSF)}">Cliente final</button>
             <button type="button" data-pm-sf="1" style="flex:1;padding:9px;border:1px solid;border-radius:var(--r-sm);cursor:pointer;font-size:13px;font-weight:600;${oBtn(!!m.clienteSF)}">Sin Frontera</button>
           </div>
+          ${sfeModalHtml(m)}
           ${m.clienteSF ? `<div style="font-size:11.5px;color:var(--fg-subtle);margin-top:4px">Lo van a ver en su usuario ("Mis pedidos") con precio y estado. Va en cuenta corriente: sin seña ni comprobante.</div>` : ''}
         </div>` : ''}
         <div style="display:flex;justify-content:space-between;align-items:center;padding-top:var(--s-2);border-top:1px solid var(--border)">
@@ -15470,6 +15690,9 @@ async function confirmCargarPedido() {
     render();
     toast(`Pedido #${j.numero} cargado ✓ (${nuevos.length} cartel${nuevos.length>1?'es':''})`);
     if (j.aviso_entrega) niToast(j.aviso_entrega, { error: true, ms: 9000 });
+    if (isAdmin() && m._sfEnc && nuevos.length) sfFetch('/admin/sinfrontera/encargo/cargado', { id: m._sfEnc.id, numero: j.numero, pedido_ids: nuevos.map(x => x.idx) })
+      .then(() => { toast('El encargo de Sin Frontera quedó cargado como el pedido #' + j.numero); sfeBanner(true); })
+      .catch(e => niToast('El pedido se guardó, pero no pude marcar el encargo como cargado (' + (e.message || 'error') + '): descartalo a mano.', { error: true, ms: 9000 }));
     if (m.pagoMetodo === 'pendiente' && isAdmin() && nuevos[0] && nuevos[0].cobrarEl) niToast(`Cargado sin pago: te recuerdo cobrarlo el ${nuevos[0].cobrarEl.slice(8, 10)}/${nuevos[0].cobrarEl.slice(5, 7)} por WhatsApp`);
     // Cliente Sin Frontera (solo admin): lo ven en su usuario, "Mis pedidos". El server ya lo vinculó en el alta
     // (sf_vinculado); si no (worker viejo o falló), se reintenta como antes.
