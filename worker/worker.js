@@ -2046,7 +2046,7 @@ async function pushPedidoCorporeoToV4(env, row) {
 // trae esa hoja por IMPORTRANGE con la caja cargada al lado: borrar una fila corre a todos. Se avisa para vaciarla a mano.
 // p = { id, es_corporeo, numero, cartel, sheet_row }. Devuelve { borrada: fila } o { aviso: texto para Gaspar }.
 async function pedidoBorrarDePlanilla(env, p) {
-  if (!p.es_corporeo) return p.sheet_row ? { aviso: `En el Excel de Ventas (hoja 2026) quedó su fila ${p.sheet_row}: vaciala a mano, sin borrar la fila.` } : {};
+  if (!p.es_corporeo) return pedidoVaciarFilaNeon(env, p);
   const token = await sheetsAccessToken(env);
   if (!token) return { aviso: 'No pude entrar a Pedidos_Corporeo (sin token de Google): borrá su fila a mano.' };
   const H = { Authorization: 'Bearer ' + token };
@@ -2078,6 +2078,76 @@ async function pedidoBorrarDePlanilla(env, p) {
     try { await env.DB.prepare('UPDATE pedidos SET sheet_row = sheet_row - 1 WHERE es_corporeo = 1 AND sheet_row > ?').bind(fila).run(); } catch (_) {}
     return { borrada: fila };
   } catch (e) { return { aviso: 'No pude borrar su fila de Pedidos_Corporeo (' + String((e && e.message) || e).slice(0, 120) + '): borrala a mano.' }; }
+}
+// Pedido de NEÓN borrado del CRM → se VACÍA su fila de la hoja "2026" del Excel de Ventas, sin borrarla (Gaspar 30-oct: el
+// DXN que se borró para volver a cargarlo quedó dos veces, con la seña y la comisión; hasta acá solo se avisaba "vaciala a
+// mano"). La fila no se borra: la col O (productor) es una fórmula por posición y Pedidos_Directo la trae por IMPORTRANGE con
+// columnas propias al lado. Se vacía A:N y P:AB; la O nunca se toca (escribir ahí rompe la fórmula de toda la columna). En
+// Pedidos_Directo se vacía lo que escribe el CRM en esa fila: VENDEDOR (C), Caja, MO y PRODUCTOR (solo valores: una fórmula no
+// se toca). La fila se ubica por el id (col AB, id_sync) o, si no tiene id, por la pista sheet_row; siempre se verifica N° +
+// cartel antes de tocar nada. p = { id, numero, cartel, sheet_row }. Devuelve { vaciada: fila, directo? } o { aviso }.
+const VENTAS_SHEET_ID = '1qKUhSDDjBV4k8W0goPhOFzEhLz0Zeruq2slLpb9bWSg';
+async function pedidoVaciarFilaNeon(env, p) {
+  const aMano = (f) => `En el Excel de Ventas (hoja 2026) quedó su fila${f ? ' ' + f : ''}: vaciala a mano, sin borrar la fila.`;
+  const token = await sheetsAccessToken(env);
+  if (!token) return p.sheet_row ? { aviso: aMano(p.sheet_row) } : {};
+  const H = { Authorization: 'Bearer ' + token };
+  const norm = (s) => String(s == null ? '' : s).normalize('NFC').trim().toLowerCase().replace(/\s+/g, ' ');
+  const leer = async (hoja, ranges, render) => {
+    const u = SHEETS_API_BASE + hoja + '/values:batchGet?' + ranges.map(r => 'ranges=' + encodeURIComponent(r)).join('&') + '&valueRenderOption=' + (render || 'UNFORMATTED_VALUE');
+    const r = await fetch(u, { headers: H, signal: AbortSignal.timeout(25000) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error((j.error && j.error.message) || ('HTTP ' + r.status));
+    return (j.valueRanges || []).map(v => v.values || []);
+  };
+  const limpiar = async (hoja, ranges) => {
+    const r = await fetch(SHEETS_API_BASE + hoja + '/values:batchClear', { method: 'POST', headers: { ...H, 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(25000), body: JSON.stringify({ ranges }) });
+    if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error((j.error && j.error.message) || ('HTTP ' + r.status)); }
+  };
+  const txt = (v) => String(v == null ? '' : v).replace(/^'/, '').trim();
+  const cel = (col, f) => txt((col[f - 1] || [])[0]);
+  const colLetra = (n) => { let s = ''; while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; };
+  let fila = 0;
+  try {
+    const [h, cB, cC, cAB] = await leer(VENTAS_SHEET_ID, ["'2026'!A1:AB1", "'2026'!B1:B", "'2026'!C1:C", "'2026'!AB1:AB"]);
+    const hh = (h[0] || []).map(norm);
+    if (hh[1] !== 'numero' || hh[2] !== 'cartel' || hh[14] !== 'productor' || hh[27] !== 'id_sync') return { aviso: 'La hoja 2026 del Excel de Ventas cambió de columnas: no toqué nada. ' + aMano(p.sheet_row) };
+    const porId = [];
+    cAB.forEach((rw, i) => { if (txt((rw || [])[0]) === String(p.id)) porId.push(i + 1); });
+    if (porId.length === 1) fila = porId[0];
+    else if (!porId.length && Number(p.sheet_row) >= 2 && !cel(cAB, Number(p.sheet_row))) fila = Number(p.sheet_row);
+    if (porId.length > 1) return { aviso: `En el Excel de Ventas hay ${porId.length} filas con el id ${p.id}: vacialas a mano, sin borrar las filas.` };
+    if (fila < 2) return {};   // no está en la planilla (nunca se espejó o ya se vació)
+    if (norm(cel(cB, fila)) !== norm(p.numero) || norm(cel(cC, fila)) !== norm(p.cartel)) return { aviso: `La fila ${fila} del Excel de Ventas no coincide con el pedido (N° o cartel distintos): no la toqué, revisala a mano.` };
+    // Pedidos_Directo: se ubica y se verifica ANTES de vaciar la fila de Ventas (después el IMPORTRANGE la muestra vacía).
+    const directo = { fila: 0, celdas: [], aviso: '' };
+    try {
+      const [fA] = await leer(CORTE_SHEET_ID, ['Pedidos_Directo!A1:A200'], 'FORMULA');
+      let off = null;
+      fA.forEach((rw, i) => { const m = /IMPORTRANGE\([^)]*["']'?2026'?!\$?[a-z]+\$?(\d+)/i.exec(String((rw || [])[0] || '')); if (m && off == null) off = (i + 1) - Number(m[1]); });
+      if (off == null) throw new Error('no encuentro el IMPORTRANGE de la hoja 2026');
+      const fv = fila + off;
+      const [h2] = await leer(CORTE_SHEET_ID, ['Pedidos_Directo!A2:BZ2']);
+      const cab = ((h2[0]) || []).map(norm), idx = (t) => cab.indexOf(t) + 1;
+      const [vals, forms] = [(await leer(CORTE_SHEET_ID, [`Pedidos_Directo!A${fv}:BZ${fv}`]))[0][0] || [], (await leer(CORTE_SHEET_ID, [`Pedidos_Directo!A${fv}:BZ${fv}`], 'FORMULA'))[0][0] || []];
+      if (norm(txt(vals[0])) !== norm(p.numero) || norm(txt(vals[3])) !== norm(p.cartel)) directo.aviso = ` En Pedidos_Directo la fila ${fv} no coincide: revisá a mano el vendedor y la caja de ese pedido.`;
+      else {
+        directo.fila = fv;
+        for (const c of [3, idx('caja'), idx('mo'), idx('productor')]) {
+          if (c < 1 || directo.celdas.includes(c)) continue;
+          const f = String(forms[c - 1] == null ? '' : forms[c - 1]);
+          if (f && f.charAt(0) !== '=') directo.celdas.push(c);
+        }
+      }
+    } catch (e) { directo.aviso = ' No pude revisar Pedidos_Directo (' + String((e && e.message) || e).slice(0, 100) + '): revisá a mano el vendedor y la caja de ese pedido.'; }
+    await limpiar(VENTAS_SHEET_ID, [`'2026'!A${fila}:N${fila}`, `'2026'!P${fila}:AB${fila}`]);
+    if (directo.fila && directo.celdas.length) {
+      try { await limpiar(CORTE_SHEET_ID, directo.celdas.map(c => `Pedidos_Directo!${colLetra(c)}${directo.fila}`)); }
+      catch (e) { directo.aviso = ` No pude vaciar el vendedor y la caja en Pedidos_Directo (fila ${directo.fila}): hacelo a mano.`; }
+    }
+    try { await env.DB.prepare("DELETE FROM kv_cache WHERE k = ?").bind('pedido_vend:' + p.id).run(); } catch (_) {}
+    return { vaciada: fila, directo: directo.fila || 0, aviso: directo.aviso.trim() };
+  } catch (e) { return { aviso: 'No pude vaciar su fila del Excel de Ventas (' + String((e && e.message) || e).slice(0, 120) + '). ' + aMano(fila || p.sheet_row) }; }
 }
 // ===== Vendedor de los pedidos de NEÓN → 2026 v4 › Pedidos_Directo, col C (VENDEDOR) =====
 // Pedido de Gaspar (10/10): "que los pedidos de neón se carguen con vendedor también, igual que en
@@ -2132,7 +2202,8 @@ async function enviarVendedoresNeon(env, items) {
       await kvSet(env, 'pedido_vend:' + x.id, x.vend);
       if (r.escrito) res.escritos++; else if (r.igual) res.iguales++; else if (r.manual) res.manuales.push({ id: x.id, cartel: x.cartel, crm: x.vend, planilla: r.manual });
     } else {
-      // No se ubicó la fila (o ambigua): no reintentar en cada barrido; se reintenta si el pedido se re-espeja.
+      // No se ubicó la fila (o ambigua): queda '!' y el barrido lo reintenta cada 10 min o más, hasta 10 días después de
+      // cargado (lo normal es que el IMPORTRANGE de Pedidos_Directo todavía no hubiera traído la fila nueva).
       await kvSet(env, 'pedido_vend:' + x.id, '!' + x.vend);
       res.errores.push({ id: x.id, cartel: x.cartel, error: (r && r.error) || 'sin respuesta' });
     }
@@ -2150,14 +2221,16 @@ async function syncVendedorNeon(env, row, sheetRow) {
   return enviarVendedoresNeon(env, [{ id: row.id, row: sheetRow, numero: row.numero, cartel: row.cartel, vend, prev }]);
 }
 // Barrido (cada ~15 min + a mano): pedidos de neón desde septiembre que todavía no pasaron (incluye el
-// relleno inicial y los que fallaron por un Apps Script colgado). Lotes de 60.
+// relleno inicial y los que fallaron por un Apps Script colgado). Lotes de 60. Desde el 30-oct también reintenta los que no
+// se ubicaron ('!'+vendedor): el vendedor se escribe apenas se espeja el pedido y muchas veces el IMPORTRANGE de
+// Pedidos_Directo todavía no trajo esa fila (8 de 19 entre el 24 y el 29-oct quedaron sin vendedor).
 async function barrerVendedoresNeon(env) {
   if (!env.APPS_SCRIPT_URL) return { skipped: 'no url' };
   try {
     const rs = await env.DB.prepare(
       "SELECT p.id, p.numero, p.cartel, p.sheet_row, p.comercial_id, p.cargado_por FROM pedidos p LEFT JOIN kv_cache k ON k.k = 'pedido_vend:' || p.id " +
-      "WHERE p.es_corporeo = 0 AND p.fecha >= ? AND p.sheet_row > 1 AND p.mirror_dirty = 0 AND k.k IS NULL ORDER BY p.id LIMIT 60"
-    ).bind(VEND_NEON_DESDE).all();
+      "WHERE p.es_corporeo = 0 AND p.fecha >= ? AND p.sheet_row > 1 AND p.mirror_dirty = 0 AND (k.k IS NULL OR (k.v LIKE '!_%' AND k.updated_at < ? AND p.created_at > ?)) ORDER BY p.id LIMIT 60"
+    ).bind(VEND_NEON_DESDE, new Date(Date.now() - 10 * 60e3).toISOString(), new Date(Date.now() - 10 * 864e5).toISOString()).all();
     const items = [];
     for (const p of (rs.results || [])) {
       const vend = pedidoVendedorNeon(p);
@@ -30675,12 +30748,13 @@ const handler = {
           }
           await env.DB.batch(_delStmts);
           const _pl = await pedidoBorrarDePlanilla(env, prow);
-          return json({ ok: true, deleted: pid, planilla: _pl.borrada ? `También se borró de Pedidos_Corporeo (fila ${_pl.borrada}).` : (_pl.aviso || '') });
+          return json({ ok: true, deleted: pid, planilla: _pl.borrada ? `También se borró de Pedidos_Corporeo (fila ${_pl.borrada}).` : _pl.vaciada ? (`También se vació su fila ${_pl.vaciada} del Excel de Ventas (sin borrarla).` + (_pl.aviso ? ' ' + _pl.aviso : '')) : (_pl.aviso || '') });
         } catch (e) { return json({ error: String(e && e.message || e) }, 500); }
       }
 
       // POST /admin/pedidos/planilla-borrar {id, numero, cartel} → borra de Pedidos_Corporeo la fila de un pedido corpóreo
       // que ya no existe en el CRM (quedó de antes de que el DELETE la borrara). Solo por id (col AO) + N° + Diseño.
+      // Con {neon: true, sheet_row?}: vacía (sin borrar) su fila de la hoja 2026 de Ventas y lo del CRM en Pedidos_Directo.
       if (request.method === 'POST' && path === '/admin/pedidos/planilla-borrar') {
         if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
         let b = {};
@@ -30689,6 +30763,10 @@ const handler = {
         if (!id || b.numero == null || !String(b.cartel || '').trim()) return json({ error: 'faltan id, numero o cartel' }, 400);
         const sigue = await env.DB.prepare('SELECT 1 AS x FROM pedidos WHERE id = ?').bind(id).first();
         if (sigue) return json({ error: 'ese pedido sigue en el CRM: borralo desde el pedido' }, 409);
+        if (b.neon) {
+          const r = await pedidoVaciarFilaNeon(env, { id, numero: b.numero, cartel: b.cartel, sheet_row: parseInt(b.sheet_row, 10) || 0 });
+          return json(r.vaciada ? { ok: true, vaciada: r.vaciada, directo: r.directo, aviso: r.aviso || '' } : { error: r.aviso || 'no estaba en la planilla' }, r.vaciada ? 200 : 409);
+        }
         const r = await pedidoBorrarDePlanilla(env, { id, es_corporeo: 1, numero: b.numero, cartel: b.cartel, sheet_row: 0 });
         return json(r.borrada ? { ok: true, fila: r.borrada } : { error: r.aviso || 'no se borró' }, r.borrada ? 200 : 409);
       }
