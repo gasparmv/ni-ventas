@@ -10199,7 +10199,7 @@ function sfcbClientesHtml(todos, fc) {
 // del mismo origen (ver "lote del CRM" en nesting/index.html): el nesting avisa {tipo:'nesting-listo', lote} y recibe
 // {tipo:'nesting-lote', lote, titulo, material, color, color_hex, espesor, pedidos, archivos: [File]}. Cada archivo lleva el
 // pedido adelante ("#8 acrilicos iglesia.dxf"): así el nesting muestra de qué pedido es cada pieza.
-const SFC_NEST_EXT = /\.(dxf|pdf|ai)$/i;   // lo que lee el nesting
+const SFC_NEST_EXT = /\.(dxf|pdf|ai|svg)$/i;   // lo que lee el nesting (SVG desde el 30-oct)
 function sfcbLoteId() {
   const b = new Uint8Array(12);
   try { crypto.getRandomValues(b); } catch (_) { for (let i = 0; i < b.length; i++) b[i] = Math.floor(Math.random() * 256); }
