@@ -8822,9 +8822,21 @@ async function avisoCorteContactos(env) {
 const AVISO_CORTE_VIERNES_TPL = 'corte_aviso_viernes';
 const AVISO_CORTE_VIERNES_TEXTO = 'Buenas {{1}}, te recuerdo que hoy hasta las 20 hs podés cargar tu pedido de corte en la página para que entre en el corte de este finde.';
 const AVISOS_CORTE = {
-  semanal: { dia: 4, hora: 15, tpl: AVISO_CORTE_TPL, texto: AVISO_CORTE_TEXTO, horas: '9-21', nombre: 'Aviso corte finde', cual: 'el aviso del corte del finde' },
-  viernes: { dia: 5, hora: 11, tpl: AVISO_CORTE_VIERNES_TPL, texto: AVISO_CORTE_VIERNES_TEXTO, horas: '9-20', nombre: 'Aviso corte viernes', cual: 'el recordatorio del viernes del corte' },
+  semanal: { dia: 4, hora: 15, tpl: AVISO_CORTE_TPL, texto: AVISO_CORTE_TEXTO, horas: '9-21', nombre: 'Aviso corte finde', cual: 'el aviso del corte del finde',
+    tplLink: 'corte_aviso_finde_link', textoLink: 'Buenas {{1}} cómo va? Este finde se cortan bases acrílicas transparentes. Si querés sumar algún corte, cargalo en https://neoninfinitosoftware.com/corte hasta el viernes a las 20 hs.' },
+  viernes: { dia: 5, hora: 11, tpl: AVISO_CORTE_VIERNES_TPL, texto: AVISO_CORTE_VIERNES_TEXTO, horas: '9-20', nombre: 'Aviso corte viernes', cual: 'el recordatorio del viernes del corte',
+    tplLink: 'corte_aviso_viernes_link', textoLink: 'Buenas {{1}}, te recuerdo que hoy hasta las 20 hs podés cargar tu pedido de corte en https://neoninfinitosoftware.com/corte para que entre en el corte de este finde.' },
 };
+// Gaspar 30-oct: "poné el link en la plantilla, ambas". Las versiones con el link escrito en el texto (además del botón
+// "Cargar mi corte") se usan apenas Meta las aprueba (template_status_cache); hasta entonces, salen las de siempre.
+async function avisoCorteVersion(env, a) {
+  if (!a || !a.tplLink) return a;
+  try {
+    const t = await env.DB.prepare('SELECT status FROM template_status_cache WHERE name = ?').bind(a.tplLink).first();
+    if (t && String(t.status).toUpperCase() === 'APPROVED') return { ...a, tpl: a.tplLink, texto: a.textoLink };
+  } catch (_) {}
+  return a;
+}
 // Crea el broadcast (mismo formato que POST /admin/broadcasts, con las variables por contacto y la bandeja Corte).
 async function avisoCorteEncolar(env, contactos, nombre, a = AVISOS_CORTE.semanal) {
   await ensureBroadcastsSchema(env);
@@ -8849,10 +8861,11 @@ async function avisoCorteSemanal(env) {
   // El recordatorio del viernes dice "hoy hasta las 20 hs": lo que a las 20 sigue en cola (un reintento por un error de 360dialog
   // queda para más tarde y send_hours lo pasaría al sábado a las 9) se corta. Pasó el 23-oct con 2 que fallaron con un 522.
   if (ar.getUTCDay() === 5 && ar.getUTCHours() === 20) {
-    try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'skipped' WHERE status = 'queued' AND kind IN (SELECT 'bc_' || id FROM wa_broadcasts WHERE template = ?)").bind(AVISO_CORTE_VIERNES_TPL).run(); } catch (_) {}
+    try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'skipped' WHERE status = 'queued' AND kind IN (SELECT 'bc_' || id FROM wa_broadcasts WHERE template IN (?, ?))").bind(AVISO_CORTE_VIERNES_TPL, AVISOS_CORTE.viernes.tplLink).run(); } catch (_) {}
   }
-  for (const [clave, a] of Object.entries(AVISOS_CORTE)) {
-    if (ar.getUTCDay() !== a.dia || ar.getUTCHours() !== a.hora) continue;
+  for (const [clave, a0] of Object.entries(AVISOS_CORTE)) {
+    if (ar.getUTCDay() !== a0.dia || ar.getUTCHours() !== a0.hora) continue;
+    const a = await avisoCorteVersion(env, a0);
     if ((await kvGet(env, 'aviso_corte_' + clave + '_on', '0')) !== '1') continue;
     const hoy = ar.toISOString().slice(0, 10);
     // Reclamo atómico de la semana: el primer tick de la hora se lo lleva (si algo falla después, no se reintenta cada minuto).
@@ -27212,16 +27225,16 @@ const handler = {
           const c = await avisoCorteContactos(env);
           const lista = c.ok ? c.contactos.map(x => x.params[0] + ' · ' + x.nombre + ' (' + x.phone + ')') : [];
           const avisos = {};
-          for (const [k, a] of Object.entries(AVISOS_CORTE)) avisos[k] = { on: (await kvGet(env, 'aviso_corte_' + k + '_on', '0')) === '1', ultimo: await kvGet(env, 'aviso_corte_' + k + '_ultimo', ''), plantilla: a.tpl, texto: a.texto, dia: a.dia, hora: a.hora };
+          for (const [k, a0] of Object.entries(AVISOS_CORTE)) { const a = await avisoCorteVersion(env, a0); avisos[k] = { on: (await kvGet(env, 'aviso_corte_' + k + '_on', '0')) === '1', ultimo: await kvGet(env, 'aviso_corte_' + k + '_ultimo', ''), plantilla: a.tpl, texto: a.texto, dia: a.dia, hora: a.hora }; }
           return json({
-            on: avisos.semanal.on, ultimo: avisos.semanal.ultimo, plantilla: AVISO_CORTE_TPL, texto: AVISO_CORTE_TEXTO, avisos,
+            on: avisos.semanal.on, ultimo: avisos.semanal.ultimo, plantilla: avisos.semanal.plantilla, texto: avisos.semanal.texto, avisos,
             error: c.error || null, total: lista.length, malos: c.malos || [],
             contactos: url.searchParams.get('todos') === '1' ? lista : lista.slice(0, 5),
           });
         }
         let body = {};
         try { body = await request.json(); } catch (_) {}
-        const clave = body.aviso === 'viernes' ? 'viernes' : 'semanal', a = AVISOS_CORTE[clave];
+        const clave = body.aviso === 'viernes' ? 'viernes' : 'semanal', a = await avisoCorteVersion(env, AVISOS_CORTE[clave]);
         if (body.accion === 'on' || body.accion === 'off') {
           await kvSet(env, 'aviso_corte_' + clave + '_on', body.accion === 'on' ? '1' : '0');
           return json({ ok: true, aviso: clave, on: body.accion === 'on' });
