@@ -7453,6 +7453,7 @@ async function sfCargar(opts) {
     if (STATE.user !== user) return;
     if (!ped && silent && ((STATE._sfMovGen || 0) !== gen || STATE._sfGuardando)) return; // vieja: el próximo tick recarga
     if (ped) STATE.sfPed = { pedidos: j.pedidos || [], configurado: !!j.configurado, planillaError: !!j.planilla_error, repetidos: j.repetidos || [], at: Date.now() };
+    if (ped && isSinFronteraOnly()) await sfeCargar({ silent: true });   // sus encargos (Gaspar los carga o los descarta desde Pedidos)
     else STATE.sf = { tickets: j.tickets || [], excluidos: j.excluidos || null, at: Date.now() };
   } catch (e) {
     if (STATE.user !== user) return;
@@ -9138,7 +9139,12 @@ function sfeAgregar(files) {
 // Sin Frontera, arriba de "Mis pedidos": el botón, el formulario (plegado) y sus encargos.
 function sfeBloqueHtml() {
   const D = STATE.sfEnc;
-  if (!D && !STATE._sfeCargando) setTimeout(() => sfeCargar().then(() => { if (STATE.view === 'sf-pedidos') { const m = document.getElementById('main'); if (m) { m.innerHTML = renderSinFrontera(); bindSinFrontera(); } } }), 0);
+  if (!D && !STATE._sfeCargando) setTimeout(() => sfeCargar().then(() => {
+    if (STATE.view !== 'sf-pedidos') return;
+    const act = document.activeElement;   // escribiendo en el formulario: la lista aparece en el próximo redibujo
+    if (act && act.closest && act.closest('.sf-wrap') && /^(SELECT|INPUT|TEXTAREA)$/.test(act.tagName)) return;
+    const m = document.getElementById('main'); if (m) { m.innerHTML = renderSinFrontera(); bindSinFrontera(); }
+  }), 0);
   const F = sfeForm(), abierto = !!STATE.sfeAbierto;
   const lista = (D && D.encargos) || [];
   const vivos = lista.filter(x => x.estado === 'nuevo'), otros = lista.filter(x => x.estado !== 'nuevo').slice(0, 6);
@@ -9275,10 +9281,16 @@ function sfeAbrirPedido(id) {
   const c = m.carteles[0];
   c.cartel = x.nombre; c.cantidad = x.cantidad || 1;
   // "60 x 40" → ancho x alto (como se pide en la web); si no se entiende, queda en la aclaración del encargo.
-  const mm = String(x.medida).replace(/,/g, '.').match(/(\d+(?:\.\d+)?)\s*(?:cm)?\s*[x×*]\s*(\d+(?:\.\d+)?)/i);
-  if (mm) { c.ancho = mm[1]; c.alto = mm[2]; }
+  const med = String(x.medida).replace(/,/g, '.'), mm = med.match(/(\d+(?:\.\d+)?)\s*(?:cm|m|mts?)?\s*[x×*]\s*(\d+(?:\.\d+)?)/i);
+  const enMetros = /\d\s*(m|mts?|metros?)\b/i.test(med) && !/cm|mm/i.test(med);   // "1,20 x 0,80 m": a cm
+  if (mm) { const f = enMetros ? 100 : 1; c.ancho = String(Math.round(parseFloat(mm[1]) * f * 10) / 10); c.alto = String(Math.round(parseFloat(mm[2]) * f * 10) / 10); }
   c.aclaracion = [x.aclaraciones, 'para el ' + sfFecha(x.fecha)].filter(Boolean).join(' · ').slice(0, 300);
   render();
+  const ia = (x.archivos || []).findIndex(a => /^image\/(png|jpe?g|webp)$/i.test(a.tipo || ''));
+  if (ia >= 0) fetch(sfUrl('e=' + x.id + '&i=' + ia)).then(r => (r.ok ? r.blob() : null)).then(b => {
+    if (!b || STATE.pedidoModal !== m || m.carteles[0].foto_key) return;
+    pmFotoSetArchivo(0, new File([b], x.archivos[ia].nombre || 'diseno.png', { type: b.type || x.archivos[ia].tipo }));
+  }).catch(() => {});
 }
 function sfeModalHtml(m) {
   const x = m && m._sfEnc; if (!x) return '';
@@ -14356,6 +14368,7 @@ function renderPedidos() {
   `;
 }
 function renderTablePedidos() {
+  if (isAdmin() && document.getElementById('sf-enc-banner')) sfeBanner();   // encargos de Sin Frontera (cada 60 s como mucho)
   const wrap = document.getElementById('table-pedidos');
   if (!wrap) return;
   const filtered = STATE.pedidos.filter(p => {
@@ -15632,6 +15645,12 @@ async function confirmCargarPedido() {
   // Comprobante que ya es el pago de otro pedido: casi siempre es un error (el mismo pago no puede contar dos veces).
   const compUsado = (!efectivo && !pmCuentaSF(m) && !(m.pagoMetodo === 'pendiente' && isAdmin()) && m._compOcr && Array.isArray(m._compOcr.usado_en)) ? m._compOcr.usado_en : [];
   if (compUsado.length && !(await showConfirm('Ese comprobante ya está cargado en el pedido ' + compUsado.map(u => '#' + u.numero + (u.cartel ? ' (' + u.cartel + ')' : '')).join(', ') + '.\n\n¿Seguro que es el pago de este pedido?', { title: 'Comprobante repetido', variant: 'warn', confirmLabel: 'Sí, es este', cancelLabel: 'Cambiarlo' }))) return;
+  // Desde un encargo de Sin Frontera: si mientras tanto lo cancelaron o ya se cargó (otra pestaña), no se guarda otro pedido.
+  if (isAdmin() && m._sfEnc) {
+    await sfeCargar({ silent: true });
+    const e0 = ((STATE.sfEnc && STATE.sfEnc.encargos) || []).find(y => y.id === m._sfEnc.id);
+    if (e0 && e0.estado !== 'nuevo') { toast(e0.estado === 'cargado' ? 'Ese encargo ya está cargado como el pedido #' + e0.pedido_numero + ': no se guardó otro.' : 'Sin Frontera canceló ese encargo (o lo descartaste): no se guardó el pedido.'); return; }
+  }
   const carteles = (m.carteles||[]).filter(c => String(c.cartel||'').trim());
   STATE.pedidoModalSaving = true; render();
   try {
@@ -15691,8 +15710,8 @@ async function confirmCargarPedido() {
     toast(`Pedido #${j.numero} cargado ✓ (${nuevos.length} cartel${nuevos.length>1?'es':''})`);
     if (j.aviso_entrega) niToast(j.aviso_entrega, { error: true, ms: 9000 });
     if (isAdmin() && m._sfEnc && nuevos.length) sfFetch('/admin/sinfrontera/encargo/cargado', { id: m._sfEnc.id, numero: j.numero, pedido_ids: nuevos.map(x => x.idx) })
-      .then(() => { toast('El encargo de Sin Frontera quedó cargado como el pedido #' + j.numero); sfeBanner(true); })
-      .catch(e => niToast('El pedido se guardó, pero no pude marcar el encargo como cargado (' + (e.message || 'error') + '): descartalo a mano.', { error: true, ms: 9000 }));
+      .then(r => { if (STATE.sfEnc && r && r.encargo) STATE.sfEnc.encargos = STATE.sfEnc.encargos.map(y => y.id === r.encargo.id ? r.encargo : y); toast('El encargo de Sin Frontera quedó cargado como el pedido #' + j.numero); sfeBanner(true); })
+      .catch(e => niToast('Se guardó el pedido #' + j.numero + ', pero el encargo ya no estaba pendiente (' + (e.message || 'error') + '): revisá que no esté repetido.', { error: true, ms: 10000 }));
     if (m.pagoMetodo === 'pendiente' && isAdmin() && nuevos[0] && nuevos[0].cobrarEl) niToast(`Cargado sin pago: te recuerdo cobrarlo el ${nuevos[0].cobrarEl.slice(8, 10)}/${nuevos[0].cobrarEl.slice(5, 7)} por WhatsApp`);
     // Cliente Sin Frontera (solo admin): lo ven en su usuario, "Mis pedidos". El server ya lo vinculó en el alta
     // (sf_vinculado); si no (worker viejo o falló), se reintenta como antes.
