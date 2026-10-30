@@ -22068,8 +22068,22 @@ const SF_CORTE_ESTADOS = ['pedido', 'en_corte', 'listo', 'entregado', 'cancelado
 // Frontera). Lo eligen Gaspar y Fran al cargar o editar ('otro' con el nombre, obligatorio); si lo carga Sin Frontera, es suyo
 // sí o sí. BLINDAJE: el usuario sinfrontera solo ve y toca las filas 'sinfrontera' (sfCorteEsSF): lista, archivos, estado y
 // edición; cualquier otro id le da 404 como si no existiera.
+// Desde el 30-oct Sin Frontera también elige, al cargar, si es para un trabajo suyo o de Neon Infinito (Gaspar: "ellos también
+// me pasan diseños para mis trabajos"): los de Neon quedan 'ni_corporeo' y los siguen viendo, pero SOLO los que cargaron ellos
+// (creado_por 'Sin Frontera' o '<quien> · Sin Frontera'); los corpóreos nuestros que cargan Gaspar o Fran, nunca.
 const SF_CORTE_CLIENTES = { sinfrontera: 'Sin Frontera', ni_corporeo: 'Corpóreos nuestros', otro: 'Otro cliente' };
-function sfCorteEsSF(r) { return !!r && r.cliente_tipo === 'sinfrontera'; }
+const SF_CORTE_CLIENTES_SF = ['sinfrontera', 'ni_corporeo'];
+function sfCorteCargoSF(creadoPor) { const c = String(creadoPor || ''); return c === 'Sin Frontera' || c.endsWith(' · Sin Frontera'); }
+function sfCorteEsSF(r) { return !!r && (r.cliente_tipo === 'sinfrontera' || (r.cliente_tipo === 'ni_corporeo' && sfCorteCargoSF(r.creado_por))); }
+// Lo mismo en SQL, para los WHERE de las rutas de Sin Frontera (pegado con AND).
+const SF_CORTE_SQL_SF = " AND (cliente_tipo = 'sinfrontera' OR (cliente_tipo = 'ni_corporeo' AND (creado_por = 'Sin Frontera' OR creado_por LIKE '% · Sin Frontera')))";
+// El trabajo que elige Sin Frontera (suyo o de Neon Infinito). Sin el campo (la app vieja en caché): al cargar, suyo; al editar,
+// el que tenía.
+function sfCorteClienteSF(body, prevTipo) {
+  if (body.cliente_tipo === undefined || body.cliente_tipo === null) return { tipo: prevTipo, nombre: '' };
+  const tipo = String(body.cliente_tipo);
+  return SF_CORTE_CLIENTES_SF.includes(tipo) ? { tipo, nombre: '' } : { motivo: 'Elegí para qué trabajo es: uno de ustedes o uno de Neon Infinito.' };
+}
 // Para los avisos: 'de Sin Frontera' / 'para nuestros corpóreos' / 'del cliente Juan Pérez'.
 function sfCorteClienteDe(r) {
   const t = r && r.cliente_tipo;
@@ -22377,7 +22391,7 @@ async function sfArchivoKey(env, qs, opts = {}) {
     // Pedido borrado (corte/borrar): ninguno (404), aunque el archivo siga en R2 para el "Deshacer".
     const c = parseInt(qs.get('c'), 10) || 0;
     if (c) {
-      const r = await env.DB.prepare('SELECT archivos FROM sf_cortes WHERE id = ? AND borrado_at IS NULL' + (opts.soloSF ? " AND cliente_tipo = 'sinfrontera'" : '')).bind(c).first();
+      const r = await env.DB.prepare('SELECT archivos FROM sf_cortes WHERE id = ? AND borrado_at IS NULL' + (opts.soloSF ? SF_CORTE_SQL_SF : '')).bind(c).first();
       let a = []; try { a = JSON.parse((r && r.archivos) || '[]'); } catch (_) {}
       const arr = Array.isArray(a) ? a : [], v = String(qs.get('v') || '');
       const x = v ? arr.find(y => y && sfCorteArchV(y.key) === v) : arr[i >= 0 ? i : 0], k = x ? String(x.key || '') : '';
@@ -33367,7 +33381,7 @@ const handler = {
         // Fran (29-oct). El cliente lo eligen Gaspar y Fran (sfCorteClienteBody); el de Sin Frontera es suyo sí o sí.
         if (request.method === 'POST' && path === '/admin/sinfrontera/corte') {
           let body; try { body = await request.json(); } catch { body = {}; }
-          const cli = sfExt ? { tipo: 'sinfrontera', nombre: '' } : sfCorteClienteBody(body, { tipo: 'sinfrontera', nombre: '' });
+          const cli = sfExt ? sfCorteClienteSF(body, 'sinfrontera') : sfCorteClienteBody(body, { tipo: 'sinfrontera', nombre: '' });
           if (cli.motivo) return json({ error: 'datos', motivo: cli.motivo }, 400);
           const nombre = sfCorteNombre(body.nombre);
           const material = String(body.material || ''), col = sfCorteColor(body.color, body.color_hex), espesor = sfCorteEspesor(body.espesor);
@@ -33398,7 +33412,7 @@ const handler = {
             id = (r && r.meta && r.meta.last_row_id) || 0;
           } catch (_) { return json({ error: 'db', motivo: 'No se pudo guardar el pedido. Probá de nuevo.' }, 500); }
           const propio = !SF_CORTE_COLORES[col.color];
-          if (propio) { try { await sfCorteColorGuardar(env, col.color, col.hex, cli.tipo); } catch (_) {} }
+          if (propio) { try { await sfCorteColorGuardar(env, col.color, col.hex, sfExt ? 'sinfrontera' : cli.tipo); } catch (_) {} }
           // A Gaspar: lo que cargan Sin Frontera o Fran (lo suyo ya lo sabe). A Fran: lo que cargan Sin Frontera o Gaspar (29-oct:
           // si lo cargaba Gaspar, el corte de otro cliente no le llegaba a Fran por ningún lado).
           const det = SF_CORTE_MATERIALES[material] + ' ' + col.nombre.toLowerCase() + (propio ? ' (color nuevo)' : '')
@@ -33406,7 +33420,7 @@ const handler = {
             + (acl ? '. Aclaración: ' + acl.replace(/\s+/g, ' ').slice(0, 300) : '');
           const de = sfCorteClienteDe({ cliente_tipo: cli.tipo, cliente_nombre: cli.nombre });
           const txtG = !(sfExt || fran) ? '' : fran ? 'Fran cargó el pedido de corte "' + nombre + '" ' + de + ' (#' + id + '): ' + det + '. Lo ves en el CRM: Corte > Pedidos de corte.'
-            : 'Sin Frontera te encargó el corte "' + nombre + '" (#' + id + (quien ? ', lo pidió ' + quien : '') + '): ' + det + '. Lo ves en el CRM: Corte > Pedidos de corte.';
+            : 'Sin Frontera te encargó el corte "' + nombre + '"' + (cli.tipo === 'ni_corporeo' ? ' para un trabajo de Neon Infinito' : '') + ' (#' + id + (quien ? ', lo pidió ' + quien : '') + '): ' + det + '. Lo ves en el CRM: Corte > Pedidos de corte.';
           const pr = txtG ? avisoGasparServicio(env, txtG, { tipo: 'sinfrontera_corte', prioridad: 'P2', clave: 'sfc:' + id }).catch(() => {}) : Promise.resolve();
           const pf = fran ? Promise.resolve() : sfCorteAvisoFran(env, 'Nuevo pedido de corte ' + de + ': "' + nombre + '" (#' + id + (sfExt ? '' : ', lo cargó ' + (String(session.user || '').trim() || 'Gaspar')) + '): ' + det + '. Lo ves en el CRM, en Pedidos de corte.');
           try { ctx.waitUntil(Promise.all([pr, pf])); } catch (_) { await Promise.all([pr, pf]); }
@@ -33417,7 +33431,7 @@ const handler = {
         // Frontera: solo los suyos (y solo sus colores propios); Gaspar y Fran, los de todos los clientes.
         if (request.method === 'GET' && path === '/admin/sinfrontera/cortes') {
           let rows = [];
-          try { rows = (await env.DB.prepare('SELECT * FROM sf_cortes WHERE borrado_at IS NULL' + (sfExt ? " AND cliente_tipo = 'sinfrontera'" : '') + ' ORDER BY id DESC LIMIT 300').all()).results || []; }
+          try { rows = (await env.DB.prepare('SELECT * FROM sf_cortes WHERE borrado_at IS NULL' + (sfExt ? SF_CORTE_SQL_SF : '') + ' ORDER BY id DESC LIMIT 300').all()).results || []; }
           catch (_) { return json({ error: 'db', motivo: 'No se pudieron leer los pedidos. Probá de nuevo.' }, 500); }
           return json({ ok: true, cortes: (sfExt ? rows.filter(sfCorteEsSF) : rows).map(sfCorteFila), colores: await sfCorteColoresPropios(env, { soloSF: sfExt }) });
         }
@@ -33436,7 +33450,7 @@ const handler = {
           const por = sfExt ? (quien ? quien + ' · Sin Frontera' : 'Sin Frontera') : (fran ? 'Fran' : String(session.user || ''));
           const nowIso = new Date().toISOString();
           let ch = 0;
-          try { const u = await env.DB.prepare('UPDATE sf_cortes SET estado = ?, estado_at = ?, estado_por = ? WHERE id = ? AND estado = ? AND borrado_at IS NULL' + (sfExt ? " AND cliente_tipo = 'sinfrontera'" : '')).bind(estado, nowIso, por, id, row.estado).run(); ch = (u && u.meta && u.meta.changes) || 0; }
+          try { const u = await env.DB.prepare('UPDATE sf_cortes SET estado = ?, estado_at = ?, estado_por = ? WHERE id = ? AND estado = ? AND borrado_at IS NULL' + (sfExt ? SF_CORTE_SQL_SF : '')).bind(estado, nowIso, por, id, row.estado).run(); ch = (u && u.meta && u.meta.changes) || 0; }
           catch (_) { return json({ error: 'db', motivo: 'No se pudo guardar. Probá de nuevo.' }, 500); }
           if (!ch) {
             let r3 = null; try { r3 = await env.DB.prepare('SELECT borrado_at FROM sf_cortes WHERE id = ?').bind(id).first(); } catch (_) {}
@@ -33474,7 +33488,7 @@ const handler = {
           const baseEd = typeof body.editado_at === 'string' ? body.editado_at : null;
           if (baseEd !== null && baseEd !== String(row.editado_at || '')) return json({ error: 'cambio', motivo: 'Alguien lo editó recién. Tocá Actualizar y volvé a abrirlo para ver cómo quedó.', corte: sfCorteFila(row) }, 409);
           const cliPrev = { tipo: row.cliente_tipo, nombre: String(row.cliente_nombre || '') };
-          const cli = sfExt ? cliPrev : sfCorteClienteBody(body, cliPrev);
+          const cli = sfExt ? (SF_CORTE_CLIENTES_SF.includes(cliPrev.tipo) ? sfCorteClienteSF(body, cliPrev.tipo) : cliPrev) : sfCorteClienteBody(body, cliPrev);
           if (cli.motivo) return json({ error: 'datos', motivo: cli.motivo }, 400);
           const nomIn = String(body.nombre == null ? '' : body.nombre).trim();
           const nombre = nomIn ? sfCorteNombre(nomIn) : String(row.nombre || '').trim();
@@ -33515,7 +33529,7 @@ const handler = {
           // Con el estado y la última edición que se leyeron: si Gaspar lo pasó a Listo o alguien lo editó en el medio, no se pisa.
           let ch = 0;
           try {
-            const u = await env.DB.prepare("UPDATE sf_cortes SET nombre = ?, material = ?, color = ?, color_hex = ?, espesor = ?, fecha_necesita = ?, aclaraciones = ?, archivos = ?, editado_at = ?, editado_por = ?, cliente_tipo = ?, cliente_nombre = ? WHERE id = ? AND estado = ? AND IFNULL(editado_at, '') = ? AND borrado_at IS NULL" + (sfExt ? " AND cliente_tipo = 'sinfrontera'" : ''))
+            const u = await env.DB.prepare("UPDATE sf_cortes SET nombre = ?, material = ?, color = ?, color_hex = ?, espesor = ?, fecha_necesita = ?, aclaraciones = ?, archivos = ?, editado_at = ?, editado_por = ?, cliente_tipo = ?, cliente_nombre = ? WHERE id = ? AND estado = ? AND IFNULL(editado_at, '') = ? AND borrado_at IS NULL" + (sfExt ? SF_CORTE_SQL_SF : ''))
               .bind(nombre, material, col.color, col.hex || null, espesor, fecha, acl, JSON.stringify(arch), nowIso, por, cli.tipo, cli.nombre || null, id, row.estado, String(row.editado_at || '')).run();
             ch = (u && u.meta && u.meta.changes) || 0;
           } catch (_) { return json({ error: 'db', motivo: 'No se pudo guardar. Probá de nuevo.' }, 500); }
@@ -33525,7 +33539,7 @@ const handler = {
             if (r3 && r3.borrado_at) return json({ error: 'borrado', motivo: 'Ese pedido se borró: ya no se puede editar.' }, 404);
             return json({ error: 'cambio', motivo: 'Alguien lo cambió recién. Tocá Actualizar y volvé a abrirlo para ver cómo quedó.', corte: r3 ? sfCorteFila(r3) : null }, 409);
           }
-          if (!SF_CORTE_COLORES[col.color]) { try { await sfCorteColorGuardar(env, col.color, col.hex, cli.tipo); } catch (_) {} }
+          if (!SF_CORTE_COLORES[col.color]) { try { await sfCorteColorGuardar(env, col.color, col.hex, sfExt ? 'sinfrontera' : cli.tipo); } catch (_) {} }
           // Edita Sin Frontera → aviso a Gaspar con lo que cambió, por el mismo camino que el alta (y a Fran, que es quien corta).
           // Si cambió solo el nombre (ponerles nombre a los viejos, corregirlo), no: no cambia qué se corta, y de a un pedido por vez
           // eran dos WhatsApp por cada uno (plantillas pagas con la ventana cerrada). Queda en la lista: "editado … (quién)".

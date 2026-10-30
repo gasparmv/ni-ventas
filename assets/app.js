@@ -9228,6 +9228,10 @@ function sfcGestor() { return isAdmin() || isFranOnly(); }   // Gaspar y Fran: e
 function sfcCliTipo(c) { return (c && c.cliente_tipo) || 'sinfrontera'; }   // sin el campo (la lista de antes): de Sin Frontera
 function sfcCliTxt(c) { const t = sfcCliTipo(c); return t === 'otro' ? (String(c.cliente_nombre || '').trim() || 'Otro cliente') : sfcLbl(SFC_CLIENTES, t); }
 function sfcCliChip(c) { const x = SFC_CLIENTES.find(y => y[0] === sfcCliTipo(c)) || SFC_CLIENTES[0]; return sfPill(sfcCliTxt(c), x[2], 'Cliente: ' + sfcCliTxt(c)); }
+// Sin Frontera elige si el corte es para un trabajo suyo o de Neon Infinito (Gaspar 30-oct: "ellos también me pasan diseños para
+// mis trabajos"). Los de Neon quedan 'ni_corporeo' y los siguen viendo (solo los que cargaron ellos, lo filtra el worker).
+const SFC_TRABAJO_SF = [['sinfrontera', 'Un trabajo de ustedes'], ['ni_corporeo', 'Un trabajo de Neon Infinito']];
+function sfcEligeCliente() { return sfcGestor() || isSinFronteraOnly(); }
 const SFC_COLORES = [['blanco_opalino', 'Blanco opalino'], ['transparente', 'Transparente'], ['negro', 'Negro']];
 // Muestra de cada color ("con colorcito", Gaspar 22-oct). Transparente va cuadriculado; un color propio, con el que eligieron
 // en el selector.
@@ -9369,6 +9373,7 @@ function sfcChips(attr, lista, sel) {
 // ¿Para qué cliente es? (Gaspar y Fran). Con "Otro cliente", su nombre (obligatorio). Se repinta solo (sfcPintarCliente).
 function sfcClienteHtml() {
   const F = sfcForm();
+  if (isSinFronteraOnly()) return `<span class="sfc-lbl">¿Para qué trabajo es?</span><div class="sfc-chips">${sfcChips('sfc-cli', SFC_TRABAJO_SF, F.cliTipo)}</div>`;
   return `<span class="sfc-lbl">¿Para qué cliente es?</span><div class="sfc-chips">${sfcChips('sfc-cli', SFC_CLIENTES, F.cliTipo)}</div>`
     + (F.cliTipo === 'otro' ? `<input class="nc-input" data-sfc-cli-nom maxlength="80" autocomplete="off" placeholder="Nombre del cliente" aria-label="Nombre del cliente" value="${escapeHtml(F.cliNombre || '')}">` : '');
 }
@@ -9391,7 +9396,7 @@ function sfcFormHtml() {
   </form>`;
   }
   return `<form class="sfc-form" data-sfc-form novalidate>
-    ${sfcGestor() ? `<div class="sfc-campo" data-sfc-cli-box>${sfcClienteHtml()}</div>` : ''}
+    ${sfcEligeCliente() ? `<div class="sfc-campo" data-sfc-cli-box>${sfcClienteHtml()}</div>` : ''}
     ${nombre}
     <input type="file" multiple data-sfc-file hidden>
     <div class="sfc-drop" data-sfc-drop tabindex="0" role="button" aria-label="Elegir los archivos del corte">
@@ -9540,12 +9545,14 @@ async function sfcEnviar() {
   // Cliente (Gaspar y Fran): obligatorio; "Otro cliente", con el nombre. Va siempre (sin cliente_tipo el worker lo toma como la
   // app vieja: Sin Frontera al cargar, el que tenía al editar). Sin Frontera no lo manda: lo suyo es suyo.
   const gestor = sfcGestor(), cliNombre = String(F.cliNombre || '').replace(/\s+/g, ' ').trim();
+  const sfTrab = isSinFronteraOnly() && !(STATE.sfcEditId && sfcSoloNombre(sfcCorte(STATE.sfcEditId)));
+  if (sfTrab && !SFC_TRABAJO_SF.some(x => x[0] === F.cliTipo)) return err('Elegí para qué trabajo es: uno de ustedes o uno de Neon Infinito.');
   if (gestor && !SFC_CLIENTES.some(x => x[0] === F.cliTipo)) return err('Elegí para qué cliente es: Sin Frontera, corpóreos nuestros u otro cliente.');
   if (gestor && F.cliTipo === 'otro' && !sfcNombreOk(cliNombre)) {
     const n = document.querySelector('.sfc-wrap [data-sfc-cli-nom]'); if (n) n.focus();
     return err('Poné el nombre del cliente.');
   }
-  const cli = gestor ? { cliente_tipo: F.cliTipo, cliente_nombre: F.cliTipo === 'otro' ? cliNombre : '' } : {};
+  const cli = gestor ? { cliente_tipo: F.cliTipo, cliente_nombre: F.cliTipo === 'otro' ? cliNombre : '' } : sfTrab ? { cliente_tipo: F.cliTipo } : {};
   const nombre = String(F.nombre || '').replace(/\s+/g, ' ').trim();
   if (!sfcNombreOk(nombre)) {
     const n = document.querySelector('.sfc-wrap [data-sfc-nombre]'); if (n) n.focus();
@@ -9650,7 +9657,7 @@ function sfcFilaHtml(c) {
       <span class="sfc-acc">${acc}</span>
     </div>
     <div class="sfc-det">
-      ${sfcGestor() ? `<div class="sfc-cli" style="order:45;flex:1 1 100%;min-width:0">${sfcCliChip(c)}</div>` : ''}
+      ${sfcGestor() ? `<div class="sfc-cli" style="order:45;flex:1 1 100%;min-width:0">${sfcCliChip(c)}</div>` : isSinFronteraOnly() && sfcCliTipo(c) === 'ni_corporeo' ? `<div class="sfc-cli" style="order:45;flex:1 1 100%;min-width:0">${sfPill('Trabajo de Neon Infinito', SF_COLOR_NI, 'Lo cargaron para un trabajo de Neon Infinito')}</div>` : ''}
       <div class="sfc-mat">${escapeHtml(sfcLbl(SFC_MATERIALES, c.material))} ${sfcMuestra(c.color, c.color_hex)}${escapeHtml(sfcLbl(SFC_COLORES, c.color).toLowerCase() + ' · ' + sfcEspTxt(c.espesor) + ' mm')}</div>
       <div class="sfc-archs">${arch || '<span class="muted">Sin archivos</span>'}</div>
       ${c.aclaraciones ? `<div class="sfc-acl-txt">${escapeHtml(c.aclaraciones)}</div>` : ''}
